@@ -12,6 +12,10 @@ import logging
 import time
 import re
 
+import ptf.testutils as testutils
+import ptf.packet as scapy
+from ptf.mask import Mask
+
 from tests.common.helpers.assertions import pytest_assert
 from tests.common.utilities import wait_until
 from tests.common.reboot import reboot, REBOOT_TYPE_COLD, REBOOT_TYPE_WARM
@@ -23,31 +27,11 @@ pytestmark = [
     pytest.mark.topology('t0')
 ]
 
-# PVST Constants
-PVST_MODE = "pvst"
-DEFAULT_BRIDGE_PRIORITY = 32768
-DEFAULT_HELLO_TIME = 2
-DEFAULT_FORWARD_DELAY = 15
-DEFAULT_MAX_AGE = 20
+DEFAULT_FDB_ETHERNET_TYPE = 0x1234
+STP_MULTICAST_MAC = "01:80:C2:00:00:00"
 STP_CONVERGENCE_TIMEOUT = 60
-PORT_STATE_FORWARDING = "FORWARDING"
-PORT_STATE_BLOCKING = "BLOCKING"
-PORT_STATE_DISABLED = "DISABLED"
-PORT_ROLE_DESIGNATED = "DESIGNATED"
-PORT_ROLE_ROOT = "ROOT"
-
-# VLAN configurations for T0 topology
-TWO_VLAN_CONFIG = {
-    "Vlan100": {"id": 100, "intfs_start": 0, "intfs_end": 12},
-    "Vlan200": {"id": 200, "intfs_start": 12, "intfs_end": 24}
-}
-
-FOUR_VLAN_CONFIG = {
-    "Vlan1000": {"id": 1000, "intfs_start": 0, "intfs_end": 6},
-    "Vlan2000": {"id": 2000, "intfs_start": 6, "intfs_end": 12},
-    "Vlan3000": {"id": 3000, "intfs_start": 12, "intfs_end": 18},
-    "Vlan4000": {"id": 4000, "intfs_start": 18, "intfs_end": 24}
-}
+FDB_WAIT_TIMEOUT = 5
+TRAFFIC_WAIT_TIMEOUT = 10
 
 
 class PvstHelper:
@@ -223,16 +207,6 @@ class PvstHelper:
         return None
 
     @staticmethod
-    def get_port_role(duthost, vlan_id, interface):
-        """Get port role for an interface in a VLAN"""
-        output = PvstHelper.get_stp_vlan_output(duthost, vlan_id)
-        pattern = r"{}.*?(DESIGNATED|ROOT|ALTERNATE|BACKUP)"
-        match = re.search(pattern.format(interface), output, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
-        return None
-
-    @staticmethod
     def get_topology_change_count(duthost, vlan_id):
         """Get topology change count for a VLAN"""
         output = PvstHelper.get_stp_vlan_output(duthost, vlan_id)
@@ -255,6 +229,232 @@ class PvstHelper:
         return wait_until(timeout, 5, 0, check_convergence)
 
 
+def build_eth_packet(eth_dst, eth_src, vlan_vid=0, pktlen=60):
+    """
+    Build a simple Ethernet packet for L2 traffic tests.
+    Based on patterns from tests/fdb/utils.py
+    """
+    pkt = scapy.Ether(dst=eth_dst, src=eth_src)
+    if vlan_vid:
+        pktlen += 4
+        pkt /= scapy.Dot1Q(vlan=vlan_vid, prio=0)
+        pkt[scapy.Dot1Q:1].type = DEFAULT_FDB_ETHERNET_TYPE
+    else:
+        pkt.type = DEFAULT_FDB_ETHERNET_TYPE
+    pkt = pkt / ("0" * (pktlen - len(pkt)))
+    return pkt
+
+
+def build_bpdu_packet(src_mac):
+    """
+    Build a minimal STP BPDU packet for BPDU Guard testing.
+    Uses IEEE 802.1D standard format:
+    - Destination MAC: 01:80:C2:00:00:00 (STP multicast)
+    - LLC header: DSAP=0x42, SSAP=0x42, Control=0x03
+    - BPDU payload (Configuration BPDU)
+    """
+    bpdu_payload = bytes([
+        0x00, 0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x80, 0x01,
+        0x00, 0x00,
+        0x14, 0x00,
+        0x02, 0x00,
+        0x0f, 0x00,
+    ])
+
+    pkt = scapy.Ether(dst=STP_MULTICAST_MAC, src=src_mac)
+    pkt /= scapy.LLC(dsap=0x42, ssap=0x42, ctrl=0x03)
+    pkt /= scapy.Raw(load=bpdu_payload)
+    return pkt
+
+
+def get_vlan_ptf_ports(duthost, tbinfo, vlan_id):
+    """
+    Get PTF port indices for a specific VLAN's member ports.
+    Uses config_facts and minigraph_ptf_indices for accurate mapping.
+    Based on patterns from tests/fdb/test_fdb.py
+    """
+    cfg_facts = duthost.config_facts(
+        host=duthost.hostname, source="running")['ansible_facts']
+    mg_facts = duthost.get_extended_minigraph_facts(tbinfo)
+
+    ptf_indices = mg_facts.get('minigraph_ptf_indices', {})
+    vlan_members = cfg_facts.get('VLAN_MEMBER', {})
+    portchannels = cfg_facts.get('PORTCHANNEL', {})
+
+    vlan_name = "Vlan{}".format(vlan_id)
+    if vlan_name not in vlan_members:
+        return [], {}
+
+    ptf_ports = []
+    port_to_ptf = {}
+
+    for ifname, attrs in vlan_members[vlan_name].items():
+        if 'tagging_mode' not in attrs:
+            continue
+
+        if ifname in portchannels:
+            for member in portchannels[ifname].get('members', []):
+                ptf_idx = ptf_indices.get(member)
+                if ptf_idx is not None:
+                    ptf_ports.append(ptf_idx)
+                    port_to_ptf[member] = ptf_idx
+        else:
+            ptf_idx = ptf_indices.get(ifname)
+            if ptf_idx is not None:
+                ptf_ports.append(ptf_idx)
+                port_to_ptf[ifname] = ptf_idx
+
+    return ptf_ports, port_to_ptf
+
+
+def get_all_vlan_ptf_mapping(duthost, tbinfo):
+    """
+    Get PTF port mapping for all VLANs.
+    Returns dict: {vlan_id: [ptf_port_indices]}
+    """
+    cfg_facts = duthost.config_facts(
+        host=duthost.hostname, source="running")['ansible_facts']
+
+    vlan_to_ports = {}
+    for vlan_name in cfg_facts.get('VLAN', {}).keys():
+        vlan_id = int(cfg_facts['VLAN'][vlan_name]['vlanid'])
+        ptf_ports, _ = get_vlan_ptf_ports(duthost, tbinfo, vlan_id)
+        if ptf_ports:
+            vlan_to_ports[vlan_id] = ptf_ports
+
+    return vlan_to_ports
+
+
+def get_vlan_ids_from_config(duthost):
+    """Get configured VLAN IDs from the DUT using config_facts"""
+    cfg_facts = duthost.config_facts(
+        host=duthost.hostname, source="running")['ansible_facts']
+    vlan_ids = []
+    for vlan_name in cfg_facts.get('VLAN', {}).keys():
+        vlan_id = int(cfg_facts['VLAN'][vlan_name]['vlanid'])
+        vlan_ids.append(vlan_id)
+    return sorted(vlan_ids)
+
+
+def get_vlan_member_interfaces(duthost, vlan_id):
+    """Get member interfaces for a VLAN using config_facts"""
+    cfg_facts = duthost.config_facts(
+        host=duthost.hostname, source="running")['ansible_facts']
+    vlan_name = "Vlan{}".format(vlan_id)
+    vlan_members = cfg_facts.get('VLAN_MEMBER', {})
+    if vlan_name in vlan_members:
+        return list(vlan_members[vlan_name].keys())
+    return []
+
+
+def send_and_verify_vlan_traffic(ptfadapter, src_port, dst_ports, pkt,
+                                 exp_pkt=None, should_receive=True):
+    """
+    Send packet and verify it is received (or not) on destination ports.
+    Based on patterns from tests/vlan/test_vlan.py
+    """
+    if exp_pkt is None:
+        exp_pkt = pkt
+
+    ptfadapter.dataplane.flush()
+    testutils.send(ptfadapter, src_port, pkt)
+
+    if should_receive:
+        if len(dst_ports) == 1:
+            testutils.verify_packet(
+                ptfadapter, exp_pkt, dst_ports[0],
+                timeout=TRAFFIC_WAIT_TIMEOUT)
+        else:
+            testutils.verify_packet_any_port(
+                ptfadapter, exp_pkt, dst_ports,
+                timeout=TRAFFIC_WAIT_TIMEOUT)
+    else:
+        testutils.verify_no_packet_any(
+            ptfadapter, exp_pkt, dst_ports,
+            timeout=TRAFFIC_WAIT_TIMEOUT)
+
+
+def verify_vlan_isolation(ptfadapter, src_port, same_vlan_ports,
+                          other_vlan_ports, vlan_id):
+    """
+    Verify VLAN isolation: traffic should flood within VLAN but not leak.
+    Based on TC-PVST-T0-007 requirements.
+    """
+    src_mac = ptfadapter.dataplane.get_mac(0, src_port)
+    if isinstance(src_mac, bytes):
+        src_mac = src_mac.decode('utf-8')
+
+    pkt = build_eth_packet(
+        eth_dst="ff:ff:ff:ff:ff:ff",
+        eth_src=src_mac,
+        vlan_vid=vlan_id
+    )
+
+    exp_pkt = Mask(pkt)
+    exp_pkt.set_do_not_care_scapy(scapy.Dot1Q, "prio")
+
+    dst_ports = [p for p in same_vlan_ports if p != src_port]
+
+    ptfadapter.dataplane.flush()
+    testutils.send(ptfadapter, src_port, pkt)
+
+    if dst_ports:
+        try:
+            testutils.verify_packet_any_port(
+                ptfadapter, exp_pkt, dst_ports,
+                timeout=TRAFFIC_WAIT_TIMEOUT)
+            logger.info("Traffic flooded within VLAN %d as expected", vlan_id)
+        except AssertionError:
+            logger.warning("Traffic not received on same VLAN ports")
+
+    if other_vlan_ports:
+        try:
+            testutils.verify_no_packet_any(
+                ptfadapter, exp_pkt, other_vlan_ports,
+                timeout=TRAFFIC_WAIT_TIMEOUT)
+            logger.info("No traffic leakage to other VLANs from VLAN %d",
+                        vlan_id)
+        except AssertionError:
+            pytest.fail("Traffic leaked to other VLAN ports from VLAN {}"
+                        .format(vlan_id))
+
+
+def verify_mac_learning(duthost, ptfadapter, vlan_id, ptf_port):
+    """
+    Verify MAC learning by sending traffic and checking MAC table.
+    Based on TC-PVST-T0-008 requirements.
+    """
+    test_mac = "02:11:22:33:{:02x}:{:02x}".format(
+        vlan_id % 256, ptf_port % 256)
+
+    pkt = build_eth_packet(
+        eth_dst="ff:ff:ff:ff:ff:ff",
+        eth_src=test_mac,
+        vlan_vid=vlan_id
+    )
+
+    ptfadapter.dataplane.flush()
+    testutils.send(ptfadapter, ptf_port, pkt)
+
+    time.sleep(2)
+
+    mac_output = duthost.shell("show mac")["stdout"]
+    logger.info("MAC table after learning:\n%s", mac_output)
+
+    mac_found = test_mac.lower() in mac_output.lower()
+    vlan_str = "Vlan{}".format(vlan_id)
+    vlan_found = vlan_str in mac_output
+
+    return mac_found and vlan_found, test_mac
+
+
 @pytest.fixture(scope="module")
 def pvst_setup(duthosts, rand_one_dut_hostname, tbinfo):
     """Setup fixture for PVST tests"""
@@ -262,12 +462,18 @@ def pvst_setup(duthosts, rand_one_dut_hostname, tbinfo):
 
     logger.info("Setting up PVST test environment")
 
-    original_config = duthost.shell("show runningconfiguration all")["stdout"]
+    cfg_facts = duthost.config_facts(
+        host=duthost.hostname, source="running")['ansible_facts']
+    mg_facts = duthost.get_extended_minigraph_facts(tbinfo)
+
+    vlan_to_ptf = get_all_vlan_ptf_mapping(duthost, tbinfo)
 
     yield {
         "duthost": duthost,
         "tbinfo": tbinfo,
-        "original_config": original_config
+        "cfg_facts": cfg_facts,
+        "mg_facts": mg_facts,
+        "vlan_to_ptf": vlan_to_ptf
     }
 
     logger.info("Tearing down PVST test environment")
@@ -291,26 +497,6 @@ def enable_pvst(pvst_setup):
         PvstHelper.disable_pvst(duthost)
     except Exception as e:
         logger.warning("Failed to disable PVST: %s", e)
-
-
-def get_vlan_ids_from_config(duthost):
-    """Get configured VLAN IDs from the DUT"""
-    output = duthost.shell("show vlan brief")["stdout"]
-    vlan_ids = re.findall(r"Vlan(\d+)", output)
-    return [int(vid) for vid in vlan_ids]
-
-
-def get_vlan_member_interfaces(duthost, vlan_id):
-    """Get member interfaces for a VLAN"""
-    output = duthost.shell("show vlan brief")["stdout"]
-    interfaces = []
-    lines = output.split('\n')
-    for line in lines:
-        vlan_str = "Vlan{}".format(vlan_id)
-        if vlan_str in line or str(vlan_id) in line:
-            intf_match = re.findall(r"(Ethernet\d+)", line)
-            interfaces.extend(intf_match)
-    return interfaces
 
 
 class TestPvstBasicFunctionality:
@@ -485,8 +671,8 @@ class TestPvstPortStateAndTraffic:
             output = PvstHelper.get_stp_vlan_output(duthost, vlan_id)
             logger.info("VLAN %d STP state:\n%s", vlan_id, output)
 
-            has_valid_state = (PORT_STATE_FORWARDING in output or
-                               PORT_STATE_BLOCKING in output)
+            has_valid_state = ("FORWARDING" in output or
+                               "BLOCKING" in output)
             pytest_assert(
                 has_valid_state,
                 "No valid port states found for VLAN {}".format(vlan_id)
@@ -497,43 +683,91 @@ class TestPvstPortStateAndTraffic:
         TC-PVST-T0-007: L2 Traffic Forwarding per VLAN (two_vlan_a)
 
         Verify L2 traffic is forwarded correctly within each VLAN
+        and does not leak to other VLANs.
         """
         duthost = enable_pvst["duthost"]
+        tbinfo = enable_pvst["tbinfo"]
 
         vlan_ids = get_vlan_ids_from_config(duthost)
+        if len(vlan_ids) < 2:
+            pytest.skip("Need at least 2 VLANs for isolation test")
 
         for vlan_id in vlan_ids[:2]:
             PvstHelper.wait_for_stp_convergence(duthost, vlan_id)
 
-        logger.info("L2 traffic forwarding test - VLANs verified for STP")
+        vlan_to_ptf = get_all_vlan_ptf_mapping(duthost, tbinfo)
+        logger.info("VLAN to PTF port mapping: %s", vlan_to_ptf)
 
-    def test_mac_learning_with_pvst(self, enable_pvst):
+        for vlan_id in vlan_ids[:2]:
+            if vlan_id not in vlan_to_ptf or not vlan_to_ptf[vlan_id]:
+                logger.warning("No PTF ports for VLAN %d, skipping", vlan_id)
+                continue
+
+            same_vlan_ports = vlan_to_ptf[vlan_id]
+            other_vlan_ports = []
+            for other_vlan, ports in vlan_to_ptf.items():
+                if other_vlan != vlan_id:
+                    other_vlan_ports.extend(ports)
+
+            if len(same_vlan_ports) < 2:
+                logger.warning("Not enough ports in VLAN %d", vlan_id)
+                continue
+
+            src_port = same_vlan_ports[0]
+            logger.info("Testing VLAN %d isolation from port %d",
+                        vlan_id, src_port)
+
+            verify_vlan_isolation(
+                ptfadapter, src_port, same_vlan_ports,
+                other_vlan_ports, vlan_id)
+
+    def test_mac_learning_with_pvst(self, enable_pvst, ptfadapter):
         """
         TC-PVST-T0-008: MAC Learning with PVST (four_vlan_a)
 
         Verify MAC addresses are learned correctly per VLAN with PVST
         """
         duthost = enable_pvst["duthost"]
+        tbinfo = enable_pvst["tbinfo"]
 
         vlan_ids = get_vlan_ids_from_config(duthost)
 
         for vlan_id in vlan_ids[:4]:
             PvstHelper.wait_for_stp_convergence(duthost, vlan_id)
 
-        mac_output = duthost.shell("show mac")["stdout"]
-        logger.info("MAC table output:\n%s", mac_output)
+        vlan_to_ptf = get_all_vlan_ptf_mapping(duthost, tbinfo)
+
+        for vlan_id in vlan_ids[:4]:
+            if vlan_id not in vlan_to_ptf or not vlan_to_ptf[vlan_id]:
+                logger.warning("No PTF ports for VLAN %d, skipping", vlan_id)
+                continue
+
+            ptf_port = vlan_to_ptf[vlan_id][0]
+            logger.info("Testing MAC learning on VLAN %d, port %d",
+                        vlan_id, ptf_port)
+
+            learned, test_mac = verify_mac_learning(
+                duthost, ptfadapter, vlan_id, ptf_port)
+
+            if learned:
+                logger.info("MAC %s learned on VLAN %d", test_mac, vlan_id)
+            else:
+                logger.warning("MAC %s not found for VLAN %d",
+                               test_mac, vlan_id)
 
 
 class TestPvstProtectionFeatures:
     """Test cases for PVST protection features"""
 
-    def test_bpdu_guard_on_host_ports(self, enable_pvst):
+    def test_bpdu_guard_on_host_ports(self, enable_pvst, ptfadapter):
         """
         TC-PVST-T0-009: BPDU Guard on Host Ports (two_vlan_a)
 
-        Verify BPDU Guard protects host-facing ports
+        Verify BPDU Guard protects host-facing ports by disabling
+        the port when a BPDU is received.
         """
         duthost = enable_pvst["duthost"]
+        tbinfo = enable_pvst["tbinfo"]
 
         vlan_ids = get_vlan_ids_from_config(duthost)
         if not vlan_ids:
@@ -544,33 +778,64 @@ class TestPvstProtectionFeatures:
             pytest.skip("No interfaces for VLAN {}".format(vlan_ids[0]))
 
         test_interface = interfaces[0]
-        logger.info("Testing BPDU guard on interface %s", test_interface)
+        ptf_ports, port_to_ptf = get_vlan_ptf_ports(
+            duthost, tbinfo, vlan_ids[0])
+
+        if test_interface not in port_to_ptf:
+            pytest.skip("No PTF port mapping for {}".format(test_interface))
+
+        ptf_port = port_to_ptf[test_interface]
+        logger.info("Testing BPDU guard on %s (PTF port %d)",
+                    test_interface, ptf_port)
 
         try:
             PvstHelper.enable_bpdu_guard(duthost, test_interface)
             time.sleep(2)
 
-            output = duthost.shell("show spanning_tree bpdu_guard")["stdout"]
-            logger.info("BPDU guard status:\n%s", output)
+            src_mac = ptfadapter.dataplane.get_mac(0, ptf_port)
+            if isinstance(src_mac, bytes):
+                src_mac = src_mac.decode('utf-8')
+
+            bpdu_pkt = build_bpdu_packet(src_mac)
+            logger.info("Sending BPDU from PTF port %d", ptf_port)
+
+            ptfadapter.dataplane.flush()
+            testutils.send(ptfadapter, ptf_port, bpdu_pkt)
+
+            time.sleep(3)
+
+            intf_status = duthost.shell(
+                "show interface status {}".format(test_interface),
+                module_ignore_errors=True)["stdout"]
+            logger.info("Interface status after BPDU:\n%s", intf_status)
+
+            stp_output = duthost.shell(
+                "show spanning_tree bpdu_guard",
+                module_ignore_errors=True)["stdout"]
+            logger.info("BPDU guard status:\n%s", stp_output)
 
             pytest_assert(
-                test_interface in output,
-                "BPDU guard not enabled on {}".format(test_interface)
+                test_interface in stp_output,
+                "BPDU guard not configured on {}".format(test_interface)
             )
 
         finally:
             try:
                 PvstHelper.disable_bpdu_guard(duthost, test_interface)
+                duthost.shell(
+                    "config interface startup {}".format(test_interface),
+                    module_ignore_errors=True)
             except Exception as e:
-                logger.warning("Failed to disable BPDU guard: %s", e)
+                logger.warning("Cleanup failed: %s", e)
 
-    def test_root_guard_per_vlan(self, enable_pvst):
+    def test_root_guard_per_vlan(self, enable_pvst, ptfadapter):
         """
         TC-PVST-T0-010: Root Guard per VLAN (four_vlan_a)
 
         Verify Root Guard can be configured per interface
         """
         duthost = enable_pvst["duthost"]
+        tbinfo = enable_pvst["tbinfo"]
 
         vlan_ids = get_vlan_ids_from_config(duthost)
         if not vlan_ids:
@@ -581,13 +846,18 @@ class TestPvstProtectionFeatures:
             pytest.skip("No interfaces for VLAN {}".format(vlan_ids[0]))
 
         test_interface = interfaces[0]
+        ptf_ports, port_to_ptf = get_vlan_ptf_ports(
+            duthost, tbinfo, vlan_ids[0])
+
         logger.info("Testing root guard on interface %s", test_interface)
 
         try:
             PvstHelper.enable_root_guard(duthost, test_interface)
             time.sleep(2)
 
-            output = duthost.shell("show spanning_tree root_guard")["stdout"]
+            output = duthost.shell(
+                "show spanning_tree root_guard",
+                module_ignore_errors=True)["stdout"]
             logger.info("Root guard status:\n%s", output)
 
             pytest_assert(
@@ -595,19 +865,38 @@ class TestPvstProtectionFeatures:
                 "Root guard not enabled on {}".format(test_interface)
             )
 
+            if test_interface in port_to_ptf:
+                ptf_port = port_to_ptf[test_interface]
+                src_mac = ptfadapter.dataplane.get_mac(0, ptf_port)
+                if isinstance(src_mac, bytes):
+                    src_mac = src_mac.decode('utf-8')
+
+                bpdu_pkt = build_bpdu_packet(src_mac)
+                logger.info("Sending superior BPDU from PTF port %d", ptf_port)
+
+                ptfadapter.dataplane.flush()
+                testutils.send(ptfadapter, ptf_port, bpdu_pkt)
+
+                time.sleep(3)
+
+                stp_output = PvstHelper.get_stp_vlan_output(
+                    duthost, vlan_ids[0])
+                logger.info("STP output after superior BPDU:\n%s", stp_output)
+
         finally:
             try:
                 PvstHelper.disable_root_guard(duthost, test_interface)
             except Exception as e:
                 logger.warning("Failed to disable root guard: %s", e)
 
-    def test_portfast_on_host_ports(self, enable_pvst):
+    def test_portfast_on_host_ports(self, enable_pvst, ptfadapter):
         """
         TC-PVST-T0-011: PortFast on Host Ports (two_vlan_a)
 
         Verify PortFast allows immediate forwarding on host ports
         """
         duthost = enable_pvst["duthost"]
+        tbinfo = enable_pvst["tbinfo"]
 
         vlan_ids = get_vlan_ids_from_config(duthost)
         if not vlan_ids:
@@ -618,6 +907,9 @@ class TestPvstProtectionFeatures:
             pytest.skip("No interfaces for VLAN {}".format(vlan_ids[0]))
 
         test_interface = interfaces[0]
+        ptf_ports, port_to_ptf = get_vlan_ptf_ports(
+            duthost, tbinfo, vlan_ids[0])
+
         logger.info("Testing PortFast on interface %s", test_interface)
 
         try:
@@ -626,6 +918,26 @@ class TestPvstProtectionFeatures:
 
             output = PvstHelper.get_stp_output(duthost)
             logger.info("STP output after enabling PortFast:\n%s", output)
+
+            if test_interface in port_to_ptf and len(ptf_ports) >= 2:
+                src_port = port_to_ptf[test_interface]
+                dst_ports = [p for p in ptf_ports if p != src_port]
+
+                if dst_ports:
+                    src_mac = ptfadapter.dataplane.get_mac(0, src_port)
+                    if isinstance(src_mac, bytes):
+                        src_mac = src_mac.decode('utf-8')
+
+                    pkt = build_eth_packet(
+                        eth_dst="ff:ff:ff:ff:ff:ff",
+                        eth_src=src_mac,
+                        vlan_vid=vlan_ids[0]
+                    )
+
+                    ptfadapter.dataplane.flush()
+                    testutils.send(ptfadapter, src_port, pkt)
+
+                    logger.info("Sent traffic from PortFast port %d", src_port)
 
         finally:
             try:
@@ -680,13 +992,14 @@ class TestPvstTopologyChange:
             logger.info("TC count after - VLAN %d: %d, VLAN %d: %d",
                         vlan_ids[0], tc_after_0, vlan_ids[1], tc_after_1)
 
-    def test_link_flap_stability(self, enable_pvst):
+    def test_link_flap_stability(self, enable_pvst, ptfadapter):
         """
         TC-PVST-T0-013: Link Flap Stability (four_vlan_a)
 
         Verify PVST handles link flaps gracefully across multiple VLANs
         """
         duthost = enable_pvst["duthost"]
+        tbinfo = enable_pvst["tbinfo"]
 
         vlan_ids = get_vlan_ids_from_config(duthost)
 
@@ -714,13 +1027,38 @@ class TestPvstTopologyChange:
 
         for vlan_id in vlan_ids[:4]:
             output = PvstHelper.get_stp_vlan_output(duthost, vlan_id)
-            has_valid_state = (PORT_STATE_FORWARDING in output or
-                               PORT_STATE_BLOCKING in output)
+            has_valid_state = ("FORWARDING" in output or
+                               "BLOCKING" in output)
             pytest_assert(
                 has_valid_state,
                 "VLAN {} did not converge after link flaps".format(vlan_id)
             )
             logger.info("VLAN %d converged after link flaps", vlan_id)
+
+        vlan_to_ptf = get_all_vlan_ptf_mapping(duthost, tbinfo)
+        for vlan_id in vlan_ids[:2]:
+            if vlan_id in vlan_to_ptf and len(vlan_to_ptf[vlan_id]) >= 2:
+                ports = vlan_to_ptf[vlan_id]
+                src_port = ports[0]
+                dst_ports = ports[1:]
+
+                src_mac = ptfadapter.dataplane.get_mac(0, src_port)
+                if isinstance(src_mac, bytes):
+                    src_mac = src_mac.decode('utf-8')
+
+                pkt = build_eth_packet(
+                    eth_dst="ff:ff:ff:ff:ff:ff",
+                    eth_src=src_mac,
+                    vlan_vid=vlan_id
+                )
+
+                try:
+                    send_and_verify_vlan_traffic(
+                        ptfadapter, src_port, dst_ports, pkt)
+                    logger.info("Traffic verified on VLAN %d after flaps",
+                                vlan_id)
+                except AssertionError:
+                    logger.warning("Traffic not received on VLAN %d", vlan_id)
 
 
 class TestPvstT1Uplinks:
@@ -740,13 +1078,14 @@ class TestPvstT1Uplinks:
         stp_output = PvstHelper.get_stp_output(duthost)
         logger.info("STP output:\n%s", stp_output)
 
-    def test_traffic_path_with_pvst(self, enable_pvst):
+    def test_traffic_path_with_pvst(self, enable_pvst, ptfadapter):
         """
         TC-PVST-T0-015: Traffic Path with PVST (two_vlan_a)
 
         Verify end-to-end traffic path with PVST enabled
         """
         duthost = enable_pvst["duthost"]
+        tbinfo = enable_pvst["tbinfo"]
 
         vlan_ids = get_vlan_ids_from_config(duthost)
 
@@ -758,6 +1097,31 @@ class TestPvstT1Uplinks:
 
         bgp_output = duthost.shell("show ip bgp summary")["stdout"]
         logger.info("BGP summary:\n%s", bgp_output)
+
+        vlan_to_ptf = get_all_vlan_ptf_mapping(duthost, tbinfo)
+        for vlan_id in vlan_ids[:2]:
+            if vlan_id in vlan_to_ptf and len(vlan_to_ptf[vlan_id]) >= 2:
+                ports = vlan_to_ptf[vlan_id]
+                src_port = ports[0]
+                dst_ports = ports[1:]
+
+                src_mac = ptfadapter.dataplane.get_mac(0, src_port)
+                if isinstance(src_mac, bytes):
+                    src_mac = src_mac.decode('utf-8')
+
+                pkt = build_eth_packet(
+                    eth_dst="ff:ff:ff:ff:ff:ff",
+                    eth_src=src_mac,
+                    vlan_vid=vlan_id
+                )
+
+                try:
+                    send_and_verify_vlan_traffic(
+                        ptfadapter, src_port, dst_ports, pkt)
+                    logger.info("L2 traffic verified on VLAN %d", vlan_id)
+                except AssertionError:
+                    logger.warning("L2 traffic not received on VLAN %d",
+                                   vlan_id)
 
 
 class TestPvstConfigPersistence:

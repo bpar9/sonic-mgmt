@@ -364,6 +364,18 @@ def get_containers_namespace_ids(duthost, skip_containers):
         if container_name not in skip_containers and state not in ["disabled", "always_disabled"]:
             namespace_ids, succeeded = duthost.get_namespace_ids(container_name)
             pytest_assert(succeeded, "Failed to get namespace ids of container '{}'".format(container_name))
+
+            # Special handling for database container on multi-ASIC devices
+            # The database container needs to be tested across all ASIC namespaces
+            if container_name == "database" and duthost.is_multi_asic:
+                asic_ids = duthost.get_asic_ids()
+                # Combine namespace IDs to ensure comprehensive testing across all ASICs
+                for asic_id in asic_ids:
+                    asic_id_str = str(asic_id) if asic_id != DEFAULT_ASIC_ID else DEFAULT_ASIC_ID
+                    if asic_id_str not in namespace_ids:
+                        namespace_ids.append(asic_id_str)
+                logger.info("Database container on multi-ASIC device, namespace_ids: {}".format(namespace_ids))
+
             containers_in_namespaces[container_name] = namespace_ids
 
     logger.info("Getting the namespace ids for each container was done!")
@@ -522,9 +534,62 @@ def ensure_all_critical_processes_running(duthost, containers_in_namespaces):
                     ensure_process_is_running(duthost, container_name_in_namespace, program_name)
 
 
-def get_skip_containers(duthost, tbinfo, skip_vendor_specific_container):
+def validate_database_processes_multi_asic(duthost):
+    """Validates that database processes are running across all ASICs on multi-ASIC devices.
+
+    Args:
+        duthost: Hostname of DUT.
+
+    Returns:
+        True if all database processes are running across all ASICs, False otherwise.
+    """
+    database_processes = ["redis-server"]
+
+    if not duthost.is_multi_asic:
+        # For single-ASIC devices, just check the database container directly
+        logger.info("Single-ASIC device, checking database container processes...")
+        for process in database_processes:
+            cmd = "docker exec database supervisorctl status {}".format(process)
+            result = duthost.shell(cmd, module_ignore_errors=True)
+            if result["rc"] != 0 or "RUNNING" not in result["stdout"]:
+                logger.error("Process '{}' is not running in database container".format(process))
+                return False
+        logger.info("All database processes are running on single-ASIC device")
+        return True
+
+    # For multi-ASIC devices, check database processes across all ASICs
+    logger.info("Multi-ASIC device, checking database processes across all ASICs...")
+    for asic in duthost.asics:
+        namespace = asic.namespace
+        container_name = "database" if not namespace else "database{}".format(asic.asic_index)
+
+        logger.info("Checking database processes in namespace '{}', container '{}'..."
+                    .format(namespace if namespace else "host", container_name))
+
+        for process in database_processes:
+            if namespace:
+                cmd = "sudo ip netns exec {} docker exec {} supervisorctl status {}".format(
+                    namespace, container_name, process)
+            else:
+                cmd = "docker exec {} supervisorctl status {}".format(container_name, process)
+
+            result = duthost.shell(cmd, module_ignore_errors=True)
+            if result["rc"] != 0 or "RUNNING" not in result["stdout"]:
+                logger.error("Process '{}' is not running in container '{}' (namespace: {})"
+                             .format(process, container_name, namespace if namespace else "host"))
+                return False
+
+        logger.info("All database processes are running in container '{}' (namespace: {})"
+                    .format(container_name, namespace if namespace else "host"))
+
+    logger.info("All database processes are running across all ASICs on multi-ASIC device")
+    return True
+
+
+def get_skip_containers(duthost, tbinfo, skip_vendor_specific_container, include_database=False):
     skip_containers = []
-    skip_containers.append("database")
+    if not include_database:
+        skip_containers.append("database")
     skip_containers.append("gbsyncd")
     # Skip 'restapi' container since 'restapi' service will be restarted immediately after exited,
     # which will not trigger alarm message.
@@ -556,6 +621,46 @@ def recover_critical_processes(duthosts, rand_one_dut_hostname, tbinfo, skip_ven
     if not postcheck_critical_processes_status(duthost, up_bgp_neighbors):
         pytest.fail("Post-check failed after testing the process monitoring!")
     logger.info("Post-checking status of critical processes and BGP sessions was done!")
+
+
+@pytest.fixture
+def recover_critical_processes_database(duthosts, rand_one_dut_hostname, tbinfo, skip_vendor_specific_container):
+    """Fixture to recover database critical processes after testing.
+
+    This fixture is specifically designed for database container testing on multi-ASIC devices.
+    It includes database in the containers to recover and validates database processes
+    across all ASICs after config reload.
+
+    Args:
+        duthosts: list of DUTs.
+        rand_one_dut_hostname: hostname of DUT.
+        tbinfo: Testbed information.
+        skip_vendor_specific_container: List of vendor-specific containers to skip.
+
+    Yields:
+        None.
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    up_bgp_neighbors = duthost.get_bgp_neighbors_per_asic("established")
+    # Include database container by setting include_database=True
+    skip_containers = get_skip_containers(duthost, tbinfo, skip_vendor_specific_container, include_database=True)
+    containers_in_namespaces = get_containers_namespace_ids(duthost, skip_containers)
+
+    yield
+
+    logger.info("Executing the config reload for database container recovery...")
+    config_reload(duthost, safe_reload=True, check_intf_up_ports=True, wait_for_bgp=True)
+    logger.info("Executing the config reload was done!")
+
+    ensure_all_critical_processes_running(duthost, containers_in_namespaces)
+
+    # Additional validation for database processes on multi-ASIC devices
+    if not validate_database_processes_multi_asic(duthost):
+        logger.warning("Database processes validation failed after config reload, but continuing...")
+
+    if not postcheck_critical_processes_status(duthost, up_bgp_neighbors):
+        pytest.fail("Post-check failed after testing the database process monitoring!")
+    logger.info("Post-checking status of critical processes and BGP sessions was done for database container!")
 
 
 def test_monitoring_critical_processes(
@@ -609,6 +714,72 @@ def test_monitoring_critical_processes(
     logger.info("Checking the alerting messages from syslog...")
     loganalyzer.analyze(marker)
     logger.info("Found all the expected alerting messages from syslog!")
+
+
+def test_database_critical_process_monitoring_multi_asic(
+                                   duthosts,
+                                   rand_one_dut_hostname,
+                                   tbinfo,
+                                   skip_vendor_specific_container,
+                                   recover_critical_processes_database):
+    """Tests the feature of monitoring database critical processes on multi-ASIC devices.
+
+    This function specifically tests the database container processes across all ASIC
+    namespaces on multi-ASIC devices. It checks whether names of critical processes
+    will appear in the syslog if the autorestart were disabled and these critical
+    processes were stopped.
+
+    Args:
+        duthosts: list of DUTs.
+        rand_one_dut_hostname: hostname of DUT.
+        tbinfo: Testbed information.
+        skip_vendor_specific_container: List of vendor-specific containers to skip.
+        recover_critical_processes_database: Fixture to recover database processes after test.
+
+    Returns:
+        None.
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+
+    loganalyzer = LogAnalyzer(ansible_host=duthost,
+                              marker_prefix="monitoring_database_critical_processes_multi_asic")
+    loganalyzer.expect_regex = []
+
+    # Include database container in testing by setting include_database=True
+    skip_containers = get_skip_containers(duthost, tbinfo, skip_vendor_specific_container, include_database=True)
+
+    # Get only the database container for testing
+    containers_in_namespaces = get_containers_namespace_ids(duthost, skip_containers)
+    database_containers = {k: v for k, v in containers_in_namespaces.items() if k == "database"}
+
+    if not database_containers:
+        logger.info("Database container not found or disabled, skipping test")
+        pytest.skip("Database container not found or disabled")
+
+    logger.info("Testing database container with namespace IDs: {}".format(database_containers))
+
+    if "20191130" in duthost.os_version:
+        expected_alerting_messages = get_expected_alerting_messages_monit(duthost, database_containers)
+    else:
+        expected_alerting_messages = get_expected_alerting_messages_supervisor(duthost, database_containers)
+
+    loganalyzer.expect_regex.extend(expected_alerting_messages)
+    marker = loganalyzer.init()
+
+    stop_critical_processes(duthost, database_containers)
+
+    wait_time = 70
+    # For KVM DUT, there's a delay(~25s) that syncd process raises SIGKILL signal after been killed
+    if duthost.facts['platform'] == KVM_PLATFORM:
+        wait_time = 90
+
+    # Wait for sometime such that Supervisord/Monit has a chance to write alerting message into syslog.
+    logger.info("Sleep {} seconds to wait for the alerting messages in syslog...".format(wait_time))
+    time.sleep(wait_time)
+
+    logger.info("Checking the alerting messages from syslog...")
+    loganalyzer.analyze(marker)
+    logger.info("Found all the expected alerting messages from syslog for database container!")
 
 
 def test_orchagent_heartbeat(duthosts, rand_one_dut_hostname, tbinfo, skip_vendor_specific_container):

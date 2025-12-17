@@ -4627,23 +4627,25 @@ srv6/test_srv6_basic_sanity.py::test_traffic_check_normal:
 
 srv6/test_srv6_dataplane.py:
   skip:
-    reason: "Only target mellanox and brcm platform with 202412 image at this time. Skip for non Arista-7060X6-64PE-B-* TH5 SKUs. Skip for t0-isolated-d96u32, t1-isolated-d32/128. Or test case has issue on the t0-isolated-d256u256s2 topo."
+    reason: "Only target mellanox and brcm platform with 202412, master, or 202511+ image at this time. Skip for non Arista-7060X6-64PE-B-* TH5 SKUs. Skip for t0-isolated-d96u32, t1-isolated-d32/128. Skip on Mellanox SPC1-3 platforms. Or test case has issue on the t0-isolated-d256u256s2 topo."
     conditions_logical_operator: or
     conditions:
       - "asic_type not in ['mellanox', 'broadcom', 'vpp']"
-      - "release not in ['202412'] and asic_type not in ['vpp']"
+      - "release not in ['202412', 'master'] and not (release.startswith('2025') and int(release[4:]) >= 511) and asic_type not in ['vpp']"
       - "'Arista-7060X6-64PE' in hwsku and 'Arista-7060X6-64PE-B' not in hwsku"
       - "topo_name in ['t0-isolated-d96u32s2', 't1-isolated-d128', 't1-isolated-d32']"
+      - "asic_gen in ['spc1', 'spc2', 'spc3']"
       - "'t0-isolated-d256u256s2' in topo_name and platform in ['x86_64-nvidia_sn5640-r0']"
 
 srv6/test_srv6_static_config.py:
   skip:
-    reason: "Requires particular image support, skip in PR testing. Skip for non Arista-7060X6-64PE-B-* TH5 SKUs. Skip for t0-isolated-d96u32, t1-isolated-d32/128"
+    reason: "Requires particular image support, skip in PR testing. Skip for non Arista-7060X6-64PE-B-* TH5 SKUs. Skip for t0-isolated-d96u32, t1-isolated-d32/128. Skip on Mellanox SPC1-3 platforms."
     conditions_logical_operator: or
     conditions:
-      - "release not in ['202412'] and asic_type not in ['vpp']"
+      - "release not in ['202412', 'master'] and not (release.startswith('2025') and int(release[4:]) >= 511) and asic_type not in ['vpp']"
       - "'Arista-7060X6-64PE' in hwsku and 'Arista-7060X6-64PE-B' not in hwsku"
       - "topo_name in ['t0-isolated-d96u32s2', 't1-isolated-d128', 't1-isolated-d32']"
+      - "asic_gen in ['spc1', 'spc2', 'spc3']"
 
 srv6/test_srv6_static_config.py::test_uDT46_config:
   skip:
@@ -4653,12 +4655,13 @@ srv6/test_srv6_static_config.py::test_uDT46_config:
 
 srv6/test_srv6_vlan_forwarding.py:
   skip:
-    reason: "Only target mellanox/brcm platform with 202412 image at this time. Skip for non Arista-7060X6-64PE-B-* TH5 SKUs. Skip for t0-isolated-d96u32, t1-isolated-d32/128"
+    reason: "Only target mellanox/brcm platform with 202412, master, or 202511+ image at this time. Skip for non Arista-7060X6-64PE-B-* TH5 SKUs. Skip for t0-isolated-d96u32, t1-isolated-d32/128. Skip on Mellanox SPC1-3 platforms."
     conditions_logical_operator: or
     conditions:
-      - "asic_type not in ['mellanox', 'broadcom'] or release not in ['202412']"
+      - "asic_type not in ['mellanox', 'broadcom'] or (release not in ['202412', 'master'] and not (release.startswith('2025') and int(release[4:]) >= 511))"
       - "'Arista-7060X6-64PE' in hwsku and 'Arista-7060X6-64PE-B' not in hwsku"
       - "topo_name in ['t0-isolated-d96u32s2', 't1-isolated-d128', 't1-isolated-d32']"
+      - "asic_gen in ['spc1', 'spc2', 'spc3']"
 
 srv6/test_srv6_vlan_forwarding.py::test_srv6_uN_no_vlan_flooding[False]:
   xfail:

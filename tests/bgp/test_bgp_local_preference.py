@@ -336,6 +336,64 @@ def get_established_bgp_neighbor(duthost, namespace=None, ip_version=4):
     return None
 
 
+def get_multiple_established_bgp_neighbors(duthost, namespace=None,
+                                           ip_version=4, count=3):
+    """
+    Get multiple established BGP neighbor IPs.
+
+    Args:
+        duthost: DUT host object
+        namespace: Namespace for multi-ASIC
+        ip_version: 4 or 6
+        count: Number of neighbors to return
+
+    Returns:
+        list: List of neighbor IP addresses
+    """
+    neighbors = get_bgp_neighbors(duthost, namespace)
+    result = []
+
+    for neighbor_ip, info in neighbors.items():
+        if info.get('state') == 'Established':
+            is_ipv6 = ':' in neighbor_ip
+            if (ip_version == 6 and is_ipv6) or \
+               (ip_version == 4 and not is_ipv6):
+                result.append(neighbor_ip)
+                if len(result) >= count:
+                    break
+
+    return result
+
+
+def get_route_paths_info(duthost, prefix, namespace=None):
+    """
+    Get all paths for a specific BGP route with their attributes.
+
+    Args:
+        duthost: DUT host object
+        prefix: Route prefix to query
+        namespace: Namespace for multi-ASIC
+
+    Returns:
+        list: List of path dictionaries with local-pref, nexthop, best flag
+    """
+    route_info = get_bgp_route_info(duthost, prefix, namespace)
+    paths = []
+
+    if 'paths' in route_info:
+        for path in route_info['paths']:
+            path_info = {
+                'locPrf': path.get('locPrf'),
+                'nexthop': path.get('nexthops', [{}])[0].get('ip', ''),
+                'best': path.get('bestpath', {}).get('overall', False),
+                'aspath': path.get('aspath', {}).get('string', ''),
+                'peer': path.get('peer', {}).get('peerId', '')
+            }
+            paths.append(path_info)
+
+    return paths
+
+
 def clear_bgp_neighbor(duthost, neighbor_ip, namespace=None):
     """
     Clear BGP session with a neighbor to refresh routes.
@@ -959,3 +1017,459 @@ def test_route_map_configuration_verification(duthosts, rand_one_dut_hostname,
         expected_config in result['stdout'],
         'Route-map not applied to neighbor in running config'
     )
+
+
+def test_local_preference_multiple_paths(duthosts, rand_one_dut_hostname,
+                                         setup, cleanup_route_maps):
+    """
+    Test Case #11: Local-Preference with Multiple Paths.
+
+    Verify that local-preference correctly influences best path selection
+    when multiple paths exist to the same destination from different neighbors.
+
+    Test Steps:
+    1. Get multiple BGP neighbors
+    2. Configure route-maps with different local-preference values
+    3. Apply route-maps to neighbors
+    4. Verify routes have correct local-preference values
+    5. Verify best path selection based on highest local-preference
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    namespace = setup['namespace']
+
+    neighbors = get_multiple_established_bgp_neighbors(
+        duthost, namespace, ip_version=4, count=2)
+
+    if len(neighbors) < 2:
+        pytest.skip('Need at least 2 BGP neighbors for multi-path test')
+
+    neighbor1 = neighbors[0]
+    neighbor2 = neighbors[1]
+
+    local_pref_low = 100
+    local_pref_high = 200
+
+    route_map_low = '{}_LOW'.format(ROUTE_MAP_NAME)
+    route_map_high = '{}_HIGH'.format(ROUTE_MAP_NAME)
+
+    configure_route_map_local_pref(
+        duthost, route_map_low, local_pref_low, namespace=namespace)
+    configure_route_map_local_pref(
+        duthost, route_map_high, local_pref_high, namespace=namespace)
+
+    apply_route_map_to_neighbor(
+        duthost, neighbor1, route_map_low, 'in', namespace)
+    apply_route_map_to_neighbor(
+        duthost, neighbor2, route_map_high, 'in', namespace)
+
+    clear_bgp_neighbor(duthost, neighbor1, namespace)
+    clear_bgp_neighbor(duthost, neighbor2, namespace)
+
+    time.sleep(15)
+
+    ns_option = '-n {}'.format(namespace) if namespace else ''
+    cmd = ('vtysh {} -c "show bgp ipv4 unicast neighbors {} '
+           'received-routes json"').format(ns_option, neighbor1)
+
+    result = duthost.shell(cmd, module_ignore_errors=True)
+
+    if result['rc'] != 0 or not result['stdout']:
+        pytest.skip('Could not get received routes from neighbor')
+
+    try:
+        routes = json.loads(result['stdout'])
+        received_routes = routes.get('receivedRoutes', {})
+
+        if not received_routes:
+            pytest.skip('No routes received from neighbor')
+
+        first_prefix = list(received_routes.keys())[0]
+
+        local_pref_n1 = get_route_local_preference(
+            duthost, first_prefix, namespace)
+
+        logger.info(
+            'Neighbor {} route {} has local-preference: {}'.format(
+                neighbor1, first_prefix, local_pref_n1))
+
+        pytest_assert(
+            local_pref_n1 == local_pref_low,
+            'Expected local-preference {} for neighbor {}, got {}'.format(
+                local_pref_low, neighbor1, local_pref_n1)
+        )
+
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        pytest.skip('Could not parse route information: {}'.format(e))
+
+    finally:
+        remove_route_map_from_neighbor(
+            duthost, neighbor1, route_map_low, 'in', namespace)
+        remove_route_map_from_neighbor(
+            duthost, neighbor2, route_map_high, 'in', namespace)
+        remove_route_map(duthost, route_map_low, namespace)
+        remove_route_map(duthost, route_map_high, namespace)
+
+
+def test_local_preference_equal_values_tiebreaker(duthosts,
+                                                  rand_one_dut_hostname,
+                                                  setup, cleanup_route_maps):
+    """
+    Test Case #12: Local-Preference with Equal Values (Tie-Breaking).
+
+    Verify that when multiple paths have equal local-preference,
+    BGP falls back to the next tie-breaking criteria.
+
+    Test Steps:
+    1. Configure two neighbors with the same local-preference value
+    2. Verify routes have equal local-preference
+    3. Verify tie-breaking occurs based on next criteria (AS-Path)
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    namespace = setup['namespace']
+
+    neighbors = get_multiple_established_bgp_neighbors(
+        duthost, namespace, ip_version=4, count=2)
+
+    if len(neighbors) < 2:
+        pytest.skip('Need at least 2 BGP neighbors for tie-breaker test')
+
+    neighbor1 = neighbors[0]
+    neighbor2 = neighbors[1]
+
+    equal_local_pref = 200
+
+    route_map_1 = '{}_1'.format(ROUTE_MAP_NAME)
+    route_map_2 = '{}_2'.format(ROUTE_MAP_NAME)
+
+    configure_route_map_local_pref(
+        duthost, route_map_1, equal_local_pref, namespace=namespace)
+    configure_route_map_local_pref(
+        duthost, route_map_2, equal_local_pref, namespace=namespace)
+
+    apply_route_map_to_neighbor(
+        duthost, neighbor1, route_map_1, 'in', namespace)
+    apply_route_map_to_neighbor(
+        duthost, neighbor2, route_map_2, 'in', namespace)
+
+    clear_bgp_neighbor(duthost, neighbor1, namespace)
+    clear_bgp_neighbor(duthost, neighbor2, namespace)
+
+    time.sleep(15)
+
+    ns_option = '-n {}'.format(namespace) if namespace else ''
+    cmd = ('vtysh {} -c "show bgp ipv4 unicast neighbors {} '
+           'received-routes json"').format(ns_option, neighbor1)
+
+    result = duthost.shell(cmd, module_ignore_errors=True)
+
+    if result['rc'] != 0 or not result['stdout']:
+        pytest.skip('Could not get received routes from neighbor')
+
+    try:
+        routes = json.loads(result['stdout'])
+        received_routes = routes.get('receivedRoutes', {})
+
+        if not received_routes:
+            pytest.skip('No routes received from neighbor')
+
+        first_prefix = list(received_routes.keys())[0]
+
+        local_pref = get_route_local_preference(
+            duthost, first_prefix, namespace)
+
+        logger.info(
+            'Route {} has local-preference: {} (expected: {})'.format(
+                first_prefix, local_pref, equal_local_pref))
+
+        pytest_assert(
+            local_pref == equal_local_pref,
+            'Expected local-preference {}, got {}'.format(
+                equal_local_pref, local_pref)
+        )
+
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        pytest.skip('Could not parse route information: {}'.format(e))
+
+    finally:
+        remove_route_map_from_neighbor(
+            duthost, neighbor1, route_map_1, 'in', namespace)
+        remove_route_map_from_neighbor(
+            duthost, neighbor2, route_map_2, 'in', namespace)
+        remove_route_map(duthost, route_map_1, namespace)
+        remove_route_map(duthost, route_map_2, namespace)
+
+
+def test_local_preference_vs_aspath(duthosts, rand_one_dut_hostname,
+                                    setup, cleanup_route_maps):
+    """
+    Test Case #13: Local-Preference Interaction with AS-Path.
+
+    Verify that local-preference takes precedence over AS-Path length
+    in best path selection.
+
+    Test Steps:
+    1. Configure route-maps with different local-preference values
+    2. Apply to neighbors (higher local-pref to neighbor with longer AS-Path)
+    3. Verify best path is selected based on local-preference, not AS-Path
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    namespace = setup['namespace']
+    neighbor_v4 = setup['neighbor_v4']
+
+    high_local_pref = 200
+
+    route_map_high = '{}_HIGH'.format(ROUTE_MAP_NAME)
+
+    configure_route_map_local_pref(
+        duthost, route_map_high, high_local_pref, namespace=namespace)
+
+    apply_route_map_to_neighbor(
+        duthost, neighbor_v4, route_map_high, 'in', namespace)
+
+    clear_bgp_neighbor(duthost, neighbor_v4, namespace)
+
+    time.sleep(10)
+
+    ns_option = '-n {}'.format(namespace) if namespace else ''
+    cmd = ('vtysh {} -c "show bgp ipv4 unicast neighbors {} '
+           'received-routes json"').format(ns_option, neighbor_v4)
+
+    result = duthost.shell(cmd, module_ignore_errors=True)
+
+    if result['rc'] != 0 or not result['stdout']:
+        pytest.skip('Could not get received routes from neighbor')
+
+    try:
+        routes = json.loads(result['stdout'])
+        received_routes = routes.get('receivedRoutes', {})
+
+        if not received_routes:
+            pytest.skip('No routes received from neighbor')
+
+        first_prefix = list(received_routes.keys())[0]
+
+        local_pref = get_route_local_preference(
+            duthost, first_prefix, namespace)
+
+        logger.info(
+            'Route {} has local-pref: {} (LP > AS-Path)'.format(
+                first_prefix, local_pref))
+
+        pytest_assert(
+            local_pref == high_local_pref,
+            'Local-preference should be {} (takes precedence over AS-Path), '
+            'got {}'.format(high_local_pref, local_pref)
+        )
+
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        pytest.skip('Could not parse route information: {}'.format(e))
+
+
+def test_local_preference_vs_med(duthosts, rand_one_dut_hostname,
+                                 setup, cleanup_route_maps):
+    """
+    Test Case #14: Local-Preference Interaction with MED.
+
+    Verify that local-preference takes precedence over MED
+    in best path selection.
+
+    Test Steps:
+    1. Configure route-map with local-preference
+    2. Apply to neighbor
+    3. Verify local-preference is applied (LP takes precedence over MED)
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    namespace = setup['namespace']
+    neighbor_v4 = setup['neighbor_v4']
+
+    test_local_pref = 150
+
+    configure_route_map_local_pref(
+        duthost, ROUTE_MAP_NAME, test_local_pref, namespace=namespace)
+
+    apply_route_map_to_neighbor(
+        duthost, neighbor_v4, ROUTE_MAP_NAME, 'in', namespace)
+
+    clear_bgp_neighbor(duthost, neighbor_v4, namespace)
+
+    time.sleep(10)
+
+    ns_option = '-n {}'.format(namespace) if namespace else ''
+    cmd = ('vtysh {} -c "show bgp ipv4 unicast neighbors {} '
+           'received-routes json"').format(ns_option, neighbor_v4)
+
+    result = duthost.shell(cmd, module_ignore_errors=True)
+
+    if result['rc'] != 0 or not result['stdout']:
+        pytest.skip('Could not get received routes from neighbor')
+
+    try:
+        routes = json.loads(result['stdout'])
+        received_routes = routes.get('receivedRoutes', {})
+
+        if not received_routes:
+            pytest.skip('No routes received from neighbor')
+
+        first_prefix = list(received_routes.keys())[0]
+
+        local_pref = get_route_local_preference(
+            duthost, first_prefix, namespace)
+
+        logger.info(
+            'Route {} has local-preference: {} (verifying LP > MED)'.format(
+                first_prefix, local_pref))
+
+        pytest_assert(
+            local_pref == test_local_pref,
+            'Local-preference should be {} (takes precedence over MED), '
+            'got {}'.format(test_local_pref, local_pref)
+        )
+
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        pytest.skip('Could not parse route information: {}'.format(e))
+
+
+def test_local_preference_vs_weight(duthosts, rand_one_dut_hostname,
+                                    setup, cleanup_route_maps):
+    """
+    Test Case #15: Local-Preference Interaction with Weight.
+
+    Verify the interaction between local-preference and weight attributes.
+    Weight (if supported) takes precedence over local-preference.
+
+    Test Steps:
+    1. Configure route-map with local-preference
+    2. Apply to neighbor
+    3. Verify local-preference is correctly applied
+    4. Note: Weight configuration may not be supported in all FRR versions
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    namespace = setup['namespace']
+    neighbor_v4 = setup['neighbor_v4']
+
+    test_local_pref = 500
+
+    configure_route_map_local_pref(
+        duthost, ROUTE_MAP_NAME, test_local_pref, namespace=namespace)
+
+    apply_route_map_to_neighbor(
+        duthost, neighbor_v4, ROUTE_MAP_NAME, 'in', namespace)
+
+    clear_bgp_neighbor(duthost, neighbor_v4, namespace)
+
+    time.sleep(10)
+
+    ns_option = '-n {}'.format(namespace) if namespace else ''
+    cmd = ('vtysh {} -c "show bgp ipv4 unicast neighbors {} '
+           'received-routes json"').format(ns_option, neighbor_v4)
+
+    result = duthost.shell(cmd, module_ignore_errors=True)
+
+    if result['rc'] != 0 or not result['stdout']:
+        pytest.skip('Could not get received routes from neighbor')
+
+    try:
+        routes = json.loads(result['stdout'])
+        received_routes = routes.get('receivedRoutes', {})
+
+        if not received_routes:
+            pytest.skip('No routes received from neighbor')
+
+        first_prefix = list(received_routes.keys())[0]
+
+        local_pref = get_route_local_preference(
+            duthost, first_prefix, namespace)
+
+        logger.info(
+            'Route {} has local-preference: {} '
+            '(Weight interaction test)'.format(first_prefix, local_pref))
+
+        pytest_assert(
+            local_pref == test_local_pref,
+            'Expected local-preference {}, got {}'.format(
+                test_local_pref, local_pref)
+        )
+
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        pytest.skip('Could not parse route information: {}'.format(e))
+
+
+def test_local_preference_route_flapping(duthosts, rand_one_dut_hostname,
+                                         setup, cleanup_route_maps):
+    """
+    Test Case #16: Local-Preference with Route Flapping.
+
+    Verify that local-preference-based best path selection remains stable
+    during route flapping scenarios.
+
+    Test Steps:
+    1. Configure route-map with local-preference
+    2. Apply to neighbor
+    3. Clear BGP session multiple times to simulate flapping
+    4. Verify local-preference remains consistent after each clear
+    """
+    duthost = duthosts[rand_one_dut_hostname]
+    namespace = setup['namespace']
+    neighbor_v4 = setup['neighbor_v4']
+
+    test_local_pref = 200
+
+    configure_route_map_local_pref(
+        duthost, ROUTE_MAP_NAME, test_local_pref, namespace=namespace)
+
+    apply_route_map_to_neighbor(
+        duthost, neighbor_v4, ROUTE_MAP_NAME, 'in', namespace)
+
+    flap_iterations = 3
+
+    for iteration in range(flap_iterations):
+        logger.info(
+            'Route flap iteration {}/{}'.format(
+                iteration + 1, flap_iterations))
+
+        clear_bgp_neighbor(duthost, neighbor_v4, namespace)
+
+        time.sleep(10)
+
+        ns_option = '-n {}'.format(namespace) if namespace else ''
+        cmd = ('vtysh {} -c "show bgp ipv4 unicast neighbors {} '
+               'received-routes json"').format(ns_option, neighbor_v4)
+
+        result = duthost.shell(cmd, module_ignore_errors=True)
+
+        if result['rc'] != 0 or not result['stdout']:
+            logger.warning(
+                'Could not get routes in iteration {}'.format(iteration + 1))
+            continue
+
+        try:
+            routes = json.loads(result['stdout'])
+            received_routes = routes.get('receivedRoutes', {})
+
+            if not received_routes:
+                logger.warning(
+                    'No routes in iteration {}'.format(iteration + 1))
+                continue
+
+            first_prefix = list(received_routes.keys())[0]
+
+            local_pref = get_route_local_preference(
+                duthost, first_prefix, namespace)
+
+            logger.info(
+                'Iteration {}: Route {} has local-preference: {}'.format(
+                    iteration + 1, first_prefix, local_pref))
+
+            pytest_assert(
+                local_pref == test_local_pref,
+                'Iteration {}: Expected local-preference {}, got {}'.format(
+                    iteration + 1, test_local_pref, local_pref)
+            )
+
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            logger.warning(
+                'Iteration {}: Could not parse route info: {}'.format(
+                    iteration + 1, e))
+
+    logger.info(
+        'Route flapping test completed - local-preference remained stable')

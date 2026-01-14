@@ -1,7 +1,7 @@
 """
 Test BGP Aggregate Address with BBR awareness feature of SONiC.
 
-Test Plan: docs/testplan/BGP-Aggregate-Address.md
+Test Plan: docs/testplan/BGP-Aggregate-Address-BBR-Awareness-Test-Plan.md
 HLD: https://github.com/sonic-net/SONiC/blob/master/doc/BGP/
      BGP-route-aggregation-with-bbr-awareness.md
 """

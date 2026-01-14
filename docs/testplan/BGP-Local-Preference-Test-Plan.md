@@ -31,7 +31,9 @@ The test validates the following aspects of BGP Local-Preference:
 5. Local-preference NOT being sent to eBGP peers
 6. Local-preference persistence after BGP container restart
 7. Local-preference behavior with multiple paths to the same destination
-8. Local-preference interaction with other BGP attributes
+8. Local-preference interaction with other BGP attributes (AS-Path, MED, Weight)
+9. Local-preference tie-breaking behavior when values are equal
+10. Local-preference stability during route flapping scenarios
 
 ### Scale / Performance
 
@@ -69,6 +71,8 @@ vtysh -c "configure terminal" \
 ### Supported Topology
 
 The tests are supported on the following topologies:
+- t0
+- t0-multi-asic
 - t1
 - t1-multi-asic
 
@@ -257,6 +261,138 @@ The test fixtures handle:
 - Local-preference should be consistently applied to all prefixes
 - All routes should have the same local-preference value
 
+### Test Case #11 - Local-Preference with Multiple Paths
+
+**Objective:** Verify that local-preference correctly influences best path selection when multiple paths exist to the same destination from different neighbors.
+
+**Test Steps:**
+1. Identify at least 3 BGP neighbors (T0 VMs or ExaBGP instances)
+2. Configure route-maps with different local-preference values for each neighbor:
+   - Neighbor 1: local-preference = 100 (default)
+   - Neighbor 2: local-preference = 200
+   - Neighbor 3: local-preference = 150
+3. Apply the route-maps to each neighbor (inbound direction)
+4. Announce the same prefix (e.g., 10.100.0.0/24) from all three neighbors
+5. Wait for route convergence
+6. Query the BGP route on the DUT using `show bgp ipv4 unicast <prefix> json`
+7. Verify:
+   - All three paths are present in the BGP table
+   - The path from Neighbor 2 (local-preference = 200) is selected as best
+   - The bestpath reason shows "Local Pref"
+8. Change Neighbor 3's local-preference to 250
+9. Clear BGP session or trigger route refresh
+10. Verify the best path now switches to Neighbor 3
+11. Withdraw all routes and clean up
+
+**Expected Results:**
+- All paths should be visible in the BGP table with their respective local-preference values
+- The path with the highest local-preference should always be selected as best
+- When local-preference values change, best path selection should update accordingly
+- The `bestpath` output should indicate local-preference as the deciding factor
+
+### Test Case #12 - Local-Preference with Equal Values (Tie-Breaking)
+
+**Objective:** Verify that when multiple paths have equal local-preference, BGP falls back to the next tie-breaking criteria (AS-Path length).
+
+**Test Steps:**
+1. Configure two neighbors with the same local-preference value (200)
+2. Configure Neighbor 1 to announce a route with AS-Path: 65001 65002
+3. Configure Neighbor 2 to announce the same route with AS-Path: 65003
+4. Wait for route convergence
+5. Query the BGP route on the DUT
+6. Verify the best path is from Neighbor 2 (shorter AS-Path)
+7. Clean up configuration
+
+**Expected Results:**
+- With equal local-preference, AS-Path length should be the tie-breaker
+- The path with shorter AS-Path should be selected as best
+- Both paths should remain in the BGP table
+
+### Test Case #13 - Local-Preference Interaction with AS-Path
+
+**Objective:** Verify that local-preference takes precedence over AS-Path length in best path selection.
+
+**Test Steps:**
+1. Configure two route-maps:
+   - Route-map A: local-preference = 200
+   - Route-map B: local-preference = 100
+2. Apply route-map A to Neighbor 1 and route-map B to Neighbor 2
+3. Configure Neighbor 1 to announce a route with longer AS-Path: 65001 65002 65003
+4. Configure Neighbor 2 to announce the same route with shorter AS-Path: 65004
+5. Wait for route convergence
+6. Query the BGP route on the DUT
+7. Verify the best path is from Neighbor 1 (higher local-preference) despite longer AS-Path
+8. Clean up configuration
+
+**Expected Results:**
+- Local-preference should take precedence over AS-Path length
+- The path with higher local-preference should be selected even with longer AS-Path
+- This confirms BGP path selection order: Local-Preference > AS-Path
+
+### Test Case #14 - Local-Preference Interaction with MED
+
+**Objective:** Verify that local-preference takes precedence over MED (Multi-Exit Discriminator) in best path selection.
+
+**Test Steps:**
+1. Configure two route-maps:
+   - Route-map A: local-preference = 150
+   - Route-map B: local-preference = 100
+2. Apply route-map A to Neighbor 1 and route-map B to Neighbor 2
+3. Configure Neighbor 1 to announce a route with MED = 1000 (higher/worse)
+4. Configure Neighbor 2 to announce the same route with MED = 10 (lower/better)
+5. Wait for route convergence
+6. Query the BGP route on the DUT
+7. Verify the best path is from Neighbor 1 (higher local-preference) despite worse MED
+8. Clean up configuration
+
+**Expected Results:**
+- Local-preference should take precedence over MED
+- The path with higher local-preference should be selected regardless of MED value
+- This confirms BGP path selection order: Local-Preference > AS-Path > Origin > MED
+
+### Test Case #15 - Local-Preference Interaction with Weight (if supported)
+
+**Objective:** Verify that Weight (Cisco-specific attribute) takes precedence over local-preference when both are configured.
+
+**Test Steps:**
+1. Configure a route-map with local-preference = 500
+2. Configure weight = 100 for Neighbor 1 (if supported by FRR/SONiC)
+3. Configure weight = 200 for Neighbor 2
+4. Apply the local-preference route-map to Neighbor 1
+5. Announce the same prefix from both neighbors
+6. Wait for route convergence
+7. Query the BGP route on the DUT
+8. Verify the best path selection based on weight vs local-preference precedence
+9. Clean up configuration
+
+**Expected Results:**
+- If weight is supported, it should take precedence over local-preference
+- The path with higher weight should be selected as best
+- If weight is not supported, local-preference should determine the best path
+
+### Test Case #16 - Local-Preference with Route Flapping
+
+**Objective:** Verify that local-preference-based best path selection remains stable during route flapping.
+
+**Test Steps:**
+1. Configure two neighbors with different local-preference values:
+   - Neighbor 1: local-preference = 200 (primary)
+   - Neighbor 2: local-preference = 100 (backup)
+2. Announce the same prefix from both neighbors
+3. Verify Neighbor 1's path is selected as best
+4. Withdraw the route from Neighbor 1
+5. Verify the best path switches to Neighbor 2
+6. Re-announce the route from Neighbor 1
+7. Verify the best path switches back to Neighbor 1
+8. Repeat steps 4-7 multiple times (5 iterations)
+9. Verify consistent behavior throughout
+10. Clean up configuration
+
+**Expected Results:**
+- Best path should consistently follow local-preference values
+- Route flapping should not cause inconsistent best path selection
+- Convergence should occur within expected timeframes
+
 ## Test Implementation
 
 The test implementation is located at: `tests/bgp/test_bgp_local_preference.py`
@@ -298,6 +434,6 @@ For reference, BGP best path selection follows this order:
 
 ### Test Markers
 
-- `@pytest.mark.topology('t1', 't1-multi-asic')` - Supported topologies
+- `@pytest.mark.topology('t0', 't0-multi-asic', 't1', 't1-multi-asic')` - Supported topologies
 - `@pytest.mark.device_type('vs')` - Virtual switch support
 - `@pytest.mark.disable_loganalyzer` - Disabled for restart tests

@@ -18,7 +18,7 @@ from tests.common.helpers.constants import DEFAULT_NAMESPACE
 from tests.common.utilities import wait_until
 
 pytestmark = [
-    pytest.mark.topology('t1', 't1-multi-asic'),
+    pytest.mark.topology('t0', 't0-multi-asic', 't1', 't1-multi-asic'),
     pytest.mark.device_type('vs')
 ]
 

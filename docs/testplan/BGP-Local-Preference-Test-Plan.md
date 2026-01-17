@@ -34,6 +34,7 @@ The test validates the following aspects of BGP Local-Preference:
 8. Local-preference interaction with other BGP attributes (AS-Path, MED, Weight)
 9. Local-preference tie-breaking behavior when values are equal
 10. Local-preference stability during route flapping scenarios
+11. Local-preference behavior in route reflector scenarios
 
 ### Scale / Performance
 
@@ -392,6 +393,114 @@ The test fixtures handle:
 - Best path should consistently follow local-preference values
 - Route flapping should not cause inconsistent best path selection
 - Convergence should occur within expected timeframes
+
+### Test Case #17 - Local-Preference Preservation via Route Reflector
+
+**Objective:** Verify that local-preference set by a route reflector client is preserved when the route is reflected to other clients.
+
+**Test Steps:**
+1. Configure DUT as a route reflector with at least two RR clients
+2. Configure RR Client 1 to set local-preference = 250 on its advertised routes
+3. Have RR Client 1 announce a prefix (e.g., 10.200.0.0/24)
+4. Wait for route convergence
+5. Query the BGP route on RR Client 2 (via DUT reflection)
+6. Verify the local-preference value is preserved as 250
+7. Verify ORIGINATOR_ID and CLUSTER_LIST attributes are added by RR
+8. Clean up configuration
+
+**Expected Results:**
+- Local-preference should be preserved when routes are reflected
+- The RR should not modify the local-preference value
+- ORIGINATOR_ID should match RR Client 1's router ID
+- CLUSTER_LIST should contain the RR's cluster ID
+
+### Test Case #18 - Local-Preference Set by Route Reflector
+
+**Objective:** Verify that the route reflector can set local-preference via route-map on routes before reflecting them.
+
+**Test Steps:**
+1. Configure DUT as a route reflector
+2. Configure a route-map on DUT to set local-preference = 300
+3. Apply the route-map to incoming routes from RR Client 1
+4. Have RR Client 1 announce a prefix with default local-preference (100)
+5. Wait for route convergence
+6. Query the BGP route on the DUT
+7. Verify local-preference is 300 (as set by RR's route-map)
+8. Query the reflected route on RR Client 2
+9. Verify local-preference is 300 (preserved during reflection)
+10. Clean up configuration
+
+**Expected Results:**
+- RR should be able to set local-preference via route-map on incoming routes
+- The modified local-preference should be reflected to other clients
+- Route-map processing should occur before route reflection
+
+### Test Case #19 - Local-Preference Best Path Selection via Route Reflector
+
+**Objective:** Verify that route reflector clients select the best path based on local-preference from reflected routes.
+
+**Test Steps:**
+1. Configure DUT as a route reflector with two RR clients
+2. Configure two eBGP neighbors on DUT with different local-preference:
+   - eBGP Neighbor 1: local-preference = 150
+   - eBGP Neighbor 2: local-preference = 200
+3. Announce the same prefix from both eBGP neighbors
+4. Wait for route convergence
+5. Verify DUT selects the path with local-preference = 200 as best
+6. Query the reflected route on RR Client 1
+7. Verify RR Client 1 receives the best path with local-preference = 200
+8. Clean up configuration
+
+**Expected Results:**
+- RR should reflect only the best path to clients (default behavior)
+- RR clients should receive the path with highest local-preference
+- Best path selection on RR should follow standard local-preference rules
+
+### Test Case #20 - Local-Preference with Multiple Route Reflector Clients
+
+**Objective:** Verify local-preference consistency when multiple RR clients advertise routes with different local-preference values.
+
+**Test Steps:**
+1. Configure DUT as a route reflector with three RR clients
+2. Configure each RR client to set different local-preference:
+   - RR Client 1: local-preference = 100
+   - RR Client 2: local-preference = 200
+   - RR Client 3: local-preference = 150
+3. Have all three clients announce the same prefix
+4. Wait for route convergence
+5. Query the BGP route on DUT
+6. Verify DUT selects RR Client 2's path as best (highest local-preference)
+7. Verify DUT reflects RR Client 2's path to other clients
+8. Query the route on RR Client 1 and RR Client 3
+9. Verify they receive the reflected route with local-preference = 200
+10. Clean up configuration
+
+**Expected Results:**
+- RR should select the path with highest local-preference as best
+- RR should reflect the best path to all other clients
+- All clients should have consistent view of the best path
+
+### Test Case #21 - Local-Preference Override at Route Reflector Client
+
+**Objective:** Verify that RR clients can override local-preference received from the route reflector using local route-maps.
+
+**Test Steps:**
+1. Configure DUT as a route reflector
+2. Configure DUT to set local-preference = 200 on routes from eBGP neighbor
+3. Announce a prefix from the eBGP neighbor
+4. Configure RR Client 1 with a route-map to override local-preference to 300
+5. Apply the route-map on RR Client 1 for routes received from DUT (RR)
+6. Wait for route convergence
+7. Query the BGP route on RR Client 1
+8. Verify local-preference is 300 (overridden by client's route-map)
+9. Query the BGP route on RR Client 2 (no override)
+10. Verify local-preference is 200 (as reflected by RR)
+11. Clean up configuration
+
+**Expected Results:**
+- RR clients should be able to override local-preference using local route-maps
+- Override should only affect the local client's view
+- Other clients should see the original local-preference from RR
 
 ## Test Implementation
 

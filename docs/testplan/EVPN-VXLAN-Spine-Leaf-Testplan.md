@@ -9,7 +9,7 @@
   - [Multi-Homing Topology](#multi-homing-topology)
   - [Hardware Configuration](#hardware-configuration)
 - [Setup Configuration](#setup-configuration)
-  - [BGP Unnumbered Underlay Configuration](#bgp-unnumbered-underlay-configuration)
+  - [eBGP EVPN Configuration](#ebgp-evpn-configuration)
 - [Test Methodology](#test-methodology)
 - [Test Cases](#test-cases)
   - [Basic EVPN-VXLAN Functionality Tests](#basic-evpn-vxlan-functionality-tests)
@@ -70,7 +70,7 @@ These tests are targeted on a fully functioning SONiC system deployed in a 4x4 s
 - BFD-based fast failover
 - Multi-tenant VNI isolation
 - Spine switch redundancy
-- BGP unnumbered underlay routing
+- eBGP EVPN sessions between leaf switches via spine nodes
 
 ### Testbed
 
@@ -80,19 +80,19 @@ The tests will run on the following testbed configuration:
 - 4 Leaf switches (Cisco-8101-32FH-O)
 - Keysight Ixia chassis with IxNetwork API for traffic generation
 - Full mesh connectivity between spine and leaf layers
-- BGP unnumbered for underlay routing
+- eBGP underlay and overlay routing
 
 ## Topology
 
 ### 4x4 Spine-Leaf Architecture
 
-The base topology consists of 4 spine switches and 4 leaf switches in a full mesh configuration. Each leaf switch connects to all four spine switches using BGP unnumbered for underlay routing.
+The base topology consists of 4 spine switches and 4 leaf switches in a full mesh configuration. Each leaf switch connects to all four spine switches. The topology uses eBGP for both underlay (IPv4/IPv6 reachability) and overlay (EVPN) routing, with EVPN routes exchanged between leaf switches via spine nodes.
 
 ```
-                         BGP Unnumbered Underlay
+                         eBGP Underlay + eBGP EVPN Overlay
                     +----------+  +----------+  +----------+  +----------+
                     | Spine-1  |  | Spine-2  |  | Spine-3  |  | Spine-4  |
-                    | AS 65000 |  | AS 65000 |  | AS 65000 |  | AS 65000 |
+                    | AS 65100 |  | AS 65100 |  | AS 65100 |  | AS 65100 |
                     +----+-----+  +----+-----+  +----+-----+  +----+-----+
                          |             |             |             |
          +---------------+-------------+-------------+-------------+---------------+
@@ -104,6 +104,14 @@ The base topology consists of 4 spine switches and 4 leaf switches in a full mes
     +----+-----+    +----+-----+  +----+-----+  +----+-----+
          |               |             |             |
     Endpoints       Endpoints    Endpoints      Endpoints
+
+    eBGP EVPN Route Flow:
+    Leaf-1 (AS 65001) <--eBGP--> Spine (AS 65100) <--eBGP--> Leaf-3 (AS 65003)
+    
+    - Each leaf has unique AS number (65001-65004)
+    - All spines share same AS number (65100)
+    - EVPN routes transit through spine switches
+    - No route reflectors needed - pure eBGP design
 ```
 
 ### Single Homing Topology
@@ -113,12 +121,14 @@ In single-homing scenarios, each endpoint connects to only one leaf switch. This
 ```
                     +----------+  +----------+  +----------+  +----------+
                     | Spine-1  |  | Spine-2  |  | Spine-3  |  | Spine-4  |
+                    | AS 65100 |  | AS 65100 |  | AS 65100 |  | AS 65100 |
                     +----+-----+  +----+-----+  +----+-----+  +----+-----+
                          |             |             |             |
          +---------------+-------------+-------------+-------------+
          |               |             |             |
     +----+-----+    +----+-----+  +----+-----+  +----+-----+
     | Leaf-1   |    | Leaf-2   |  | Leaf-3   |  | Leaf-4   |
+    | AS 65001 |    | AS 65002 |  | AS 65003 |  | AS 65004 |
     | VTEP-1   |    | VTEP-2   |  | VTEP-3   |  | VTEP-4   |
     +----+-----+    +----+-----+  +----+-----+  +----+-----+
          |               |             |             |
@@ -134,21 +144,24 @@ In single-homing scenarios, each endpoint connects to only one leaf switch. This
     - ESI (Ethernet Segment Identifier) = 0 indicates single-homing
     - No redundancy at leaf layer - leaf failure causes endpoint isolation
     - Simpler configuration but less resilient
+    - EVPN Type-2 routes advertised via eBGP through spine switches
 ```
 
 ### Multi-Homing Topology
 
-In multi-homing (EVPN-MH) scenarios, endpoints connect to multiple leaf switches via LAG (Link Aggregation Group) for redundancy and load balancing. This topology uses EVPN Type-1 and Type-4 routes for Ethernet Segment coordination.
+In multi-homing (EVPN-MH) scenarios, endpoints connect to multiple leaf switches via LAG (Link Aggregation Group) for redundancy and load balancing. This topology uses EVPN Type-1 and Type-4 routes for Ethernet Segment coordination, exchanged via eBGP through spine switches.
 
 ```
                     +----------+  +----------+  +----------+  +----------+
                     | Spine-1  |  | Spine-2  |  | Spine-3  |  | Spine-4  |
+                    | AS 65100 |  | AS 65100 |  | AS 65100 |  | AS 65100 |
                     +----+-----+  +----+-----+  +----+-----+  +----+-----+
                          |             |             |             |
          +---------------+-------------+-------------+-------------+
          |               |             |             |
     +----+-----+    +----+-----+  +----+-----+  +----+-----+
     | Leaf-1   |    | Leaf-2   |  | Leaf-3   |  | Leaf-4   |
+    | AS 65001 |    | AS 65002 |  | AS 65003 |  | AS 65004 |
     | VTEP-1   |    | VTEP-2   |  | VTEP-3   |  | VTEP-4   |
     +----+--+--+    +--+--+----+  +----+--+--+  +--+--+----+
          |  |         |  |            |  |        |  |
@@ -168,8 +181,8 @@ In multi-homing (EVPN-MH) scenarios, endpoints connect to multiple leaf switches
     - Host-1 dual-homed to Leaf-1 and Leaf-2 via ES-1 (Ethernet Segment 1)
     - Host-2 dual-homed to Leaf-3 and Leaf-4 via ES-2 (Ethernet Segment 2)
     - Non-zero ESI identifies the Ethernet Segment
-    - EVPN Type-1 (EAD) routes advertise ES membership
-    - EVPN Type-4 (ES) routes elect Designated Forwarder
+    - EVPN Type-1 (EAD) routes advertise ES membership via eBGP
+    - EVPN Type-4 (ES) routes elect Designated Forwarder via eBGP
     - All-Active mode: both leaf switches forward traffic
     - Split-horizon filtering prevents BUM traffic loops
 ```
@@ -190,7 +203,7 @@ In multi-homing (EVPN-MH) scenarios, endpoints connect to multiple leaf switches
 
 | Component | Model | Interfaces | Role |
 |-----------|-------|------------|------|
-| Spine Switches | Cisco-8101-32FH-O | 32x400G | BGP unnumbered underlay routing, EVPN route reflector |
+| Spine Switches | Cisco-8101-32FH-O | 32x400G | eBGP underlay and EVPN overlay transit |
 | Leaf Switches | Cisco-8101-32FH-O | 32x400G | VXLAN VTEP, endpoint connectivity, EVPN-MH |
 | Traffic Generator | Keysight Ixia | Multiple 400G ports | Endpoint simulation, traffic generation, LAG support |
 
@@ -198,65 +211,100 @@ In multi-homing (EVPN-MH) scenarios, endpoints connect to multiple leaf switches
 
 The following configuration elements are required for the EVPN-VXLAN testbed:
 
-### BGP Unnumbered Underlay Configuration
+### eBGP EVPN Configuration
 
-BGP unnumbered is used for underlay routing between spine and leaf switches. This simplifies IP address management by using IPv6 link-local addresses for BGP peering.
+This topology uses eBGP for both underlay (IPv4/IPv6 reachability) and overlay (EVPN) routing. EVPN routes are exchanged between leaf switches via spine nodes using eBGP peering. This design eliminates the need for route reflectors and provides a simpler, more scalable architecture.
 
-**Spine Switch Configuration (Example for Spine-1):**
+**eBGP Design Principles:**
+
+1. **Unique AS per Leaf**: Each leaf switch has a unique AS number (65001-65004)
+2. **Shared AS for Spines**: All spine switches share the same AS number (65100)
+3. **eBGP for Underlay**: IPv4/IPv6 routes exchanged via eBGP between leaf and spine
+4. **eBGP for EVPN Overlay**: EVPN routes (Type-1 through Type-5) exchanged via eBGP
+5. **No Route Reflectors**: Pure eBGP design without iBGP or route reflectors
+6. **BGP Unnumbered**: Interface-based peering using IPv6 link-local addresses
+
+**Spine Switch Configuration (Example for Spine-1, AS 65100):**
 
 ```
-router bgp 65000
+router bgp 65100
   bgp router-id 10.0.0.1
+  bgp bestpath as-path multipath-relax
   neighbor LEAF_GROUP peer-group
   neighbor LEAF_GROUP remote-as external
   neighbor LEAF_GROUP capability extended-nexthop
+  neighbor LEAF_GROUP ebgp-multihop 2
   neighbor Ethernet0 interface peer-group LEAF_GROUP
   neighbor Ethernet1 interface peer-group LEAF_GROUP
   neighbor Ethernet2 interface peer-group LEAF_GROUP
   neighbor Ethernet3 interface peer-group LEAF_GROUP
   address-family ipv4 unicast
     redistribute connected
+    neighbor LEAF_GROUP activate
   address-family l2vpn evpn
     neighbor LEAF_GROUP activate
-    neighbor LEAF_GROUP route-reflector-client
 ```
 
-**Leaf Switch Configuration (Example for Leaf-1):**
+**Leaf Switch Configuration (Example for Leaf-1, AS 65001):**
 
 ```
 router bgp 65001
   bgp router-id 10.0.1.1
+  bgp bestpath as-path multipath-relax
   neighbor SPINE_GROUP peer-group
   neighbor SPINE_GROUP remote-as external
   neighbor SPINE_GROUP capability extended-nexthop
+  neighbor SPINE_GROUP ebgp-multihop 2
   neighbor Ethernet0 interface peer-group SPINE_GROUP
   neighbor Ethernet1 interface peer-group SPINE_GROUP
   neighbor Ethernet2 interface peer-group SPINE_GROUP
   neighbor Ethernet3 interface peer-group SPINE_GROUP
   address-family ipv4 unicast
     redistribute connected
+    neighbor SPINE_GROUP activate
+    maximum-paths 4
   address-family l2vpn evpn
     neighbor SPINE_GROUP activate
     advertise-all-vni
 ```
 
-**Key BGP Unnumbered Features:**
+**Key eBGP EVPN Features:**
 
-1. **Interface-based Peering**: BGP sessions established using interface names instead of IP addresses
-2. **Extended Next-Hop**: Enables IPv4 routes to be advertised with IPv6 next-hops
-3. **Auto-derived Router ID**: Uses loopback IP for router identification
-4. **Simplified Operations**: No IP address planning required for point-to-point links
+1. **Interface-based Peering**: BGP sessions established using interface names instead of IP addresses (BGP unnumbered)
+2. **Extended Next-Hop**: Enables IPv4 EVPN routes to be advertised with IPv6 next-hops
+3. **AS Path Multipath Relax**: Allows ECMP across paths with different AS paths (required for leaf-spine-leaf paths)
+4. **eBGP Multihop**: Required for EVPN routes that traverse spine switches
+5. **No Route Reflectors**: Spines simply forward EVPN routes between leaves via standard eBGP
+6. **Automatic RT/RD**: Route targets and distinguishers auto-derived from AS number and VNI
+
+**EVPN Route Exchange Flow:**
+
+```
+Leaf-1 (AS 65001)                    Spine-1 (AS 65100)                    Leaf-3 (AS 65003)
+      |                                     |                                     |
+      |  eBGP EVPN Type-2 Route             |                                     |
+      |  (MAC: 00:AA:BB:CC:DD:01)           |                                     |
+      | ----------------------------------> |                                     |
+      |                                     |  eBGP EVPN Type-2 Route             |
+      |                                     |  (AS Path: 65001 65100)             |
+      |                                     | ----------------------------------> |
+      |                                     |                                     |
+      |                                     |                                     |
+      |  AS Path at Leaf-3: 65100 65001     |                                     |
+      |  Next-Hop: Leaf-1 VTEP IP           |                                     |
+```
 
 **Additional Configuration Elements:**
 
 1. **Loopback Interfaces**
    - Each switch has a loopback interface for VTEP source IP and BGP router-id
-   - Loopback IPs are advertised via BGP for VTEP reachability
+   - Loopback IPs are advertised via eBGP for VTEP reachability
 
 2. **EVPN Control Plane Configuration**
-   - iBGP EVPN sessions between leaf switches via spine route reflectors
-   - EVPN address family enabled on BGP sessions
-   - Route distinguisher and route target configuration per VNI
+   - eBGP EVPN sessions between leaf switches via spine nodes
+   - EVPN address family enabled on all eBGP sessions
+   - Route distinguisher auto-derived from router-id and VNI
+   - Route targets auto-derived from AS number and VNI
 
 3. **VXLAN Data Plane Configuration**
    - VXLAN tunnel interfaces on leaf switches
@@ -267,9 +315,10 @@ router bgp 65001
    - Ethernet Segment configuration with unique ESI
    - LAG interfaces for multi-homed endpoints
    - DF election mode (default: modulo-based)
+   - Type-1 and Type-4 routes exchanged via eBGP
 
 5. **BFD Configuration**
-   - BFD sessions for fast failure detection on BGP unnumbered links
+   - BFD sessions for fast failure detection on eBGP sessions
    - BFD integration with BGP and ECMP
 
 ## Test Methodology
@@ -278,7 +327,7 @@ The following test methodology will be used for validating EVPN-VXLAN functional
 
 1. **Traffic Generator Setup**: Keysight Ixia chassis with IxNetwork API will be used to simulate endpoints and generate traffic patterns. For multi-homing tests, Ixia LAG configurations will simulate dual-homed endpoints.
 
-2. **Control Plane Validation**: EVPN route distribution will be verified using BGP show commands and route table inspection. For multi-homing, Type-1 and Type-4 routes will be validated.
+2. **Control Plane Validation**: EVPN route distribution will be verified using BGP show commands and route table inspection. For eBGP EVPN, verify that routes have correct AS paths (leaf-spine-leaf) and next-hops. For multi-homing, Type-1 and Type-4 routes will be validated.
 
 3. **Data Plane Validation**: Traffic forwarding will be verified using the **spytest framework** for packet-level validation. spytest provides:
    - Packet capture and analysis capabilities
@@ -304,24 +353,28 @@ The tests leverage the following infrastructure:
 
 **Objective**
 
-Verify that EVPN Type-2 (MAC/IP Advertisement) routes are correctly distributed across all leaf switches when a new endpoint MAC address is learned.
+Verify that EVPN Type-2 (MAC/IP Advertisement) routes are correctly distributed across all leaf switches via eBGP through spine nodes when a new endpoint MAC address is learned.
 
 **Test Steps**
 
 1. Configure EVPN-VXLAN on all leaf switches with a common VNI (e.g., VNI 10000).
-2. Connect Ixia port to Leaf-1 and configure it to send traffic with source MAC 00:11:22:33:44:55.
-3. Send ARP request from Ixia port to trigger MAC learning on Leaf-1.
-4. Verify that Leaf-1 learns the MAC address in its local MAC table.
-5. Verify that Leaf-1 generates an EVPN Type-2 route for the learned MAC.
-6. Verify that all other leaf switches (Leaf-2, Leaf-3, Leaf-4) receive the EVPN Type-2 route via BGP.
-7. Verify that remote leaf switches install the MAC in their EVPN MAC table with the correct VTEP IP.
-8. Use spytest to capture and validate VXLAN-encapsulated traffic.
+2. Verify eBGP EVPN sessions are established between all leaf switches and spine switches.
+3. Connect Ixia port to Leaf-1 and configure it to send traffic with source MAC 00:11:22:33:44:55.
+4. Send ARP request from Ixia port to trigger MAC learning on Leaf-1.
+5. Verify that Leaf-1 learns the MAC address in its local MAC table.
+6. Verify that Leaf-1 generates an EVPN Type-2 route for the learned MAC.
+7. Verify that spine switches receive the Type-2 route via eBGP from Leaf-1.
+8. Verify that all other leaf switches (Leaf-2, Leaf-3, Leaf-4) receive the EVPN Type-2 route via eBGP from spine switches.
+9. Verify that remote leaf switches install the MAC in their EVPN MAC table with the correct VTEP IP.
+10. Verify the AS path on remote leaf switches shows: spine-AS, leaf-1-AS (e.g., 65100 65001).
+11. Use spytest to capture and validate VXLAN-encapsulated traffic.
 
 **Expected Results**
 
 - Leaf-1 learns MAC 00:11:22:33:44:55 locally.
-- EVPN Type-2 route is advertised with correct RD, RT, and VNI.
-- All remote leaf switches receive and install the route.
+- EVPN Type-2 route is advertised via eBGP with correct RD, RT, and VNI.
+- Spine switches forward the route to all other leaf switches.
+- All remote leaf switches receive and install the route with AS path showing transit through spine.
 - Remote MAC table entries point to Leaf-1's VTEP IP address.
 - spytest validates correct VXLAN encapsulation.
 
@@ -329,20 +382,21 @@ Verify that EVPN Type-2 (MAC/IP Advertisement) routes are correctly distributed 
 
 **Objective**
 
-Verify that EVPN Type-3 (Inclusive Multicast Ethernet Tag) routes are correctly distributed for BUM (Broadcast, Unknown unicast, Multicast) traffic handling.
+Verify that EVPN Type-3 (Inclusive Multicast Ethernet Tag) routes are correctly distributed via eBGP for BUM (Broadcast, Unknown unicast, Multicast) traffic handling.
 
 **Test Steps**
 
 1. Configure EVPN-VXLAN on all leaf switches with ingress replication for BUM traffic.
 2. Verify that each leaf switch generates EVPN Type-3 routes for each configured VNI.
-3. Verify that all leaf switches receive Type-3 routes from all other leaf switches.
-4. Send broadcast traffic from Ixia port connected to Leaf-1.
-5. Use spytest to verify that broadcast traffic is replicated to all remote VTEPs using ingress replication.
-6. Verify that Ixia ports on Leaf-2, Leaf-3, and Leaf-4 receive the broadcast traffic.
+3. Verify that spine switches receive Type-3 routes from all leaf switches via eBGP.
+4. Verify that all leaf switches receive Type-3 routes from all other leaf switches via eBGP through spines.
+5. Send broadcast traffic from Ixia port connected to Leaf-1.
+6. Use spytest to verify that broadcast traffic is replicated to all remote VTEPs using ingress replication.
+7. Verify that Ixia ports on Leaf-2, Leaf-3, and Leaf-4 receive the broadcast traffic.
 
 **Expected Results**
 
-- Each leaf switch advertises Type-3 routes for its VNIs.
+- Each leaf switch advertises Type-3 routes for its VNIs via eBGP.
 - All leaf switches have a complete flood list for each VNI.
 - Broadcast traffic is correctly replicated to all VTEPs in the VNI.
 - spytest confirms correct packet replication.
@@ -357,11 +411,12 @@ Verify correct VXLAN encapsulation on ingress VTEP and decapsulation on egress V
 
 1. Configure endpoints on Leaf-1 (source) and Leaf-3 (destination) with known MAC addresses.
 2. Establish MAC learning by sending bidirectional ARP traffic.
-3. Send unicast traffic from Ixia port on Leaf-1 to destination MAC on Leaf-3.
-4. Use spytest to capture traffic on spine switch and verify VXLAN encapsulation.
-5. Verify outer IP header has correct source VTEP (Leaf-1) and destination VTEP (Leaf-3) addresses.
-6. Verify VXLAN header contains correct VNI.
-7. Verify traffic is received correctly on Ixia port connected to Leaf-3.
+3. Verify EVPN Type-2 routes are exchanged via eBGP through spine switches.
+4. Send unicast traffic from Ixia port on Leaf-1 to destination MAC on Leaf-3.
+5. Use spytest to capture traffic on spine switch and verify VXLAN encapsulation.
+6. Verify outer IP header has correct source VTEP (Leaf-1) and destination VTEP (Leaf-3) addresses.
+7. Verify VXLAN header contains correct VNI.
+8. Verify traffic is received correctly on Ixia port connected to Leaf-3.
 
 **Expected Results**
 
@@ -380,12 +435,13 @@ Verify that traffic between different VNIs (tenants) is properly isolated.
 **Test Steps**
 
 1. Configure two VNIs (VNI 10000 and VNI 20000) on all leaf switches.
-2. Configure Ixia ports on Leaf-1 and Leaf-2 in VNI 10000.
-3. Configure Ixia ports on Leaf-3 and Leaf-4 in VNI 20000.
-4. Send traffic between endpoints in VNI 10000 and verify connectivity using spytest.
-5. Send traffic between endpoints in VNI 20000 and verify connectivity using spytest.
-6. Attempt to send traffic from VNI 10000 endpoint to VNI 20000 endpoint.
-7. Verify that cross-VNI traffic is dropped (without inter-VNI routing configured).
+2. Verify EVPN Type-2 and Type-3 routes are exchanged via eBGP for both VNIs.
+3. Configure Ixia ports on Leaf-1 and Leaf-2 in VNI 10000.
+4. Configure Ixia ports on Leaf-3 and Leaf-4 in VNI 20000.
+5. Send traffic between endpoints in VNI 10000 and verify connectivity using spytest.
+6. Send traffic between endpoints in VNI 20000 and verify connectivity using spytest.
+7. Attempt to send traffic from VNI 10000 endpoint to VNI 20000 endpoint.
+8. Verify that cross-VNI traffic is dropped (without inter-VNI routing configured).
 
 **Expected Results**
 
@@ -402,7 +458,7 @@ This section covers test cases for single-homed endpoint scenarios where endpoin
 
 **Objective**
 
-Verify that MAC addresses from single-homed endpoints are correctly learned and advertised in EVPN.
+Verify that MAC addresses from single-homed endpoints are correctly learned and advertised in EVPN via eBGP.
 
 **Test Steps**
 
@@ -410,19 +466,20 @@ Verify that MAC addresses from single-homed endpoints are correctly learned and 
 2. Configure the endpoint in VLAN 100 mapped to VNI 10000.
 3. Send traffic from the single-homed endpoint to trigger MAC learning.
 4. Verify that Leaf-1 learns the MAC address in its local bridge domain.
-5. Verify that Leaf-1 advertises an EVPN Type-2 route for the MAC with:
+5. Verify that Leaf-1 advertises an EVPN Type-2 route for the MAC via eBGP with:
    - Correct Route Distinguisher (RD)
    - Correct Route Target (RT)
    - Correct VNI (10000)
    - ESI set to 0 (indicating single-homed)
-6. Verify that all remote leaf switches receive and install the MAC entry.
-7. Verify that the MAC entry on remote leaf switches points to Leaf-1's VTEP IP.
-8. Use spytest to validate packet forwarding.
+6. Verify that spine switches receive and forward the Type-2 route.
+7. Verify that all remote leaf switches receive and install the MAC entry via eBGP.
+8. Verify that the MAC entry on remote leaf switches points to Leaf-1's VTEP IP.
+9. Use spytest to validate packet forwarding.
 
 **Expected Results**
 
 - MAC address is learned locally on Leaf-1.
-- EVPN Type-2 route is advertised with ESI=0 (single-homed indicator).
+- EVPN Type-2 route is advertised via eBGP with ESI=0 (single-homed indicator).
 - All remote leaf switches install the MAC with correct VTEP next-hop.
 - MAC aging timer is set correctly on the local leaf switch.
 
@@ -449,7 +506,7 @@ Verify that ARP (IPv4) and Neighbor Discovery (IPv6) resolution works correctly 
 - ARP request is correctly flooded via VXLAN to all VTEPs in the VNI.
 - ARP reply is correctly unicast via VXLAN to the requesting VTEP.
 - Both endpoints learn each other's MAC-IP binding.
-- EVPN Type-2 routes with IP information are advertised.
+- EVPN Type-2 routes with IP information are advertised via eBGP.
 - IPv6 ND works similarly with NS/NA messages.
 
 #### Test Case 7 - Single-Homed Endpoint Traffic Forwarding
@@ -486,23 +543,23 @@ Verify the behavior when a leaf switch with single-homed endpoints fails, and va
 **Test Steps**
 
 1. Configure single-homed endpoint on Leaf-1 with MAC 00:AA:BB:CC:DD:01 in VNI 10000.
-2. Verify EVPN Type-2 route is advertised and installed on all remote leaf switches.
+2. Verify EVPN Type-2 route is advertised via eBGP and installed on all remote leaf switches.
 3. Send continuous traffic from endpoint on Leaf-3 to endpoint on Leaf-1.
 4. Verify traffic is being received correctly on Leaf-1's endpoint.
 5. Simulate Leaf-1 failure by shutting down all interfaces or rebooting the switch.
-6. Verify that BGP sessions to Leaf-1 go down.
-7. Verify that EVPN Type-2 routes from Leaf-1 are withdrawn.
+6. Verify that eBGP sessions from Leaf-1 to spine switches go down.
+7. Verify that EVPN Type-2 routes from Leaf-1 are withdrawn via eBGP.
 8. Verify that remote leaf switches remove MAC entries pointing to Leaf-1's VTEP.
 9. Use spytest to verify that traffic destined to Leaf-1's endpoint is dropped (no valid path).
-10. Recover Leaf-1 and verify that EVPN routes are re-advertised.
-11. Verify that traffic forwarding resumes after recovery.
+10. Recover Leaf-1 and verify that eBGP sessions re-establish.
+11. Verify that EVPN routes are re-advertised and traffic forwarding resumes.
 
 **Expected Results**
 
 - EVPN routes are withdrawn within BGP hold timer (default 90s, or faster with BFD).
 - Remote leaf switches remove stale MAC entries.
 - Traffic to failed leaf's endpoints is dropped (expected behavior for single-homing).
-- After recovery, EVPN routes are re-advertised and traffic resumes.
+- After recovery, EVPN routes are re-advertised via eBGP and traffic resumes.
 - Convergence time is measured and reported.
 
 #### Test Case 9 - Single-Homed Endpoint VLAN to VNI Mapping
@@ -520,7 +577,7 @@ Verify that VLAN to VNI mapping works correctly for single-homed endpoints with 
 5. Use spytest to verify traffic is encapsulated with VNI 10000.
 6. Repeat for VLAN 200 (VNI 20000) and VLAN 300 (VNI 30000).
 7. Verify that traffic in different VLANs uses the correct VNI.
-8. Verify that EVPN Type-2 routes are advertised with correct VNI for each VLAN.
+8. Verify that EVPN Type-2 routes are advertised via eBGP with correct VNI for each VLAN.
 
 **Expected Results**
 
@@ -552,7 +609,7 @@ Verify that Layer 3 routing between different VNIs works correctly for single-ho
 - Inter-VNI routing is performed at the ingress leaf switch.
 - Traffic is encapsulated with L3VNI for fabric transport.
 - Destination endpoint receives traffic correctly.
-- EVPN Type-5 routes (if used) are correctly advertised and installed.
+- EVPN Type-5 routes (if used) are correctly advertised via eBGP and installed.
 - Symmetric IRB (if used) correctly handles routing and encapsulation.
 
 #### Test Case 11 - Single-Homed Endpoint BUM Traffic Handling
@@ -564,7 +621,7 @@ Verify that Broadcast, Unknown unicast, and Multicast (BUM) traffic from single-
 **Test Steps**
 
 1. Configure single-homed endpoints on all four leaf switches in VNI 10000.
-2. Verify EVPN Type-3 routes are exchanged and flood lists are complete.
+2. Verify EVPN Type-3 routes are exchanged via eBGP and flood lists are complete.
 3. Send broadcast traffic (e.g., ARP request) from endpoint on Leaf-1.
 4. Use spytest to verify broadcast is replicated to all remote VTEPs (Leaf-2, Leaf-3, Leaf-4).
 5. Verify all endpoints receive the broadcast traffic.
@@ -591,11 +648,11 @@ Verify that MAC move (endpoint migration) is correctly detected and handled when
 **Test Steps**
 
 1. Configure single-homed endpoint on Leaf-1 with MAC 00:AA:BB:CC:DD:01 in VNI 10000.
-2. Verify EVPN Type-2 route is advertised from Leaf-1.
+2. Verify EVPN Type-2 route is advertised via eBGP from Leaf-1.
 3. Verify all remote leaf switches have MAC entry pointing to Leaf-1's VTEP.
 4. Simulate endpoint move by disconnecting from Leaf-1 and connecting to Leaf-3.
 5. Send traffic from the moved endpoint to trigger MAC learning on Leaf-3.
-6. Verify Leaf-3 learns the MAC and advertises a new EVPN Type-2 route.
+6. Verify Leaf-3 learns the MAC and advertises a new EVPN Type-2 route via eBGP.
 7. Verify Leaf-1 withdraws its EVPN Type-2 route for the MAC (after aging or explicit withdrawal).
 8. Verify all remote leaf switches update their MAC entries to point to Leaf-3's VTEP.
 9. Use spytest to verify traffic to the endpoint is now forwarded to Leaf-3.
@@ -603,7 +660,7 @@ Verify that MAC move (endpoint migration) is correctly detected and handled when
 
 **Expected Results**
 
-- New leaf switch (Leaf-3) learns and advertises the MAC.
+- New leaf switch (Leaf-3) learns and advertises the MAC via eBGP.
 - Old leaf switch (Leaf-1) withdraws the MAC route.
 - Remote leaf switches update MAC entries to new VTEP.
 - Traffic is correctly forwarded to the new location.
@@ -618,25 +675,26 @@ This section covers test cases for multi-homed (EVPN-MH) endpoint scenarios wher
 
 **Objective**
 
-Verify that Ethernet Segment Identifier (ESI) is correctly configured and EVPN Type-1 (Ethernet Auto-Discovery) routes are advertised for multi-homed endpoints.
+Verify that Ethernet Segment Identifier (ESI) is correctly configured and EVPN Type-1 (Ethernet Auto-Discovery) routes are advertised via eBGP for multi-homed endpoints.
 
 **Test Steps**
 
 1. Configure Ethernet Segment on Leaf-1 and Leaf-2 with ESI 00:11:22:33:44:55:00:00:01.
 2. Configure LAG interface on both leaf switches for the multi-homed endpoint.
 3. Connect Ixia port to both Leaf-1 and Leaf-2 via LAG.
-4. Verify that both Leaf-1 and Leaf-2 advertise EVPN Type-1 EAD per-ES route with:
+4. Verify that both Leaf-1 and Leaf-2 advertise EVPN Type-1 EAD per-ES route via eBGP with:
    - Correct ESI
    - Correct Route Distinguisher
    - Correct Route Target
-5. Verify that both leaf switches advertise EVPN Type-1 EAD per-EVI route for each VNI.
-6. Verify that remote leaf switches (Leaf-3, Leaf-4) receive and install the Type-1 routes.
-7. Verify that remote leaf switches recognize the endpoint as multi-homed.
+5. Verify that both leaf switches advertise EVPN Type-1 EAD per-EVI route for each VNI via eBGP.
+6. Verify that spine switches receive and forward the Type-1 routes.
+7. Verify that remote leaf switches (Leaf-3, Leaf-4) receive and install the Type-1 routes via eBGP.
+8. Verify that remote leaf switches recognize the endpoint as multi-homed.
 
 **Expected Results**
 
 - ESI is correctly configured on both leaf switches.
-- Type-1 EAD per-ES routes are advertised from both Leaf-1 and Leaf-2.
+- Type-1 EAD per-ES routes are advertised via eBGP from both Leaf-1 and Leaf-2.
 - Type-1 EAD per-EVI routes are advertised for each VNI.
 - Remote leaf switches install routes and recognize multi-homing.
 - Aliasing is enabled for load balancing to multi-homed endpoint.
@@ -645,24 +703,25 @@ Verify that Ethernet Segment Identifier (ESI) is correctly configured and EVPN T
 
 **Objective**
 
-Verify that EVPN Type-4 (Ethernet Segment) routes are correctly advertised and Designated Forwarder (DF) election occurs.
+Verify that EVPN Type-4 (Ethernet Segment) routes are correctly advertised via eBGP and Designated Forwarder (DF) election occurs.
 
 **Test Steps**
 
 1. Configure Ethernet Segment on Leaf-1 and Leaf-2 with ESI 00:11:22:33:44:55:00:00:01.
-2. Verify that both Leaf-1 and Leaf-2 advertise EVPN Type-4 ES routes with:
+2. Verify that both Leaf-1 and Leaf-2 advertise EVPN Type-4 ES routes via eBGP with:
    - Correct ESI
    - Originating router's IP address
-3. Verify that both leaf switches receive each other's Type-4 routes.
-4. Verify that DF election occurs for each VLAN/VNI:
+3. Verify that spine switches receive and forward the Type-4 routes.
+4. Verify that both leaf switches receive each other's Type-4 routes via eBGP through spines.
+5. Verify that DF election occurs for each VLAN/VNI:
    - Check which leaf is elected as DF
    - Verify DF election algorithm (default: modulo-based)
-5. Verify that non-DF leaf does not forward BUM traffic to the ES.
-6. Verify that DF leaf forwards BUM traffic to the ES.
+6. Verify that non-DF leaf does not forward BUM traffic to the ES.
+7. Verify that DF leaf forwards BUM traffic to the ES.
 
 **Expected Results**
 
-- Type-4 ES routes are advertised from both leaf switches.
+- Type-4 ES routes are advertised via eBGP from both leaf switches.
 - DF election completes successfully.
 - Only DF forwards BUM traffic to avoid duplication.
 - Non-DF correctly filters BUM traffic.
@@ -677,7 +736,7 @@ Verify that traffic to a multi-homed endpoint is load balanced across all member
 
 1. Configure multi-homed endpoint on Leaf-1 and Leaf-2 with ESI 00:11:22:33:44:55:00:00:01.
 2. Configure endpoint with MAC 00:AA:BB:CC:DD:01 in VNI 10000.
-3. Verify EVPN Type-2 route is advertised from both Leaf-1 and Leaf-2.
+3. Verify EVPN Type-2 route is advertised via eBGP from both Leaf-1 and Leaf-2.
 4. Send traffic from endpoint on Leaf-3 to the multi-homed endpoint at high rate.
 5. Use spytest to verify traffic is load balanced across both Leaf-1 and Leaf-2.
 6. Measure traffic distribution ratio (should be approximately 50/50).
@@ -702,7 +761,7 @@ Verify that traffic to a multi-homed endpoint continues when one of the member l
 2. Send continuous traffic from endpoint on Leaf-3 to the multi-homed endpoint.
 3. Verify traffic is being received on both Leaf-1 and Leaf-2.
 4. Simulate Leaf-1 failure by shutting down all interfaces.
-5. Verify that Leaf-1's Type-1 EAD routes are withdrawn.
+5. Verify that Leaf-1's eBGP sessions go down and Type-1 EAD routes are withdrawn.
 6. Verify that remote leaf switches update their forwarding to use only Leaf-2.
 7. Use spytest to verify traffic continues to flow via Leaf-2 without loss.
 8. Measure failover convergence time.
@@ -789,22 +848,22 @@ Verify that Designated Forwarder (DF) election works correctly and only the DF f
 
 **Objective**
 
-Verify that MAC addresses learned on one leaf switch in an Ethernet Segment are synchronized to other leaf switches in the same ES.
+Verify that MAC addresses learned on one leaf switch in an Ethernet Segment are synchronized to other leaf switches in the same ES via eBGP.
 
 **Test Steps**
 
 1. Configure multi-homed endpoint on Leaf-1 and Leaf-2 with ESI 00:11:22:33:44:55:00:00:01.
 2. Send traffic from the multi-homed endpoint with MAC 00:AA:BB:CC:DD:01.
 3. Verify that Leaf-1 learns the MAC locally (assuming traffic arrives on Leaf-1 first).
-4. Verify that Leaf-1 advertises EVPN Type-2 route with the ESI.
-5. Verify that Leaf-2 receives the Type-2 route and installs the MAC as a "sync" entry.
+4. Verify that Leaf-1 advertises EVPN Type-2 route with the ESI via eBGP.
+5. Verify that Leaf-2 receives the Type-2 route via eBGP through spines and installs the MAC as a "sync" entry.
 6. Verify that Leaf-2 can forward traffic destined to the MAC via the local ES link.
 7. Use spytest to verify traffic forwarding works via both leaf switches.
 
 **Expected Results**
 
 - MAC is learned locally on one leaf switch.
-- EVPN Type-2 route with ESI is advertised.
+- EVPN Type-2 route with ESI is advertised via eBGP.
 - Other ES members install MAC as synchronized entry.
 - Traffic can be forwarded via any ES member.
 
@@ -821,7 +880,7 @@ Verify that BFD provides fast failure detection for multi-homed endpoints and tr
 3. Send continuous traffic from Leaf-3 to the multi-homed endpoint.
 4. Simulate link failure between Leaf-1 and the endpoint.
 5. Verify BFD detects the failure within configured detection time (150ms).
-6. Verify that Leaf-1 withdraws its Type-1 EAD routes.
+6. Verify that Leaf-1 withdraws its Type-1 EAD routes via eBGP.
 7. Use spytest to verify traffic shifts to Leaf-2.
 8. Measure total traffic disruption time.
 9. Restore the link and verify traffic rebalances.
@@ -829,7 +888,7 @@ Verify that BFD provides fast failure detection for multi-homed endpoints and tr
 **Expected Results**
 
 - BFD detects link failure within 150ms.
-- Type-1 routes are withdrawn immediately.
+- Type-1 routes are withdrawn immediately via eBGP.
 - Traffic shifts to surviving path within 200ms.
 - Minimal packet loss during failover.
 
@@ -868,15 +927,17 @@ Verify that the EVPN-VXLAN fabric maintains connectivity when one or more spine 
 **Test Steps**
 
 1. Verify full connectivity between all endpoints across the fabric.
-2. Send continuous traffic between endpoints on Leaf-1 and Leaf-3 at 40 Gbps.
-3. Verify traffic is load balanced across all four spine switches.
-4. Shut down Spine-1.
-5. Verify traffic reconverges to remaining spine switches.
-6. Measure traffic loss during failover.
-7. Shut down Spine-2.
-8. Verify traffic continues with two remaining spine switches.
-9. Restore Spine-1 and Spine-2.
-10. Verify traffic is rebalanced across all spine switches.
+2. Verify eBGP EVPN sessions are established through all spine switches.
+3. Send continuous traffic between endpoints on Leaf-1 and Leaf-3 at 40 Gbps.
+4. Verify traffic is load balanced across all four spine switches.
+5. Shut down Spine-1.
+6. Verify eBGP sessions through Spine-1 go down.
+7. Verify traffic reconverges to remaining spine switches.
+8. Measure traffic loss during failover.
+9. Shut down Spine-2.
+10. Verify traffic continues with two remaining spine switches.
+11. Restore Spine-1 and Spine-2.
+12. Verify eBGP sessions re-establish and traffic is rebalanced.
 
 **Expected Results**
 
@@ -893,14 +954,15 @@ Verify that BFD provides fast failure detection and triggers rapid ECMP reconver
 
 **Test Steps**
 
-1. Configure BFD on all spine-leaf BGP unnumbered links with aggressive timers (e.g., 100ms x 3).
+1. Configure BFD on all spine-leaf eBGP sessions with aggressive timers (e.g., 100ms x 3).
 2. Send continuous traffic between endpoints on Leaf-1 and Leaf-3.
 3. Simulate link failure between Leaf-1 and Spine-1.
 4. Verify BFD detects the failure within configured detection time.
-5. Verify ECMP path is removed and traffic shifts to remaining paths.
-6. Use spytest to measure total traffic disruption time.
-7. Restore the link and verify BFD session re-establishes.
-8. Verify ECMP path is restored.
+5. Verify eBGP session goes down and ECMP path is removed.
+6. Verify traffic shifts to remaining paths.
+7. Use spytest to measure total traffic disruption time.
+8. Restore the link and verify BFD session re-establishes.
+9. Verify ECMP path is restored.
 
 **Expected Results**
 
@@ -917,7 +979,7 @@ Verify that ECMP correctly handles path failures and maintains traffic distribut
 
 **Test Steps**
 
-1. Verify ECMP is distributing traffic across all available paths.
+1. Verify ECMP is distributing traffic across all available paths through spine switches.
 2. Send traffic with varying 5-tuple to ensure hash distribution.
 3. Use spytest to measure traffic distribution across spine switches.
 4. Fail one ECMP path (e.g., Leaf-1 to Spine-1 link).
@@ -938,13 +1000,13 @@ Verify that ECMP correctly handles path failures and maintains traffic distribut
 
 **Objective**
 
-Verify the system can handle a large number of MAC addresses in the EVPN-VXLAN fabric.
+Verify the system can handle a large number of MAC addresses in the EVPN-VXLAN fabric with eBGP EVPN.
 
 **Test Steps**
 
 1. Configure VNI 10000 on all leaf switches.
 2. Incrementally add MAC addresses from Ixia ports (1K, 10K, 50K, 100K).
-3. Verify all MAC addresses are learned and advertised in EVPN.
+3. Verify all MAC addresses are learned and advertised via eBGP EVPN.
 4. Verify all remote leaf switches install the MAC entries.
 5. Send traffic to random destination MACs and verify forwarding using spytest.
 6. Measure control plane convergence time at each scale point.
@@ -953,7 +1015,7 @@ Verify the system can handle a large number of MAC addresses in the EVPN-VXLAN f
 **Expected Results**
 
 - System supports at least 100K MAC addresses per leaf switch.
-- EVPN route distribution completes within acceptable time.
+- EVPN route distribution via eBGP completes within acceptable time.
 - Traffic forwarding works correctly at scale.
 - Memory utilization remains within acceptable limits.
 
@@ -961,13 +1023,13 @@ Verify the system can handle a large number of MAC addresses in the EVPN-VXLAN f
 
 **Objective**
 
-Verify the system can handle a large number of VNIs.
+Verify the system can handle a large number of VNIs with eBGP EVPN.
 
 **Test Steps**
 
 1. Incrementally configure VNIs (100, 500, 1000, 2000, 4000).
 2. Configure at least one endpoint per VNI.
-3. Verify EVPN Type-2 and Type-3 routes are advertised for all VNIs.
+3. Verify EVPN Type-2 and Type-3 routes are advertised via eBGP for all VNIs.
 4. Verify traffic forwarding works in each VNI using spytest.
 5. Measure control plane convergence time at each scale point.
 6. Measure memory and CPU utilization.
@@ -975,7 +1037,7 @@ Verify the system can handle a large number of VNIs.
 **Expected Results**
 
 - System supports at least 4000 VNIs.
-- EVPN routes are correctly advertised for all VNIs.
+- EVPN routes are correctly advertised via eBGP for all VNIs.
 - Traffic forwarding works in all VNIs.
 - Resource utilization remains within acceptable limits.
 
@@ -983,13 +1045,13 @@ Verify the system can handle a large number of VNIs.
 
 **Objective**
 
-Verify the system can handle a large number of remote VTEPs.
+Verify the system can handle a large number of remote VTEPs with eBGP EVPN.
 
 **Test Steps**
 
 1. Configure additional leaf switches or simulate VTEPs using Ixia.
 2. Incrementally add VTEPs (4, 8, 16, 32, 64).
-3. Verify EVPN sessions are established with all VTEPs.
+3. Verify eBGP EVPN sessions are established with all VTEPs via spine switches.
 4. Verify flood lists include all VTEPs.
 5. Send BUM traffic and verify replication to all VTEPs using spytest.
 6. Measure ingress replication performance.
@@ -997,7 +1059,7 @@ Verify the system can handle a large number of remote VTEPs.
 **Expected Results**
 
 - System supports at least 64 VTEPs.
-- EVPN sessions are stable with all VTEPs.
+- eBGP EVPN sessions are stable with all VTEPs.
 - BUM traffic is replicated to all VTEPs.
 - Ingress replication performance is acceptable.
 

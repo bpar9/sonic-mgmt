@@ -1,0 +1,826 @@
+# Spine Nodes (no parameters required)
+spine0_dc1:
+spine1_dc1:
+spine2_dc1_bgw1:
+    l2vni:
+        - vlan_id: 11
+          vxlan_id: 5011
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 12
+          vxlan_id: 5012
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 13
+          vxlan_id: 5013
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 14
+          vxlan_id: 5014
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 15
+          vxlan_id: 5015
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 16
+          vxlan_id: 5016
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 17
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 18
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 19
+          vxlan_id: 5019
+          vxlan_name: 'vxlan-dc'
+          bum_traffic: true
+        - vlan_id: 20
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 11
+          vxlan_id: 10011
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 12
+          vxlan_id: 10012
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 13
+          vxlan_id: 10013
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 14
+          vxlan_id: 10014
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 15
+          vxlan_id: 10015
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 16
+          vxlan_id: 10016
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 17
+          vxlan_id: 10017
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 18
+          vxlan_id: 10018
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 19
+          vxlan_id: 10019
+          vxlan_name: 'vxlan-wan'
+          bum_traffic: true
+        - vlan_id: 20
+          vxlan_id: 10020
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+spine3_dc1_bgw2:
+    l2vni:
+        - vlan_id: 11
+          vxlan_id: 5011
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 12
+          vxlan_id: 5012
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 13
+          vxlan_id: 5013
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 14
+          vxlan_id: 5014
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 15
+          vxlan_id: 5015
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 16
+          vxlan_id: 5016
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 17
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 18
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 19
+          vxlan_id: 5019
+          vxlan_name: 'vxlan-dc'
+          bum_traffic: true
+        - vlan_id: 20
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 11
+          vxlan_id: 10011
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 12
+          vxlan_id: 10012
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 13
+          vxlan_id: 10013
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 14
+          vxlan_id: 10014
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 15
+          vxlan_id: 10015
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 16
+          vxlan_id: 10016
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 17
+          vxlan_id: 10017
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 18
+          vxlan_id: 10018
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 19
+          vxlan_id: 10019
+          vxlan_name: 'vxlan-wan'
+          bum_traffic: true
+        - vlan_id: 20
+          vxlan_id: 10020
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+
+spine0_dc2_bgw1:
+    l2vni:
+        - vlan_id: 11
+          vxlan_id: 7011
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 12
+          vxlan_id: 7012
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 13
+          vxlan_id: 7013
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 14
+          vxlan_id: 7014
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 15
+          vxlan_id: 7015
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 16
+          vxlan_id: 5016
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 17
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 18
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 19
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 20
+          vxlan_id: 5020
+          vxlan_name: 'vxlan-dc'
+          bum_traffic: true
+        - vlan_id: 11
+          vxlan_id: 10011
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 12
+          vxlan_id: 10012
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 13
+          vxlan_id: 10013
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 14
+          vxlan_id: 10014
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 15
+          vxlan_id: 10015
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 16
+          vxlan_id: 10016
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 17
+          vxlan_id: 10017
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 18
+          vxlan_id: 10018
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 19
+          vxlan_id: 10019
+          vxlan_name: 'vxlan-wan'
+          bum_traffic: true
+        - vlan_id: 20
+          vxlan_id: 10020
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+spine1_dc2_bgw2:
+    l2vni:
+        - vlan_id: 11
+          vxlan_id: 7011
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 12
+          vxlan_id: 7012
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 13
+          vxlan_id: 7013
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 14
+          vxlan_id: 7014
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 15
+          vxlan_id: 7015
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 16
+          vxlan_id: 5016
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 17
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 18
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 19
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 20
+          vxlan_id: 5020
+          vxlan_name: 'vxlan-dc'
+          bum_traffic: true
+        - vlan_id: 11
+          vxlan_id: 10011
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 12
+          vxlan_id: 10012
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 13
+          vxlan_id: 10013
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 14
+          vxlan_id: 10014
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 15
+          vxlan_id: 10015
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 16
+          vxlan_id: 10016
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 17
+          vxlan_id: 10017
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 18
+          vxlan_id: 10018
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 19
+          vxlan_id: 10019
+          vxlan_name: 'vxlan-wan'
+          bum_traffic: true
+        - vlan_id: 20
+          vxlan_id: 10020
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+spine0_dc3_bgw1:
+    l2vni:
+        - vlan_id: 11
+          vxlan_id: 9011
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 12
+          vxlan_id: 9012
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 13
+          vxlan_id: 9013
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 14
+          vxlan_id: 9014
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 15
+          vxlan_id: 9015
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 16
+          vxlan_id: 5016
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 17
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 18
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 19
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'vxlan-dc'
+        - vlan_id: 20
+          vxlan_id: 5020
+          vxlan_name: 'vxlan-dc'
+          bum_traffic: true
+        - vlan_id: 11
+          vxlan_id: 10011
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 12
+          vxlan_id: 10012
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 13
+          vxlan_id: 10013
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 14
+          vxlan_id: 10014
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 15
+          vxlan_id: 10015
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 16
+          vxlan_id: 10016
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 17
+          vxlan_id: 10017
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 18
+          vxlan_id: 10018
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+        - vlan_id: 19
+          vxlan_id: 10019
+          vxlan_name: 'vxlan-wan'
+          bum_traffic: true
+        - vlan_id: 20
+          vxlan_id: 10020
+          bum_traffic: true
+          vxlan_name: 'vxlan-wan'
+
+# Leaf Nodes 
+leaf0_dc1:
+    port_channels:
+        - port_channel_num: 1
+          member_ids: [T1P2]
+          sys_mac: 00:44:33:22:11:11
+          evpn_esi: 00:02:03:04:05:06:07:08:09:0a
+    l2vni:
+        - vlan_id: 11
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5011
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 12
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5012
+          vxlan_name: 'VXLAN'
+        - vlan_id: 13
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5013
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 14
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5014
+          vxlan_name: 'VXLAN'
+        - vlan_id: 15
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5015
+          vxlan_name: 'VXLAN'
+        - vlan_id: 16
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5016
+          vxlan_name: 'VXLAN'
+        - vlan_id: 17
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 18
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 19
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 20
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+    l3vni:
+        - vrf_id: 101
+          vlan_bindings: [11,12,13,14,15,101]
+          vxlan_id: 5101
+        - vrf_id: 102
+          vlan_bindings: [16,17,18,19,20,102]
+          vxlan_id: 5102
+leaf1_dc1:
+    port_channels:
+        - port_channel_num: 1
+          member_ids: [T1P2]
+          sys_mac: 00:44:33:22:11:11
+          evpn_esi: 00:02:03:04:05:06:07:08:09:0a
+    l2vni:
+        - vlan_id: 11
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5011
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 12
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5012
+          vxlan_name: 'VXLAN'
+        - vlan_id: 13
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5013
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 14
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5014
+          vxlan_name: 'VXLAN'
+        - vlan_id: 15
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5015
+          vxlan_name: 'VXLAN'
+        - vlan_id: 16
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5016
+          vxlan_name: 'VXLAN'
+        - vlan_id: 17
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 18
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 19
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 20
+          members: [T1P1, PortChannel1]
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+    l3vni:
+        - vrf_id: 101
+          vlan_bindings: [11,12,13,14,15,101]
+          vxlan_id: 5101
+        - vrf_id: 102
+          vlan_bindings: [16,17,18,19,20,102]
+          vxlan_id: 5102
+leaf2_dc1:
+    port_channels:
+        - port_channel_num: 3
+          member_ids: [T1P2, T1P3]
+          sys_mac: 00:44:33:22:11:33
+          evpn_esi: 00:02:03:04:05:06:07:08:09:0c
+    l2vni:
+        - vlan_id: 11
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5011
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 12
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5012
+          vxlan_name: 'VXLAN'
+        - vlan_id: 13
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5013
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 14
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5014
+          vxlan_name: 'VXLAN'
+        - vlan_id: 15
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5015
+          vxlan_name: 'VXLAN'
+        - vlan_id: 16
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5016
+          vxlan_name: 'VXLAN'
+        - vlan_id: 17
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 18
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 19
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 20
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+    l3vni:
+        - vrf_id: 101
+          vlan_bindings: [11,12,13,14,15,101]
+          vxlan_id: 5101
+        - vrf_id: 102
+          vlan_bindings: [16,17,18,19,20,102]
+          vxlan_id: 5102
+leaf3_dc1:
+    port_channels:
+        - port_channel_num: 3
+          member_ids: [T1P2, T1P3]
+          sys_mac: 00:44:33:22:11:33
+          evpn_esi: 00:02:03:04:05:06:07:08:09:0c
+    l2vni:
+        - vlan_id: 11
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5011
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 12
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5012
+          vxlan_name: 'VXLAN'
+        - vlan_id: 13
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5013
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 14
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5014
+          vxlan_name: 'VXLAN'
+        - vlan_id: 15
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5015
+          vxlan_name: 'VXLAN'
+        - vlan_id: 16
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5016
+          vxlan_name: 'VXLAN'
+        - vlan_id: 17
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 18
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 19
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 20
+          members: [T1P1, PortChannel3]
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+    l3vni:
+        - vrf_id: 101
+          vlan_bindings: [11,12,13,14,15,101]
+          vxlan_id: 5101
+        - vrf_id: 102
+          vlan_bindings: [16,17,18,19,20,102]
+          vxlan_id: 5102
+leaf0_dc2:
+    port_channels:
+        - port_channel_num: 4
+          member_ids: [T1P2, T1P3]
+          sys_mac: 00:44:33:22:11:44
+          evpn_esi: 00:02:03:04:05:06:07:08:09:0d
+    l2vni:
+        - vlan_id: 11
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7011
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 12
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7012
+          vxlan_name: 'VXLAN'
+        - vlan_id: 13
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7013
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 14
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7014
+        - vlan_id: 15
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7015
+          vxlan_name: 'VXLAN'
+        - vlan_id: 16
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5016
+          vxlan_name: 'VXLAN'
+        - vlan_id: 17
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 18
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 19
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 20
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+    l3vni:
+        - vrf_id: 101
+          vlan_bindings: [11,12,13,14,15,101]
+          vxlan_id: 5101
+        - vrf_id: 102
+          vlan_bindings: [16,17,18,19,20,102]
+          vxlan_id: 7102
+leaf1_dc2:
+    port_channels:
+        - port_channel_num: 4
+          member_ids: [T1P2, T1P3]
+          sys_mac: 00:44:33:22:11:44
+          evpn_esi: 00:02:03:04:05:06:07:08:09:0d
+    l2vni:
+        - vlan_id: 11
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7011
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 12
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7012
+          vxlan_name: 'VXLAN'
+        - vlan_id: 13
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7013
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 14
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7014
+          vxlan_name: 'VXLAN'
+        - vlan_id: 15
+          members: [T1P1, PortChannel4]
+          vxlan_id: 7015
+          vxlan_name: 'VXLAN'
+        - vlan_id: 16
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5016
+          vxlan_name: 'VXLAN'
+        - vlan_id: 17
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 18
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 19
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 20
+          members: [T1P1, PortChannel4]
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+    l3vni:
+        - vrf_id: 101
+          vlan_bindings: [11,12,13,14,15,101]
+          vxlan_id: 5101
+        - vrf_id: 102
+          vlan_bindings: [16,17,18,19,20,102]
+          vxlan_id: 7102
+leaf0_dc3:
+    l2vni:
+        - vlan_id: 11
+          members: [T1P1]
+          vxlan_id: 9011
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 12
+          members: [T1P1]
+          vxlan_id: 9012
+          vxlan_name: 'VXLAN'
+        - vlan_id: 13
+          members: [T1P1]
+          vxlan_id: 9013
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 14
+          members: [T1P1]
+          vxlan_id: 9014
+          vxlan_name: 'VXLAN'
+        - vlan_id: 15
+          members: [T1P1]
+          vxlan_id: 9015
+          vxlan_name: 'VXLAN'
+        - vlan_id: 16
+          members: [T1P1]
+          vxlan_id: 5016
+          vxlan_name: 'VXLAN'
+        - vlan_id: 17
+          members: [T1P1]
+          vxlan_id: 5017
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 18
+          members: [T1P1]
+          vxlan_id: 5018
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 19
+          members: [T1P1]
+          vxlan_id: 5019
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+        - vlan_id: 20
+          members: [T1P1]
+          vxlan_id: 5020
+          bum_traffic: true
+          vxlan_name: 'VXLAN'
+    l3vni:
+        - vrf_id: 101
+          vlan_bindings: [11,12,13,14,15,101]
+          vxlan_id: 5101
+        - vrf_id: 102
+          vlan_bindings: [16,17,18,19,20,102]
+          vxlan_id: 9102
+global:
+    dci_wan_underlay_base: "51.51"  # Base for DCI WAN underlay IPs (e.g. 51.51.51.1/24)
+    dci_dc_vip_base: 4000           # DC VIP IPv6 first hextet (DC1=4000:1::1, DC2=6000:1::1, DC3=8000:1::1)
+    dci_dc_vip_step: 2000           # Increment per DC (4000 + (dc_num-1)*step)
+    dci_wan_vip_base: 101           # WAN VIP base octet (DC1=101.101.101.101, DC2=102.102.102.102)
+    dci_overlay_base: 10            # Loopback1 overlay base (first BGW=10.10.10.10, second=20.20.20.20)
+    evpn_mh:
+        redirect_off: true
+        mac_holdtime: 240
+        neigh_holdtime: 180
+    dci_mac_move:
+        within_dc_vlan: 12
+        gateway_v4: "80.12.0.1"
+        gateway_v6: "8000:12::1"
+        host_ipv4: "80.12.0.21"
+        host_ipv4_dest2: "80.12.0.22"
+        src_ipv4: "80.12.0.99"
+        host_ipv6: "8000:12::21"
+        host_ipv6_dest2: "8000:12::22"
+        src_ipv6: "8000:12::99"
+        host_mac: "00:00:00:00:12:21"
+        src_mac: "00:00:00:00:12:99"
+        host_mac_ipv4: "00:00:00:04:12:21"
+        host_mac_ipv6: "00:00:00:06:12:21"
+        src_mac_ipv4: "00:00:00:04:12:99"
+        src_mac_ipv6: "00:00:00:06:12:99"
+        pkts_per_burst_sim: 200
+        rate_percent_sim: 0.01
+        pkts_per_burst_hw: 1000
+        rate_percent_hw: 10
+    l2l3:
+        pkts_per_burst: 100
+        rate_percent: 0.001
+    bum:
+        pkts_per_burst: 10
+        rate_percent: 0.001

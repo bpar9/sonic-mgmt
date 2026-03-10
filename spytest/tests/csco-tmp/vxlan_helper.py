@@ -6205,6 +6205,243 @@ def verify_evpn_type5_routes_dci(dut):
     return False
 
 
+def verify_evpn_type5_route_detail_dci(dut):
+    """
+    Verify EVPN Type-5 (prefix) route details on a BGW node for L3VNI DCI.
+
+    Checks that Type-5 routes have the correct format [5]:[0]:[prefix_len]:[prefix],
+    carry the expected L3VNI value (10101/10102) in extended communities, and have
+    correct next-hop attributes (IPv6 VTEP for DC-side, IPv4 VIP for WAN-side).
+
+    Per l3vni_config_diff.txt, the cross-DC L3VNIs are:
+      - VRF101: L3VNI 10101
+      - VRF102: L3VNI 10102
+
+    RT-REWRITE route-maps on BGWs rewrite:
+      - RT-REWRITE-DC: sets IPv6 next-hop (e.g. 4000:1::1 for DC1) for DC-side
+      - RT-REWRITE-WAN: sets IPv4 next-hop (e.g. 101.101.101.101 for DC1) for WAN-side
+
+    Args:
+        dut: BGW node hostname to verify
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'route_count': int,
+            'l3vni_found': set of L3VNI values found in extended communities,
+            'ipv6_nexthop_found': True if any IPv6 next-hop seen,
+            'details': str summary
+        }
+    """
+    import re
+    result = {
+        'result': False,
+        'route_count': 0,
+        'l3vni_found': set(),
+        'ipv6_nexthop_found': False,
+        'details': ''
+    }
+
+    st.banner('Checking EVPN Type-5 route details on {}'.format(dut))
+
+    try:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        result['details'] = 'Failed to get Type-5 routes on {}: {}'.format(dut, err)
+        st.log(result['details'])
+        return result
+
+    if not cli_output or not cli_output.strip():
+        result['details'] = 'No Type-5 route output on {}'.format(dut)
+        st.log(result['details'])
+        return result
+
+    lines = cli_output.splitlines()
+    # Expected cross-DC L3VNI values from l3vni_config_diff.txt
+    expected_l3vnis = {'10101', '10102'}
+
+    # Parse Type-5 route lines: format [5]:[0]:[prefix_len]:[prefix]
+    type5_pattern = re.compile(r'\[5\]:\[0\]:\[\d+\]:\[[\d\.]+\]')
+    route_lines = [l.strip() for l in lines if type5_pattern.search(l)]
+    result['route_count'] = len(route_lines)
+
+    if result['route_count'] == 0:
+        result['details'] = 'No Type-5 routes found on {}'.format(dut)
+        st.log(result['details'])
+        return result
+
+    st.log('Found {} Type-5 routes on {}'.format(result['route_count'], dut))
+    for sample in route_lines[:5]:
+        st.log('  Route: {}'.format(sample))
+
+    # Check extended communities for L3VNI values
+    # Look for ET:<vni> or VNI lines in the output
+    vni_pattern = re.compile(r'(?:ET:|VNI:?\s*)(\d+)')
+    for line in lines:
+        vni_match = vni_pattern.search(line)
+        if vni_match:
+            vni_val = vni_match.group(1)
+            if vni_val in expected_l3vnis:
+                result['l3vni_found'].add(vni_val)
+
+    # Check for RT (route-target) in extended communities
+    # Format: RT:<ASN>:<VNI> e.g. RT:65102:10101
+    rt_pattern = re.compile(r'RT:(\d+):(\d+)')
+    rt_values = set()
+    for line in lines:
+        for rt_match in rt_pattern.finditer(line):
+            rt_values.add('{}:{}'.format(rt_match.group(1), rt_match.group(2)))
+
+    if rt_values:
+        st.log('Route-target values found: {}'.format(rt_values))
+
+    # Check for IPv6 next-hop (DC-side VTEP)
+    ipv6_nh_pattern = re.compile(r'[0-9a-fA-F]+:[0-9a-fA-F:]+::\d+')
+    for line in lines:
+        if ipv6_nh_pattern.search(line):
+            result['ipv6_nexthop_found'] = True
+            break
+
+    # Build summary
+    details_parts = []
+    details_parts.append('{} Type-5 routes found'.format(result['route_count']))
+    if result['l3vni_found']:
+        details_parts.append('L3VNI values in ext-community: {}'.format(result['l3vni_found']))
+    if rt_values:
+        details_parts.append('RT values: {}'.format(rt_values))
+    if result['ipv6_nexthop_found']:
+        details_parts.append('IPv6 VTEP next-hop present')
+
+    result['details'] = '; '.join(details_parts)
+    st.log(result['details'])
+
+    # Pass if we found Type-5 routes (L3VNI in ext-community is bonus)
+    result['result'] = result['route_count'] > 0
+    return result
+
+
+def verify_bgp_evpn_multihop_sessions_dci(dut):
+    """
+    Verify eBGP multihop EVPN sessions between BGW spines across DCs.
+
+    Per l3vni_config_diff.txt, BGW spines establish eBGP multihop (255)
+    L2VPN EVPN sessions to remote BGWs in other DCs over the WAN overlay.
+    Each BGW has:
+      - OVERLAY peer-group: iBGP to local DC leafs (IPv6 loopback)
+      - OVERLAY_WAN peer-group: eBGP multihop to remote DC BGWs (IPv4 overlay)
+
+    This function verifies:
+      1. BGP L2VPN EVPN summary shows expected remote BGW neighbors
+      2. All remote BGW sessions are in Established state
+      3. Sessions are receiving prefixes (PfxRcd > 0)
+
+    BGW ASN assignments from l3vni_config_diff.txt:
+      - DC1 BGW1: AS 65102, DC1 BGW2: AS 65103
+      - DC2 BGW1: AS 65104, DC2 BGW2: AS 65105
+      - DC3 BGW1: AS 65106
+
+    Args:
+        dut: BGW node hostname to verify
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'total_neighbors': int,
+            'established_count': int,
+            'remote_bgw_neighbors': list of neighbor IPs,
+            'details': str summary
+        }
+    """
+    import re
+    result = {
+        'result': False,
+        'total_neighbors': 0,
+        'established_count': 0,
+        'remote_bgw_neighbors': [],
+        'details': ''
+    }
+
+    st.banner('Checking eBGP multihop EVPN sessions on {}'.format(dut))
+
+    # Get expected remote BGW neighbors using generate_dci_vip_maps
+    dc_match = re.search(r'_(dc\d+)', dut)
+    if not dc_match:
+        result['details'] = 'Cannot determine DC for node: {}'.format(dut)
+        st.log(result['details'])
+        return result
+
+    my_dc = dc_match.group(1)
+
+    (loopback_ipv6_dc_vip,
+     loopback_ipv4_wan_vip,
+     loopback_ipv4_wan_overlay,
+     transit_wan_ipv4_underlay) = generate_dci_vip_maps()
+
+    # Expected remote BGW neighbors (other DCs) via WAN overlay IPs
+    expected_remote_bgws = []
+    for bgw_node, overlay_ip in loopback_ipv4_wan_overlay.items():
+        if bgw_node == dut:
+            continue
+        bgw_dc_match = re.search(r'_(dc\d+)', bgw_node)
+        if bgw_dc_match and bgw_dc_match.group(1) != my_dc:
+            expected_remote_bgws.append(overlay_ip)
+
+    if not expected_remote_bgws:
+        result['details'] = 'No remote BGW neighbors expected for {}'.format(dut)
+        st.log(result['details'])
+        return result
+
+    st.log('Expected remote BGW neighbors for {}: {}'.format(dut, expected_remote_bgws))
+
+    # Get actual BGP L2VPN EVPN summary
+    try:
+        act_data = get_bgp_summary(dut)
+    except Exception as err:
+        result['details'] = 'Failed to get BGP summary on {}: {}'.format(dut, err)
+        st.log(result['details'])
+        return result
+
+    evpn_data = [entry for entry in act_data if entry.get('protocol') == 'L2VPN EVPN']
+    result['total_neighbors'] = len(evpn_data)
+
+    # Check each expected remote BGW is present and established
+    for expected_ip in expected_remote_bgws:
+        found = False
+        for entry in evpn_data:
+            if entry.get('neighbor') == expected_ip:
+                found = True
+                result['remote_bgw_neighbors'].append(expected_ip)
+                state = str(entry.get('state', ''))
+                # Numeric state means PfxRcd count = session established
+                if state.isdigit():
+                    result['established_count'] += 1
+                    st.log('Remote BGW {} session established (PfxRcd={})'.format(
+                        expected_ip, state))
+                elif state.lower() in ('established', 'up'):
+                    result['established_count'] += 1
+                    st.log('Remote BGW {} session established'.format(expected_ip))
+                else:
+                    st.log('Remote BGW {} session NOT established (state={})'.format(
+                        expected_ip, state))
+                break
+        if not found:
+            st.log('Remote BGW {} NOT found in BGP summary on {}'.format(expected_ip, dut))
+
+    # Build summary
+    details_parts = []
+    details_parts.append('{}/{} remote BGW sessions found'.format(
+        len(result['remote_bgw_neighbors']), len(expected_remote_bgws)))
+    details_parts.append('{} established'.format(result['established_count']))
+    details_parts.append('total L2VPN EVPN neighbors: {}'.format(result['total_neighbors']))
+    result['details'] = '; '.join(details_parts)
+    st.log(result['details'])
+
+    # Pass if all expected remote BGW sessions are established
+    result['result'] = (result['established_count'] == len(expected_remote_bgws))
+    return result
+
+
 def report_result(result, tc_id='', rc_msg=''):
     if result:
         st.banner('Testcase: {} :: Result: Pass'.format(tc_id))

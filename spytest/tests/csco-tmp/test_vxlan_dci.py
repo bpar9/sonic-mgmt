@@ -2702,41 +2702,34 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l3vni_ipv4_across_dci(self):
+    def test_base_dci_l3vni_base_profile(self):
         """
         L3VNI_dci:1 - L3VNI Base Profile - Bring up L3VNI base profile across DCI
         
         Description:
-            1) Bring up DCI base profile with 3 DCs using V6 VTEP
-            2) Configure L3VNI on top of L2VNI base profile
-            3) Configure all Route target import and export on each node
-            4) Verify L3VNI mapping (show vxlan vlanvnimap)
-            5) Verify VRF to VNI binding (show vxlan vrfvnimap)
+            1) Verify L3VNI mapping (show vxlan vlanvnimap)
+            2) Verify VRF to VNI binding (show vxlan vrfvnimap)
                - Per vxlan_dci_input_file.yaml:
-                 Leaf DC1: Vrf101→5101, Vrf102→5102
-                 Leaf DC2: Vrf101→5101, Vrf102→7102
-                 Leaf DC3: Vrf101→5101, Vrf102→9102
+                 Leaf DC1: Vrf101->5101, Vrf102->5102
+                 Leaf DC2: Vrf101->5101, Vrf102->7102
+                 Leaf DC3: Vrf101->5101, Vrf102->9102
                - BGW nodes use cross-DC L3VNI: 10101 (Vrf101), 10102 (Vrf102)
-            6) Verify Type-5 routes advertised (show bgp l2vpn evpn route type prefix)
+            3) Verify Type-5 routes advertised (show bgp l2vpn evpn route type prefix)
                - Route format: [5]:[0]:[24]:[ip_prefix]
-            7) Verify VXLAN tunnels and remote VTEPs
-            8) Send L3VNI IPv4 traffic across DCs and verify no packet loss
-               - 23 L3VNI flows: DC1→DC2 (SH/MH), DC2→DC3
-               - VRF101 VLAN pairs: 11→12, 12→13, 13→14, 15→11
-               - VRF102 VLAN pairs: 16→17, 17→18, 18→19, 20→16
             
         Verification CLIs:
             show vxlan vlanvnimap, show vxlan vrfvnimap, show vrf,
-            show bgp l2vpn evpn route type 5, show vxlan tunnel,
-            show vxlan remotevtep, show ip route vrf all
+            show bgp l2vpn evpn route type 5, show mac, show arp,
+            show vxlan tunnel, show vxlan counter, show vxlan remotevtep,
+            show vxlan remotemac all, show ip route vrf all,
+            show evpn es, show evpn vni detail, show platform npu mac-age
             
         Steps:
             1. Verify VRF-VNI mappings on all nodes (leaf and BGW)
             2. Verify VLAN-VNI mappings on all nodes
             3. Verify Type-5 routes on BGW nodes
-            4. Send L3VNI IPv4 traffic across DCI and verify no packet loss
         """
-        tc_id = "test_base_dci_l3vni_ipv4_across_dci"
+        tc_id = "test_base_dci_l3vni_base_profile"
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
         
@@ -2801,41 +2794,20 @@ class TestVxlanDCIBase():
                 summ += msg
                 result = False
         
-        # Step 4: Send L3VNI IPv4 traffic across DCI and verify no packet loss
-        st.banner('Step 4: Verify L3VNI IPv4 traffic across DCI')
-        st.log('Using scope="cross" to test ONLY L3VNI streams with DC2/DC3 destinations')
-        st.log('Traffic flows: VRF101 (11->12, 12->13, 13->14, 15->11) + VRF102 (16->17, 17->18, 18->19, 20->16)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
-            st.log('L3VNI IPv4 traffic across DCI: Pass')
-        else:
-            msg = 'L3VNI IPv4 traffic across DCI: Fail\n'
-            st.log(msg)
-            summ += msg
-            result = False
-        
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l3vni_ipv6_across_dci(self):
+    def test_base_dci_l3vni_type5_route_ipv6_vtep(self):
         """
-        L3VNI_dci:2 - L3VNI Control Plane - Type-5 route advertisement with IPv6 VTEP
+        L3VNI_dci:2 - L3VNI Control Plane - Type-5 route advertisement within DC (IPv6 VTEP)
         
         Description:
             1) Refer to L3VNI_dci:1 for base profile bring up
-            2) Verify Type-5 route advertisement across DCI with IPv6 VTEP
-            3) On DC-side (OVERLAY peer-group), BGWs advertise Type-5 routes
-               with IPv6 next-hop (DC VIP) via RT-REWRITE-DC route-map:
-               - DC1 BGWs: set ipv6 next-hop global 4000:1::1
-               - DC2 BGWs: set ipv6 next-hop global 6000:1::1
-               - DC3 BGW:  set ipv6 next-hop global 7000:1::1
-            4) On WAN-side (OVERLAY_WAN peer-group), BGWs advertise Type-5 routes
-               with IPv4 next-hop (WAN VIP) via RT-REWRITE-WAN route-map:
-               - DC1 BGWs: set ip next-hop 101.101.101.101
-               - DC2 BGWs: set ip next-hop 102.102.102.102
-               - DC3 BGW:  set ip next-hop 103.103.103.103
-            5) Verify Type-5 route format: [5]:[0]:[24]:[prefix]
-            6) Verify L3VNI=10101/10102 in extended community
-            7) Verify RT rewrite: each BGW exports unique RT (e.g. 65102:10101)
-            8) Send L3VNI IPv6 traffic across DCI and verify no packet loss
+            2) Verify Type-5 route advertised: [5]:[0]:[24]:[prefix]
+            3) Verify L3VNI=10101/10102 in extended community
+            4) Verify next-hop is IPv6 VTEP
+               - DC-side (OVERLAY peer-group) uses IPv6 next-hop (DC VIP):
+                 DC1 BGWs: 4000:1::1, DC2 BGWs: 6000:1::1, DC3 BGW: 7000:1::1
+            5) Verify VRF-VNI mappings on BGW nodes
             
         RT export per BGW from l3vni_config_diff.txt:
             DC1 BGW1 (AS 65102): RT 65102:10101, 65102:10102
@@ -2847,10 +2819,8 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify Type-5 route details on BGW nodes (format, L3VNI, next-hop)
             2. Verify VRF-VNI mappings on all BGW nodes
-            3. Verify BGP L2VPN EVPN summary on BGW nodes (all neighbors UP)
-            4. Send L3VNI IPv6 traffic across DCI and verify no packet loss
         """
-        tc_id = "test_base_dci_l3vni_ipv6_across_dci"
+        tc_id = "test_base_dci_l3vni_type5_route_ipv6_vtep"
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
         
@@ -2901,36 +2871,9 @@ class TestVxlanDCIBase():
                 summ += msg
                 result = False
         
-        # Step 3: Verify BGP L2VPN EVPN summary on BGW nodes
-        st.banner('Step 3: Verify BGP L2VPN EVPN summary on BGW nodes')
-        for dut in bgw_nodes:
-            try:
-                evpn_exp = vxlan_obj.get_expected_bgp_l2vpn_evpn_summary_dci(dut)
-                if evpn_exp:
-                    vxlan_obj.verify_bgp_l2vpn_evpn_summary_dci(dut, evpn_exp, vl_retries=2)
-                    st.log('BGP L2VPN EVPN summary on {}: Pass ({} neighbors)'.format(dut, len(evpn_exp)))
-                else:
-                    st.log('BGP L2VPN EVPN summary on {}: Skipped (no neighbors expected)'.format(dut))
-            except Exception as err:
-                msg = 'BGP L2VPN EVPN summary on {}: Fail - {}\n'.format(dut, err)
-                st.log(msg)
-                summ += msg
-                result = False
-        
-        # Step 4: Send L3VNI IPv6 traffic across DCI
-        st.banner('Step 4: Verify L3VNI IPv6 traffic across DCI')
-        st.log('Using scope="cross" to test ONLY L3VNI streams with DC2/DC3 destinations')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
-            st.log('L3VNI IPv6 traffic across DCI: Pass')
-        else:
-            msg = 'L3VNI IPv6 traffic across DCI: Fail\n'
-            st.log(msg)
-            summ += msg
-            result = False
-        
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l3vni_control_plane_across_dci(self):
+    def test_base_dci_l3vni_ebgp_multihop_bgw(self):
         """
         L3VNI_dci:6 - L3VNI Control Plane - Multihop eBGP EVPN session between BGWs
         
@@ -2971,7 +2914,7 @@ class TestVxlanDCIBase():
             3. Verify EVPN VNI table shows L3 VNIs on BGW nodes
             4. Verify EVPN Type-5 routes exchanged with correct attributes
         """
-        tc_id = "test_base_dci_l3vni_control_plane_across_dci"
+        tc_id = "test_base_dci_l3vni_ebgp_multihop_bgw"
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
         

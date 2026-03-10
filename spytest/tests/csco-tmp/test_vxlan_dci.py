@@ -2785,7 +2785,6 @@ class TestVxlanDCIBase():
         
         # Step 1: Verify base setup is healthy before traffic test
         st.banner('Step 1: Verify base setup before cross-DC L3VNI IPv6 traffic test')
-        st.log('Using scope="cross" to test ONLY L3VNI streams with DC2/DC3 destinations')
         if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'], checks='basic'):
             summ = 'Base setup verification failed before cross-DC L3VNI IPv6 traffic test\n'
             st.log(summ)
@@ -2793,6 +2792,7 @@ class TestVxlanDCIBase():
         
         # Step 2: Use scope='cross' to test ONLY streams with DC2/DC3 destinations
         st.banner('Step 2: Verify L3VNI IPv6 traffic across DCI')
+        st.log('Using scope="cross" to test ONLY L3VNI streams with DC2/DC3 destinations')
         if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
             st.log('L3VNI IPv6 traffic across DCI: Pass')
         else:

@@ -253,6 +253,8 @@ def config_bgw_nodes(dut=None):
     - l2vni_dci: L2VNI with named VXLANs
     - bgp_transit_wan_dci, bgp_overlay_wan_dci: BGP to other DCs
     - bgp_ihop_direct_dci: IHOP and DC_DIRECT peer groups
+    - l3vni_sonic_bgw_dci: L3VNI SONiC CLI (VLAN, VRF, VXLAN map, VRF-VNI map)
+    - l3vni_frr_bgw_dci: L3VNI FRR (VRF-VNI, extcommunity-list, RT-REWRITE, BGP VRF)
     
     Args:
         dut: Optional specific node to configure. If None, configures all BGW nodes.
@@ -271,9 +273,13 @@ def config_bgw_nodes(dut=None):
     vxlan_obj.config_feature_parallel(bgw_nodes, 'l2vni_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_transit_wan_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_overlay_wan_dci', dci_enabled=True)
-    # ADDED: New configuration steps for IHOP and route-maps
     vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_ihop_direct_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'route_maps_dci', dci_enabled=True)
+    # L3VNI configuration from l3vni_config_diff.txt:
+    # SONiC CLI: VLAN 101/102, VRF, VRF-VLAN bind, VXLAN map (vxlan-dc/vxlan-wan), VRF-VNI map
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'l3vni_sonic_bgw_dci', dci_enabled=True)
+    # FRR: VRF-VNI bindings, extcommunity-lists, RT-REWRITE route-maps, BGP VRF with route-targets
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'l3vni_frr_bgw_dci', dci_enabled=True)
     # Save the configuration for the relevant nodes
     for node in bgw_nodes:
         vxlan_obj.config_dut(node, 'sonic', "sudo config save -y")
@@ -299,6 +305,9 @@ def unconfig_bgw_nodes(dut=None):
 
     # Perform the unconfiguration
     vxlan_obj.enable_uplink_tracking_configs(bgw_nodes, add=False)
+    # Remove L3VNI BGW config (FRR first, then SONiC) -- reverse of config order
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'delete_l3vni_frr_bgw_dci', dci_enabled=True)
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'delete_l3vni_sonic_bgw_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'delete_l2vni_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'delete_bgp_l3vni_config')
     vxlan_obj.config_feature_parallel(bgw_nodes, 'delete_bgp_config')

@@ -954,6 +954,292 @@ def generate_source_route_maps(bgw_data, loopback_v4="Loopback0", loopback_v6="L
     return output
 
 
+def _get_l3vni_bgw_params(node_name, config_dict, bgp_info):
+    """
+    Compute per-BGW L3VNI parameters from topology data.
+
+    Derives cross-DC L3VNI values, leaf VLAN bindings, leaf ASNs (same DC),
+    remote BGW ASNs, and leaf L3VNI values needed for BGW L3VNI configuration.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num} from generate_bgp_underlay_info
+
+    Returns:
+        dict with keys: as_num, dc, vrf_l3vni_pairs, vlan_bindings_by_vrf,
+                        leaf_asns, leaf_l3vnis_by_vrf, remote_bgw_asns
+        or None if data cannot be derived
+    """
+    dc = _get_dc_from_name(node_name)
+    if not dc:
+        st.warn('Cannot determine DC from node name: {}'.format(node_name))
+        return None
+
+    as_num = bgp_info.get(node_name, {}).get('as_num')
+    if not as_num:
+        st.warn('No ASN found for BGW node: {}'.format(node_name))
+        return None
+
+    # Find a leaf in the same DC to get L3VNI data (VLAN bindings, VRF IDs)
+    ref_leaf = None
+    for n, cfg in config_dict.items():
+        if n.startswith('leaf') and dc in n and isinstance(cfg, dict) and 'l3vni' in cfg:
+            ref_leaf = cfg
+            break
+    if not ref_leaf or not ref_leaf.get('l3vni'):
+        st.warn('No leaf L3VNI data found for DC {}'.format(dc))
+        return None
+
+    # Build VRF -> cross-DC L3VNI pairs and VLAN bindings
+    # Cross-DC L3VNI = 10000 + vrf_id (e.g. Vrf101 -> 10101, Vrf102 -> 10102)
+    vrf_l3vni_pairs = []
+    vlan_bindings_by_vrf = {}
+    leaf_l3vnis_by_vrf = {}
+    for l3vni_item in ref_leaf['l3vni']:
+        vrf_id = l3vni_item['vrf_id']
+        cross_dc_vni = 10000 + vrf_id
+        vrf_l3vni_pairs.append((vrf_id, cross_dc_vni))
+        vlan_bindings_by_vrf[vrf_id] = l3vni_item.get('vlan_bindings', [])
+        leaf_l3vnis_by_vrf[vrf_id] = l3vni_item.get('vxlan_id', 5000 + vrf_id)
+
+    # Collect leaf ASNs in same DC (for RT-WAN extcommunity-list)
+    leaf_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict['nodes'].get('leaf', [])
+        if dc in n and n in bgp_info
+    ))
+
+    # Collect remote BGW ASNs (BGWs in other DCs, for RT-DC extcommunity-list)
+    all_bgw_nodes = sorted(n for n in config_dict['nodes'].get('all', []) if 'bgw' in n)
+    remote_bgw_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in all_bgw_nodes
+        if n != node_name and dc not in n and n in bgp_info
+    ))
+
+    return {
+        'as_num': as_num,
+        'dc': dc,
+        'vrf_l3vni_pairs': vrf_l3vni_pairs,
+        'vlan_bindings_by_vrf': vlan_bindings_by_vrf,
+        'leaf_asns': leaf_asns,
+        'leaf_l3vnis_by_vrf': leaf_l3vnis_by_vrf,
+        'remote_bgw_asns': remote_bgw_asns,
+    }
+
+
+def generate_l3vni_bgw_sonic_config(node_name, config_dict, bgp_info, mode='add'):
+    """
+    Generate SONiC CLI commands for L3VNI configuration on a BGW node.
+
+    Per l3vni_config_diff.txt, creates VLANs (101/102), VRFs (Vrf101/Vrf102),
+    binds L2 VLANs to VRFs, maps L3VNI VLANs to cross-DC VNI (10101/10102)
+    on both vxlan-dc and vxlan-wan, and sets VRF-VNI mappings.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        mode: 'add' or 'del'
+
+    Returns:
+        SONiC CLI command string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    output = ''
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        cmd = []
+        bindings = params['vlan_bindings_by_vrf'].get(vrf_id, [])
+        if mode == 'add':
+            cmd.append('sudo config vlan add {}\n'.format(vrf_id))
+            cmd.append('sudo config vrf add Vrf{}\n'.format(vrf_id))
+            cmd.append('sudo config interface vrf bind Vlan{} Vrf{}\n'.format(vrf_id, vrf_id))
+            for vlan in bindings:
+                if vlan != vrf_id:
+                    cmd.append('sudo config interface vrf bind Vlan{} Vrf{}\n'.format(vlan, vrf_id))
+            cmd.append('sudo config vxlan map add vxlan-dc {} {}\n'.format(vrf_id, cross_dc_vni))
+            cmd.append('sudo config vxlan map add vxlan-wan {} {}\n'.format(vrf_id, cross_dc_vni))
+            cmd.append('sudo config vrf add_vrf_vni_map Vrf{} {}\n'.format(vrf_id, cross_dc_vni))
+        else:
+            cmd.append('sudo config vrf del_vrf_vni_map Vrf{}\n'.format(vrf_id))
+            cmd.append('sudo config vxlan map del vxlan-wan {} {}\n'.format(vrf_id, cross_dc_vni))
+            cmd.append('sudo config vxlan map del vxlan-dc {} {}\n'.format(vrf_id, cross_dc_vni))
+            for vlan in reversed(bindings):
+                if vlan != vrf_id:
+                    cmd.append('sudo config interface vrf unbind Vlan{}\n'.format(vlan))
+            cmd.append('sudo config interface vrf unbind Vlan{}\n'.format(vrf_id))
+            cmd.append('sudo config vrf del Vrf{}\n'.format(vrf_id))
+            cmd.append('sudo config vlan del {}\n'.format(vrf_id))
+        output += ''.join(cmd)
+    return output
+
+
+def generate_l3vni_bgw_frr_config(node_name, config_dict, bgp_info, dci_vip_maps):
+    """
+    Generate FRR configuration for L3VNI on a BGW node.
+
+    Per l3vni_config_diff.txt, generates:
+      - VRF-VNI bindings (cross-DC L3VNI)
+      - BGP extcommunity-lists (RT-WAN-* for leaf routes, RT-DC-* for remote BGW routes)
+      - RT-REWRITE-WAN route-map (rewrite for WAN-side tunnels)
+      - RT-REWRITE-DC route-map (rewrite for DC-side tunnels)
+      - Apply route-maps to OVERLAY and OVERLAY_WAN neighbors
+      - BGP VRF config with route-target import/export
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        dci_vip_maps: Tuple from generate_dci_vip_maps():
+            (loopback_ipv6_dc_vip, loopback_ipv4_wan_vip, ...)
+
+    Returns:
+        FRR config string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    loopback_ipv6_dc_vip, loopback_ipv4_wan_vip = dci_vip_maps[0], dci_vip_maps[1]
+    as_num = params['as_num']
+    dc_vip_ipv6 = loopback_ipv6_dc_vip.get(node_name, '')
+    wan_vip_ipv4 = loopback_ipv4_wan_vip.get(node_name, '')
+    leaf_asns = params['leaf_asns']
+    remote_bgw_asns = params['remote_bgw_asns']
+
+    output = ''
+
+    # 1) VRF-VNI bindings
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'vrf Vrf{}\n'.format(vrf_id)
+        output += ' vni {}\n'.format(cross_dc_vni)
+        output += 'exit-vrf\n'
+
+    # 2) BGP extcommunity-lists
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+        # RT-WAN: match routes from local leaves (leaf ASN : leaf L3VNI)
+        seq = 5
+        for leaf_asn in leaf_asns:
+            output += 'bgp extcommunity-list standard RT-WAN-{} seq {} permit rt {}:{}\n'.format(
+                cross_dc_vni, seq, leaf_asn, leaf_vni)
+            seq += 5
+        # RT-DC: match routes from remote BGWs (remote BGW ASN : cross-DC L3VNI)
+        seq = 5
+        for remote_asn in remote_bgw_asns:
+            output += 'bgp extcommunity-list standard RT-DC-{} seq {} permit rt {}:{}\n'.format(
+                cross_dc_vni, seq, remote_asn, cross_dc_vni)
+            seq += 5
+
+    # 3) RT-REWRITE-WAN route-map (WAN-side: IPv4 next-hop)
+    permit_seq = 10
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'route-map RT-REWRITE-WAN permit {}\n'.format(permit_seq)
+        output += '  match extcommunity RT-WAN-{}\n'.format(cross_dc_vni)
+        output += '  match evpn route-type prefix\n'
+        output += '  set evpn vni {}\n'.format(cross_dc_vni)
+        output += '  set evpn rmac local\n'
+        output += '  set extcommunity rt {}:{}\n'.format(as_num, cross_dc_vni)
+        output += '  set ip next-hop {}\n'.format(wan_vip_ipv4)
+        output += 'exit\n'
+        permit_seq += 5
+    output += 'route-map RT-REWRITE-WAN permit {}\n'.format(permit_seq)
+    output += 'exit\n'
+
+    # 4) RT-REWRITE-DC route-map (DC-side: IPv6 next-hop)
+    permit_seq = 10
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'route-map RT-REWRITE-DC permit {}\n'.format(permit_seq)
+        output += '  match extcommunity RT-DC-{}\n'.format(cross_dc_vni)
+        output += '  match evpn route-type prefix\n'
+        output += '  set evpn vni {}\n'.format(cross_dc_vni)
+        output += '  set evpn rmac local\n'
+        output += '  set extcommunity rt {}:{}\n'.format(as_num, cross_dc_vni)
+        output += '  set ipv6 next-hop global {}\n'.format(dc_vip_ipv6)
+        output += 'exit\n'
+        permit_seq += 5
+    output += 'route-map RT-REWRITE-DC permit {}\n'.format(permit_seq)
+    output += 'exit\n'
+
+    # 5) Apply route-maps to OVERLAY and OVERLAY_WAN neighbors
+    output += 'router bgp {}\n'.format(as_num)
+    output += 'address-family l2vpn evpn\n'
+    output += 'neighbor OVERLAY route-map RT-REWRITE-DC out\n'
+    output += 'neighbor OVERLAY_WAN route-map RT-REWRITE-WAN out\n'
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+
+    # 6) BGP VRF config with route-target import/export
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+        output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+        output += 'bgp bestpath as-path multipath-relax\n'
+        output += 'address-family l2vpn evpn\n'
+        # Export own RT
+        output += 'route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+        # Import from remote BGWs (remote_asn:cross_dc_vni)
+        for remote_asn in remote_bgw_asns:
+            output += 'route-target import {}:{}\n'.format(remote_asn, cross_dc_vni)
+        # Import from local leaves (leaf_asn:leaf_vni)
+        for leaf_asn in leaf_asns:
+            output += 'route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        output += 'no use-es-l3nhg\n'
+        output += 'advertise ipv4 unicast\n'
+        output += 'advertise ipv6 unicast\n'
+        output += 'exit-address-family\n'
+        output += 'exit\n'
+
+    return output
+
+
+def delete_l3vni_bgw_frr_config(node_name, config_dict, bgp_info):
+    """
+    Generate FRR unconfig commands for L3VNI on a BGW node.
+
+    Removes BGP VRF config, route-maps, extcommunity-lists, and VRF-VNI bindings
+    in reverse order of generate_l3vni_bgw_frr_config.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+
+    Returns:
+        FRR unconfig string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    output = ''
+
+    # Remove BGP VRF config
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'no router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+
+    # Remove route-maps
+    output += 'no route-map RT-REWRITE-WAN\n'
+    output += 'no route-map RT-REWRITE-DC\n'
+
+    # Remove extcommunity-lists
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'no bgp extcommunity-list standard RT-WAN-{}\n'.format(cross_dc_vni)
+        output += 'no bgp extcommunity-list standard RT-DC-{}\n'.format(cross_dc_vni)
+
+    # Remove VRF-VNI bindings
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'vrf Vrf{}\n'.format(vrf_id)
+        output += ' no vni {}\n'.format(cross_dc_vni)
+        output += 'exit-vrf\n'
+
+    output += 'end\n'
+    output += 'exit\n'
+    return output
+
+
 def get_interfaces_status(dut, interface=""):
     """
     parses 'show interfaces status ' output into data struct below
@@ -3321,6 +3607,8 @@ def config_feature_dci(nodes, feature, **kwargs):
         bgp_overlay_wan_dci: OVERLAY_WAN peer-group for EVPN across DCs
         bgp_ihop_direct_dci: IHOP and DC_DIRECT peer-groups
         route_maps_dci: Source route-maps for BGP updates
+        l3vni_sonic_bgw_dci: SONiC CLI for L3VNI on BGW (VLAN, VRF, VXLAN map, VRF-VNI)
+        l3vni_frr_bgw_dci: FRR config for L3VNI on BGW (VRF-VNI, extcommunity, RT-REWRITE, BGP VRF)
         delete_*: Unconfig variants for the above
 
     Args:
@@ -3356,9 +3644,12 @@ def config_feature_dci(nodes, feature, **kwargs):
 
     _DCI_ONLY_FEATURES = ('loopback_dci', 'config_interface_ip_dci', 'nvo_dci', 'bgp_transit_wan_dci',
                           'bgp_overlay_wan_dci', 'bgp_ihop_direct_dci', 'route_maps_dci', 'l2vni_dci',
+                          'l3vni_sonic_bgw_dci', 'l3vni_frr_bgw_dci',
+                          'delete_l3vni_sonic_bgw_dci', 'delete_l3vni_frr_bgw_dci',
                           'delete_l2vni_dci', 'delete_vxlan_dci', 'delete_interface_ip_dci')
     _BGP_CONFIG_FEATURES = ('bgp_transit_wan_dci', 'bgp_overlay_wan_dci', 'bgp_ihop_direct_dci',
                            'route_maps_dci', 'bgp_overlay_dci', 'bgp_underlay_dci', 'bgp_l3vni_config_dci',
+                           'l3vni_frr_bgw_dci', 'delete_l3vni_frr_bgw_dci',
                            'delete_bgp_l3vni_config_dci', 'delete_bgp_config_dci')
     loopback20_ips = getattr(generate_dci_vip_maps, '_loopback20_ips', {})
 
@@ -3402,6 +3693,15 @@ def config_feature_dci(nodes, feature, **kwargs):
             config_out = generate_bgp_ihop_direct_config(bgp_info_bgw[node], ihop_peers, dc_direct_peers)
         elif feature == 'route_maps_dci':
             config_out = generate_source_route_maps(bgp_info[node])
+        elif feature == 'l3vni_sonic_bgw_dci':
+            config_out = generate_l3vni_bgw_sonic_config(node, config_dict, bgp_info)
+        elif feature == 'l3vni_frr_bgw_dci':
+            config_out = generate_l3vni_bgw_frr_config(
+                node, config_dict, bgp_info, config_feature_dci._dci_vip_cache)
+        elif feature == 'delete_l3vni_sonic_bgw_dci':
+            config_out = generate_l3vni_bgw_sonic_config(node, config_dict, bgp_info, mode='del')
+        elif feature == 'delete_l3vni_frr_bgw_dci':
+            config_out = delete_l3vni_bgw_frr_config(node, config_dict, bgp_info)
         elif feature == 'delete_l2vni_dci':
             config_out = generate_l2vni_config(config, dci_enabled=True, mode='del')
         elif feature == 'delete_vxlan_dci':

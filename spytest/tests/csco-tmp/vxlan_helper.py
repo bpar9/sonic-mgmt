@@ -6157,6 +6157,54 @@ def verify_evpn_vni(dut, exp_data, **kwargs):
     return act_data
 
 
+def verify_evpn_type5_routes_dci(dut):
+    """
+    Verify EVPN Type-5 (prefix) routes are present on a BGW node for L3VNI DCI.
+
+    Runs 'show bgp l2vpn evpn route type prefix' on the BGW and checks that
+    at least one Type-5 route exists. Type-5 routes are required for cross-DC
+    L3VNI forwarding -- they carry IP prefix information with VRF-aware
+    route-targets and are rewritten by RT-REWRITE route-maps on BGW spines.
+
+    Args:
+        dut: BGW node hostname to verify
+
+    Returns:
+        Boolean: True if at least one Type-5 route is found, False otherwise
+    """
+    st.banner('Checking EVPN Type-5 (prefix) routes on {}'.format(dut))
+
+    try:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        st.log('Failed to get Type-5 routes on {}: {}'.format(dut, err))
+        return False
+
+    if not cli_output or not cli_output.strip():
+        st.log('No Type-5 route output on {}'.format(dut))
+        return False
+
+    # Count Type-5 route entries: lines containing "[5]:[" are route lines
+    route_count = 0
+    for line in cli_output.splitlines():
+        if '[5]:[' in line:
+            route_count += 1
+
+    st.log('Found {} EVPN Type-5 routes on {}'.format(route_count, dut))
+
+    if route_count > 0:
+        # Log a sample of routes for debugging (first 5)
+        sample_lines = [l.strip() for l in cli_output.splitlines() if '[5]:[' in l][:5]
+        for sample in sample_lines:
+            st.log('  Type-5 route sample: {}'.format(sample))
+        return True
+
+    # Check for "No matching entries" or empty table indicators
+    st.log('No EVPN Type-5 routes found on {} - L3VNI cross-DC may not be active'.format(dut))
+    return False
+
+
 def report_result(result, tc_id='', rc_msg=''):
     if result:
         st.banner('Testcase: {} :: Result: Pass'.format(tc_id))

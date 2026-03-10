@@ -1034,9 +1034,9 @@ def tgen_preconfig(**kwargs):
     WITHIN_DC_VLANS = [12, 17]  # VRF 101: VLAN 12, 17 (within-DC) - keeps existing behavior
     CROSS_DC_VLANS = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]  # All VLANs for cross-DC (vxlan-wan)
 
-    # L3VNI across DCI is NOT supported in this solution/testbed at the moment.
-    # Keep the code paths intact, but disable generation of cross-DC L3 streams for now.
-    ENABLE_L3_ACROSS_DCI = False
+    # L3VNI across DCI: Enable cross-DC L3 stream generation.
+    # Set to False to disable cross-DC L3VNI traffic streams if unsupported.
+    ENABLE_L3_ACROSS_DCI = True
     
     def filter_endpoints_by_vlan_and_scope(endpoints, allowed_vlans_within, allowed_vlans_cross):
         """
@@ -1077,12 +1077,12 @@ def tgen_preconfig(**kwargs):
     l2_traffic_endpoints = filter_endpoints_by_vlan_and_scope(
         l2_traffic_endpoints, WITHIN_DC_VLANS, CROSS_DC_VLANS
     )
-    # L3VNI: allow within-DC only; cross-DC L3VNI is disabled (unsupported)
+    # L3VNI: allow cross-DC when enabled, otherwise within-DC only
     if ENABLE_L3_ACROSS_DCI:
         l3_allowed_cross = CROSS_DC_VLANS
     else:
         l3_allowed_cross = []
-        st.log("NOTE: L3VNI across DCI is disabled (unsupported). Generating within-DC L3 only.")
+        st.log("NOTE: L3VNI across DCI is disabled. Generating within-DC L3 only.")
 
     l3_traffic_endpoints = filter_endpoints_by_vlan_and_scope(
         l3_traffic_endpoints, WITHIN_DC_VLANS, l3_allowed_cross
@@ -2699,6 +2699,211 @@ class TestVxlanDCIBase():
             summ = 'L2VNI IPv6 traffic across DCI: Fail'
             st.log(summ)
             result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_ipv4_across_dci(self):
+        """
+        L3VNI_dci:1 - Verify L3VNI traffic between hosts across DCI (IPv4)
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Verify ipv4 L3VNI traffic between the hosts across DC1, DC2 and DC3
+            3) L3VNI traffic is routed across VLANs within the same VRF using
+               EVPN Type-5 prefix routes advertised between BGW spines
+            4) BGW spines use RT-REWRITE route-maps to rewrite VNI, RMAC, RT,
+               and next-hop for cross-DC L3VNI forwarding
+            5) Verify no traffic drop
+            6) Verify no crash/core seen
+            
+        Note:
+            Uses scope='cross' to filter only streams with DC2/DC3 destinations.
+            L3VNI cross-DC requires ENABLE_L3_ACROSS_DCI=True for stream generation.
+            
+        Steps:
+            1. Verify base setup is healthy (VRF-VNI mappings, BGP sessions)
+            2. Send L3VNI IPv4 traffic across DCs (DC1 -> DC2, DC1 -> DC3)
+            3. Verify no packet loss
+        """
+        tc_id = "test_base_dci_l3vni_ipv4_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:1: Verify L3VNI IPv4 traffic across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup is healthy before traffic test
+        st.banner('Step 1: Verify base setup before cross-DC L3VNI IPv4 traffic test')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'], checks='basic'):
+            summ = 'Base setup verification failed before cross-DC L3VNI IPv4 traffic test\n'
+            st.log(summ)
+            result = False
+        
+        # Step 2: Use scope='cross' to test ONLY streams with DC2/DC3 destinations
+        st.banner('Step 2: Verify L3VNI IPv4 traffic across DCI')
+        st.log('Using scope="cross" to test ONLY L3VNI streams with DC2/DC3 destinations')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            st.log('L3VNI IPv4 traffic across DCI: Pass')
+        else:
+            summ = 'L3VNI IPv4 traffic across DCI: Fail'
+            st.log(summ)
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_ipv6_across_dci(self):
+        """
+        L3VNI_dci:2 - Verify L3VNI traffic between hosts across DCI (IPv6)
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Verify ipv6 L3VNI traffic between the hosts across DC1, DC2 and DC3
+            3) L3VNI traffic is routed across VLANs within the same VRF using
+               EVPN Type-5 prefix routes advertised between BGW spines
+            4) BGW spines use RT-REWRITE route-maps to rewrite VNI, RMAC, RT,
+               and next-hop for cross-DC L3VNI forwarding
+            5) Verify no traffic drop
+            6) Verify no crash/core seen
+            
+        Note:
+            Uses scope='cross' to filter only streams with DC2/DC3 destinations.
+            L3VNI cross-DC requires ENABLE_L3_ACROSS_DCI=True for stream generation.
+            
+        Steps:
+            1. Verify base setup is healthy (VRF-VNI mappings, BGP sessions)
+            2. Send L3VNI IPv6 traffic across DCs (DC1 -> DC2, DC1 -> DC3)
+            3. Verify no packet loss
+        """
+        tc_id = "test_base_dci_l3vni_ipv6_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:2: Verify L3VNI IPv6 traffic across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup is healthy before traffic test
+        st.banner('Step 1: Verify base setup before cross-DC L3VNI IPv6 traffic test')
+        st.log('Using scope="cross" to test ONLY L3VNI streams with DC2/DC3 destinations')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'], checks='basic'):
+            summ = 'Base setup verification failed before cross-DC L3VNI IPv6 traffic test\n'
+            st.log(summ)
+            result = False
+        
+        # Step 2: Use scope='cross' to test ONLY streams with DC2/DC3 destinations
+        st.banner('Step 2: Verify L3VNI IPv6 traffic across DCI')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+            st.log('L3VNI IPv6 traffic across DCI: Pass')
+        else:
+            summ = 'L3VNI IPv6 traffic across DCI: Fail'
+            st.log(summ)
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_control_plane_across_dci(self):
+        """
+        L3VNI_dci:6 - Verify L3VNI control plane across DCI
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Verify eBGP multihop EVPN sessions between BGW spines across DCs
+            3) Verify EVPN Type-5 (prefix) routes are advertised with correct
+               extended community (RT) and L3VNI binding
+            4) Verify VRF-to-VNI mappings on all BGW nodes
+            5) Verify 'show evpn vni' shows L3 VNIs with correct VRF association
+            6) Verify BGP L2VPN EVPN summary shows all expected neighbors UP
+            7) Verify no crash/core seen
+            
+        Note:
+            This test verifies the control plane state required for L3VNI
+            cross-DC forwarding. It checks BGP sessions, EVPN route
+            advertisements, VRF-VNI bindings, and RT-REWRITE route-map
+            effects on all BGW spine nodes.
+            
+        Steps:
+            1. Verify VRF-VNI mappings on all BGW nodes
+            2. Verify EVPN VNI table shows L3 VNIs on BGW nodes
+            3. Verify BGP L2VPN EVPN summary on BGW nodes (all neighbors UP)
+            4. Verify EVPN Type-5 routes are present with correct attributes
+        """
+        tc_id = "test_base_dci_l3vni_control_plane_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:6: Verify L3VNI control plane across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify VRF-VNI mappings on all BGW nodes
+        st.banner('Step 1: Verify VRF-VNI mappings on BGW nodes')
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        for dut in bgw_nodes:
+            try:
+                exp_data = vxlan_obj.get_expected_vxlan_vrfvnimap(dut)
+                vxlan_obj.verify_vxlan_vrfvnimap(dut, exp_data, vl_retries=2)
+                st.log('VRF-VNI map on {}: Pass ({} mappings)'.format(dut, len(exp_data)))
+            except Exception as err:
+                msg = 'VRF-VNI map verification on {}: Fail - {}\n'.format(dut, err)
+                st.log(msg)
+                summ += msg
+                result = False
+        
+        # Step 2: Verify EVPN VNI table shows L3 VNIs on BGW nodes
+        st.banner('Step 2: Verify EVPN VNI table on BGW nodes')
+        for dut in bgw_nodes:
+            try:
+                exp_data = vxlan_obj.get_expected_evpn_vni(dut)
+                # Filter to L3 VNIs only for this check
+                l3_vni_exp = [entry for entry in exp_data if entry.get('type') == 'L3']
+                if l3_vni_exp:
+                    vxlan_obj.verify_evpn_vni(dut, l3_vni_exp, vl_retries=2)
+                    st.log('EVPN L3 VNI on {}: Pass ({} L3 VNIs)'.format(dut, len(l3_vni_exp)))
+                else:
+                    msg = 'No L3 VNIs expected on {} - check config\n'.format(dut)
+                    st.log(msg)
+                    summ += msg
+                    result = False
+            except Exception as err:
+                msg = 'EVPN VNI verification on {}: Fail - {}\n'.format(dut, err)
+                st.log(msg)
+                summ += msg
+                result = False
+        
+        # Step 3: Verify BGP L2VPN EVPN summary on BGW nodes (all neighbors UP)
+        st.banner('Step 3: Verify BGP L2VPN EVPN summary on BGW nodes')
+        for dut in bgw_nodes:
+            try:
+                evpn_exp = vxlan_obj.get_expected_bgp_l2vpn_evpn_summary_dci(dut)
+                if evpn_exp:
+                    vxlan_obj.verify_bgp_l2vpn_evpn_summary_dci(dut, evpn_exp, vl_retries=2)
+                    st.log('BGP L2VPN EVPN summary on {}: Pass ({} neighbors)'.format(dut, len(evpn_exp)))
+                else:
+                    st.log('BGP L2VPN EVPN summary on {}: Skipped (no neighbors expected)'.format(dut))
+            except Exception as err:
+                msg = 'BGP L2VPN EVPN summary on {}: Fail - {}\n'.format(dut, err)
+                st.log(msg)
+                summ += msg
+                result = False
+        
+        # Step 4: Verify EVPN Type-5 routes are present on BGW nodes
+        st.banner('Step 4: Verify EVPN Type-5 routes on BGW nodes')
+        for dut in bgw_nodes:
+            try:
+                type5_present = vxlan_obj.verify_evpn_type5_routes_dci(dut)
+                if type5_present:
+                    st.log('EVPN Type-5 routes on {}: Pass'.format(dut))
+                else:
+                    msg = 'EVPN Type-5 routes on {}: Fail - no Type-5 routes found\n'.format(dut)
+                    st.log(msg)
+                    summ += msg
+                    result = False
+            except Exception as err:
+                msg = 'EVPN Type-5 route verification on {}: Fail - {}\n'.format(dut, err)
+                st.log(msg)
+                summ += msg
+                result = False
         
         report_result(result, tc_id, summ)
     

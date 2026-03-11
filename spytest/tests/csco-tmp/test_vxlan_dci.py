@@ -167,6 +167,9 @@ def config_l2l3vni(dut=None):
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'sag_v4')
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'sag_v6')
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'bgp_l3vni_config_dci', dci_enabled=True, bgp_info=bgp_info)
+    # L3VNI leaf RT imports: each leaf imports cross-DC L3VNI RTs from local BGWs
+    # Per l3vni_config_diff.txt lines 1-39: e.g. DC1 leafs import 65102:10101, 65103:10101
+    vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'l3vni_leaf_rt_dci', dci_enabled=True, bgp_info=bgp_info)
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'evpn_mh')
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'evpn_esi')
     vxlan_obj.enable_uplink_tracking_configs(l2l3vni_nodes)
@@ -207,6 +210,8 @@ def unconfig_l2l3vni(dut=None):
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'delete_sag_v6')
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'delete_sag_v4')
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'del_sag_mac')
+    # Remove L3VNI leaf RT imports (reverse of config_l2l3vni)
+    vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'delete_l3vni_leaf_rt_dci', dci_enabled=True, bgp_info=bgp_info)
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'delete_bgp_l3vni_config_dci', dci_enabled=True, bgp_info=bgp_info)
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'delete_l3vni')
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'delete_l2vni')

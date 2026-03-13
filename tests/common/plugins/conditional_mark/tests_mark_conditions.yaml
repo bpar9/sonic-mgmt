@@ -3920,8 +3920,10 @@ qos/test_qos_dscp_mapping.py::TestQoSSaiDSCPQueueMapping_IPIP_Base::test_dscp_to
     conditions:
       - "'dualtor' in topo_name and asic_type in ['mellanox']"
   xfail:
-    reason: "Test case has issue on the t0-isolated-d256u256s2 topo."
+    reason: "Subnet decap tunnel is disabled on 202412. Test case has issue on the t0-isolated-d256u256s2 topo."
+    conditions_logical_operator: or
     conditions:
+      - "release in ['202412']"
       - "'t0-isolated-d256u256s2' in topo_name and platform in ['x86_64-nvidia_sn5640-r0']"
 
 qos/test_qos_masic.py:
@@ -4691,6 +4693,12 @@ srv6/test_srv6_dataplane.py:
     reason: "Test case has issue on the t0-isolated-d256u256s2 topo."
     conditions:
       - "'t0-isolated-d256u256s2' in topo_name and platform in ['x86_64-nvidia_sn5640-r0']"
+
+srv6/test_srv6_dataplane.py::TestSRv6DataPlaneBase::test_srv6_full_func:
+  xfail:
+    reason: "Subnet decap tunnel is disabled on 202412."
+    conditions:
+      - "release in ['202412']"
 
 srv6/test_srv6_static_config.py:
   skip:

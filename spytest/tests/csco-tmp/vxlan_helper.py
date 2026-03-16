@@ -968,7 +968,8 @@ def _get_l3vni_bgw_params(node_name, config_dict, bgp_info):
 
     Returns:
         dict with keys: as_num, dc, vrf_l3vni_pairs, vlan_bindings_by_vrf,
-                        leaf_asns, leaf_l3vnis_by_vrf, remote_bgw_asns
+                        bgw_vni_by_vrf, leaf_asns, leaf_l3vnis_by_vrf,
+                        remote_bgw_asns
         or None if data cannot be derived
     """
     dc = _get_dc_from_name(node_name)
@@ -981,27 +982,51 @@ def _get_l3vni_bgw_params(node_name, config_dict, bgp_info):
         st.warn('No ASN found for BGW node: {}'.format(node_name))
         return None
 
-    # Find a leaf in the same DC to get L3VNI data (VLAN bindings, VRF IDs)
+    # Read BGW's own l3vni data from YAML if available, else fall back to leaf
+    bgw_cfg = config_dict.get(node_name)
+    if isinstance(bgw_cfg, dict) and bgw_cfg.get('l3vni'):
+        bgw_l3vni = bgw_cfg['l3vni']
+    else:
+        bgw_l3vni = None
+
+    # Find a leaf in the same DC to get leaf L3VNI values (for RT-WAN extcommunity)
     ref_leaf = None
     for n, cfg in config_dict.items():
         if n.startswith('leaf') and dc in n and isinstance(cfg, dict) and 'l3vni' in cfg:
             ref_leaf = cfg
             break
-    if not ref_leaf or not ref_leaf.get('l3vni'):
-        st.warn('No leaf L3VNI data found for DC {}'.format(dc))
+    if not bgw_l3vni and (not ref_leaf or not ref_leaf.get('l3vni')):
+        st.warn('No L3VNI data found for BGW {} or any leaf in DC {}'.format(node_name, dc))
         return None
 
-    # Build VRF -> cross-DC L3VNI pairs and VLAN bindings
-    # Cross-DC L3VNI = 10000 + vrf_id (e.g. Vrf101 -> 10101, Vrf102 -> 10102)
+    # Build VRF -> cross-DC L3VNI pairs, VLAN bindings, and per-BGW VRF-VNI
+    # Cross-DC L3VNI = 10000 + vrf_id (e.g. Vrf101 -> 10101)
     vrf_l3vni_pairs = []
     vlan_bindings_by_vrf = {}
+    bgw_vni_by_vrf = {}
     leaf_l3vnis_by_vrf = {}
-    for l3vni_item in ref_leaf['l3vni']:
-        vrf_id = l3vni_item['vrf_id']
-        cross_dc_vni = 10000 + vrf_id
-        vrf_l3vni_pairs.append((vrf_id, cross_dc_vni))
-        vlan_bindings_by_vrf[vrf_id] = l3vni_item.get('vlan_bindings', [])
-        leaf_l3vnis_by_vrf[vrf_id] = l3vni_item.get('vxlan_id', 5000 + vrf_id)
+
+    # Use BGW's own l3vni data for VLAN bindings and BGW VRF-VNI values
+    if bgw_l3vni:
+        for l3vni_item in bgw_l3vni:
+            vrf_id = l3vni_item['vrf_id']
+            cross_dc_vni = 10000 + vrf_id
+            vrf_l3vni_pairs.append((vrf_id, cross_dc_vni))
+            vlan_bindings_by_vrf[vrf_id] = l3vni_item.get('vlan_bindings', [])
+            bgw_vni_by_vrf[vrf_id] = l3vni_item.get('vxlan_id', cross_dc_vni)
+    elif ref_leaf and ref_leaf.get('l3vni'):
+        for l3vni_item in ref_leaf['l3vni']:
+            vrf_id = l3vni_item['vrf_id']
+            cross_dc_vni = 10000 + vrf_id
+            vrf_l3vni_pairs.append((vrf_id, cross_dc_vni))
+            vlan_bindings_by_vrf[vrf_id] = l3vni_item.get('vlan_bindings', [])
+            bgw_vni_by_vrf[vrf_id] = cross_dc_vni
+
+    # Collect leaf L3VNI values (for RT-WAN extcommunity-list matching)
+    if ref_leaf and ref_leaf.get('l3vni'):
+        for l3vni_item in ref_leaf['l3vni']:
+            vrf_id = l3vni_item['vrf_id']
+            leaf_l3vnis_by_vrf[vrf_id] = l3vni_item.get('vxlan_id', 5000 + vrf_id)
 
     # Collect leaf ASNs in same DC (for RT-WAN extcommunity-list)
     leaf_asns = sorted(set(
@@ -1021,6 +1046,7 @@ def _get_l3vni_bgw_params(node_name, config_dict, bgp_info):
         'dc': dc,
         'vrf_l3vni_pairs': vrf_l3vni_pairs,
         'vlan_bindings_by_vrf': vlan_bindings_by_vrf,
+        'bgw_vni_by_vrf': bgw_vni_by_vrf,
         'leaf_asns': leaf_asns,
         'leaf_l3vnis_by_vrf': leaf_l3vnis_by_vrf,
         'remote_bgw_asns': remote_bgw_asns,
@@ -1111,10 +1137,11 @@ def generate_l3vni_bgw_frr_config(node_name, config_dict, bgp_info, dci_vip_maps
 
     output = ''
 
-    # 1) VRF-VNI bindings
+    # 1) VRF-VNI bindings (use per-BGW VNI from YAML, not always cross-DC VNI)
     for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        bgw_vni = params['bgw_vni_by_vrf'].get(vrf_id, cross_dc_vni)
         output += 'vrf Vrf{}\n'.format(vrf_id)
-        output += ' vni {}\n'.format(cross_dc_vni)
+        output += ' vni {}\n'.format(bgw_vni)
         output += 'exit-vrf\n'
 
     # 2) BGP extcommunity-lists
@@ -1229,10 +1256,11 @@ def delete_l3vni_bgw_frr_config(node_name, config_dict, bgp_info):
         output += 'no bgp extcommunity-list standard RT-WAN-{}\n'.format(cross_dc_vni)
         output += 'no bgp extcommunity-list standard RT-DC-{}\n'.format(cross_dc_vni)
 
-    # Remove VRF-VNI bindings
+    # Remove VRF-VNI bindings (use per-BGW VNI from YAML)
     for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        bgw_vni = params['bgw_vni_by_vrf'].get(vrf_id, cross_dc_vni)
         output += 'vrf Vrf{}\n'.format(vrf_id)
-        output += ' no vni {}\n'.format(cross_dc_vni)
+        output += ' no vni {}\n'.format(bgw_vni)
         output += 'exit-vrf\n'
 
     output += 'end\n'

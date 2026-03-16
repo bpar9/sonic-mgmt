@@ -281,10 +281,12 @@ def config_bgw_nodes(dut=None):
     vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_ihop_direct_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'route_maps_dci', dci_enabled=True)
     # L3VNI configuration from l3vni_config_diff.txt:
+    # bgp_info is required for L3VNI helpers to look up per-node ASNs and derive RT values
+    bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
     # SONiC CLI: VLAN 101/102, VRF, VRF-VLAN bind, VXLAN map (vxlan-dc/vxlan-wan), VRF-VNI map
-    vxlan_obj.config_feature_parallel(bgw_nodes, 'l3vni_sonic_bgw_dci', dci_enabled=True)
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'l3vni_sonic_bgw_dci', dci_enabled=True, bgp_info=bgp_info)
     # FRR: VRF-VNI bindings, extcommunity-lists, RT-REWRITE route-maps, BGP VRF with route-targets
-    vxlan_obj.config_feature_parallel(bgw_nodes, 'l3vni_frr_bgw_dci', dci_enabled=True)
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'l3vni_frr_bgw_dci', dci_enabled=True, bgp_info=bgp_info)
     # Save the configuration for the relevant nodes
     for node in bgw_nodes:
         vxlan_obj.config_dut(node, 'sonic', "sudo config save -y")
@@ -2018,6 +2020,7 @@ ALL_CHECKS = [
     'evpn_es_evi',   # EVPN ES per EVI/VLAN
     'evpn_type1',    # EVPN Type 1 Routes (ES Auto-Discovery)
     'evpn_type4',    # EVPN Type 4 Routes (ES-Import)
+    'evpn_type5',    # EVPN Type 5 Routes (IP Prefix / L3VNI)
     'portchannel',   # PortChannel operational status
 ]
 
@@ -2028,7 +2031,7 @@ CHECK_SETS = {
     'bgp_only': ['bgp'],
     'evpn_only': ['evpn_es', 'evpn_es_evi', 'evpn_type1', 'evpn_type4'],
     'data_plane': ['vlan_vni', 'vrf_vni', 'vteps', 'tunnels'],
-    'control_plane': ['bgp', 'evpn_es', 'evpn_type1', 'evpn_type4'],
+    'control_plane': ['bgp', 'evpn_es', 'evpn_type1', 'evpn_type4', 'evpn_type5'],
 }
 
 
@@ -2060,6 +2063,7 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
         'evpn_es_evi'   - EVPN ES per EVI/VLAN
         'evpn_type1'    - EVPN Type 1 Routes (ES Auto-Discovery)
         'evpn_type4'    - EVPN Type 4 Routes (ES-Import)
+        'evpn_type5'    - EVPN Type 5 Routes (IP Prefix / L3VNI, BGW nodes only)
         'portchannel'   - PortChannel operational status
     
     Returns:
@@ -2298,6 +2302,29 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                 st.log(f'✗ EVPN Type 4 Routes on {dut}: Fail - {err}')
                 results[dut]['evpn_type4'] = False
                 results['overall'] = False
+        
+        # ============================================================
+        # EVPN Type 5 Routes (IP Prefix / L3VNI) Verification
+        # ============================================================
+        if 'evpn_type5' in checks_to_run:
+            # Only check on BGW nodes (Type-5 prefix routes are exchanged between BGWs)
+            if 'bgw' not in dut:
+                st.log(f'Type 5 Routes on {dut}: Skipped (not a BGW node)')
+                results[dut]['evpn_type5'] = True
+            else:
+                try:
+                    type5_present = vxlan_obj.verify_evpn_type5_routes_dci(dut)
+                    if type5_present:
+                        st.log(f'EVPN Type 5 Routes on {dut}: Pass')
+                        results[dut]['evpn_type5'] = True
+                    else:
+                        st.log(f'EVPN Type 5 Routes on {dut}: Fail - no Type-5 routes found')
+                        results[dut]['evpn_type5'] = False
+                        results['overall'] = False
+                except Exception as err:
+                    st.log(f'EVPN Type 5 Routes on {dut}: Fail - {err}')
+                    results[dut]['evpn_type5'] = False
+                    results['overall'] = False
         
         # ============================================================
         # PortChannel Operational Status Verification
@@ -2739,8 +2766,7 @@ class TestVxlanDCIBase():
             show evpn es, show evpn vni detail, show platform npu mac-age
             
         Steps:
-            1. Verify VRF-VNI and VLAN-VNI mappings on all nodes via verify_base_setup_bgw
-            2. Verify Type-5 routes on BGW nodes
+            1. Verify VRF-VNI, VLAN-VNI mappings and Type-5 routes via verify_base_setup_bgw
         """
         tc_id = "test_base_dci_l3vni_base_profile"
         test_cfg['tc_id'] = tc_id
@@ -2750,37 +2776,19 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        # Step 1: Verify VRF-VNI and VLAN-VNI mappings on all nodes using verify_base_setup_bgw
-        st.banner('Step 1: Verify VRF-VNI and VLAN-VNI mappings on all DCI nodes')
+        # Step 1: Verify VRF-VNI, VLAN-VNI mappings and Type-5 routes using verify_base_setup_bgw
+        st.banner('Step 1: Verify VRF-VNI, VLAN-VNI and Type-5 routes on all DCI nodes')
         st.log('Expected VRF-VNI bindings from vxlan_dci_input_file.yaml:')
         st.log('  DC1 leafs: Vrf101->5101, Vrf102->5102')
         st.log('  DC2 leafs: Vrf101->5101, Vrf102->7102')
         st.log('  DC3 leafs: Vrf101->5101, Vrf102->9102')
         st.log('  BGW nodes: Vrf101->10101, Vrf102->10102 (cross-DC L3VNI)')
-        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'], checks=['vrf_vni', 'vlan_vni']):
-            summ += 'VRF-VNI or VLAN-VNI mapping verification failed on one or more nodes\n'
-            result = False
-        
-        # Step 2: Verify Type-5 routes on BGW nodes
-        st.banner('Step 2: Verify EVPN Type-5 routes on BGW nodes')
         st.log('Type-5 route format: [5]:[0]:[prefix_len]:[prefix]')
         st.log('Expected L3VNI in extended community: 10101 (Vrf101), 10102 (Vrf102)')
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        for dut in bgw_nodes:
-            try:
-                type5_present = vxlan_obj.verify_evpn_type5_routes_dci(dut)
-                if type5_present:
-                    st.log('EVPN Type-5 routes on {}: Pass'.format(dut))
-                else:
-                    msg = 'EVPN Type-5 routes on {}: Fail - no Type-5 routes found\n'.format(dut)
-                    st.log(msg)
-                    summ += msg
-                    result = False
-            except Exception as err:
-                msg = 'EVPN Type-5 route verification on {}: Fail - {}\n'.format(dut, err)
-                st.log(msg)
-                summ += msg
-                result = False
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'vlan_vni', 'evpn_type5']):
+            summ += 'VRF-VNI, VLAN-VNI or Type-5 route verification failed on one or more nodes\n'
+            result = False
         
         report_result(result, tc_id, summ)
     
@@ -2842,11 +2850,11 @@ class TestVxlanDCIBase():
                 summ += msg
                 result = False
         
-        # Step 2: Verify VRF-VNI mappings on BGW nodes using verify_base_setup_bgw
-        st.banner('Step 2: Verify VRF-VNI mappings on BGW nodes')
+        # Step 2: Verify VRF-VNI mappings and Type-5 routes on BGW nodes using verify_base_setup_bgw
+        st.banner('Step 2: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
         st.log('BGW nodes use cross-DC L3VNI: Vrf101->10101, Vrf102->10102')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni']):
-            summ += 'VRF-VNI mapping verification failed on one or more BGW nodes\n'
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed on one or more BGW nodes\n'
             result = False
         
         report_result(result, tc_id, summ)
@@ -2888,9 +2896,8 @@ class TestVxlanDCIBase():
             
         Steps:
             1. Verify eBGP multihop EVPN sessions between BGWs across DCs
-            2. Verify VRF-VNI mappings on all BGW nodes
+            2. Verify VRF-VNI mappings and Type-5 routes on BGW nodes via verify_base_setup_bgw
             3. Verify EVPN VNI table shows L3 VNIs on BGW nodes
-            4. Verify EVPN Type-5 routes exchanged with correct attributes
         """
         tc_id = "test_base_dci_l3vni_ebgp_multihop_bgw"
         test_cfg['tc_id'] = tc_id
@@ -2924,11 +2931,12 @@ class TestVxlanDCIBase():
                 summ += msg
                 result = False
         
-        # Step 2: Verify VRF-VNI mappings on all BGW nodes using verify_base_setup_bgw
-        st.banner('Step 2: Verify VRF-VNI mappings on BGW nodes')
+        # Step 2: Verify VRF-VNI mappings and Type-5 routes on BGW nodes using verify_base_setup_bgw
+        st.banner('Step 2: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
         st.log('BGW cross-DC L3VNI from l3vni_config_diff.txt: Vrf101->10101, Vrf102->10102')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni']):
-            summ += 'VRF-VNI mapping verification failed on one or more BGW nodes\n'
+        st.log('Type-5 routes carry L3VNI (10101/10102) and RT (<ASN>:<L3VNI>) in ext-community')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed on one or more BGW nodes\n'
             result = False
         
         # Step 3: Verify EVPN VNI table shows L3 VNIs on BGW nodes
@@ -2948,26 +2956,6 @@ class TestVxlanDCIBase():
                     result = False
             except Exception as err:
                 msg = 'EVPN VNI verification on {}: Fail - {}\n'.format(dut, err)
-                st.log(msg)
-                summ += msg
-                result = False
-        
-        # Step 4: Verify EVPN Type-5 routes exchanged with correct attributes
-        st.banner('Step 4: Verify EVPN Type-5 routes exchanged between BGWs')
-        st.log('Type-5 routes carry L3VNI (10101/10102) and RT (<ASN>:<L3VNI>) in ext-community')
-        st.log('RT-REWRITE-WAN matches route-type prefix and rewrites VNI, RMAC, RT, next-hop')
-        for dut in bgw_nodes:
-            try:
-                type5_result = vxlan_obj.verify_evpn_type5_route_detail_dci(dut)
-                if type5_result['result']:
-                    st.log('Type-5 routes on {}: Pass - {}'.format(dut, type5_result['details']))
-                else:
-                    msg = 'Type-5 routes on {}: Fail - {}\n'.format(dut, type5_result['details'])
-                    st.log(msg)
-                    summ += msg
-                    result = False
-            except Exception as err:
-                msg = 'Type-5 route verification on {}: Fail - {}\n'.format(dut, err)
                 st.log(msg)
                 summ += msg
                 result = False

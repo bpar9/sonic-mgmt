@@ -2073,6 +2073,8 @@ ALL_CHECKS = [
     'evpn_type5_detail', # EVPN Type 5 Route Detail (format, L3VNI, RT, IPv6 next-hop)
     'ebgp_multihop',     # eBGP multihop EVPN sessions between BGWs across DCs
     'evpn_vni',          # EVPN VNI table (L3 VNIs on BGW nodes)
+    'rt_rewrite',        # RT-REWRITE route-map verification (BGW nodes only)
+    'mac_arp',           # MAC and ARP table entries for L3VNI hosts
     'portchannel',       # PortChannel operational status
 ]
 
@@ -2084,7 +2086,7 @@ CHECK_SETS = {
     'evpn_only': ['evpn_es', 'evpn_es_evi', 'evpn_type1', 'evpn_type4'],
     'data_plane': ['vlan_vni', 'vrf_vni', 'vteps', 'tunnels'],
     'control_plane': ['bgp', 'evpn_es', 'evpn_type1', 'evpn_type4', 'evpn_type5',
-                      'evpn_type5_detail', 'ebgp_multihop', 'evpn_vni'],
+                      'evpn_type5_detail', 'ebgp_multihop', 'evpn_vni', 'rt_rewrite'],
 }
 
 
@@ -2458,6 +2460,47 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                     st.log(f'EVPN VNI on {dut}: Fail - {err}')
                     results[dut]['evpn_vni'] = False
                     results['overall'] = False
+        
+        # ============================================================
+        # RT-REWRITE Route-Map Verification (BGW nodes only)
+        # ============================================================
+        if 'rt_rewrite' in checks_to_run:
+            # Only check on BGW nodes (RT-REWRITE route-maps are BGW-specific)
+            if 'bgw' not in dut:
+                st.log(f'RT-REWRITE on {dut}: Skipped (not a BGW node)')
+                results[dut]['rt_rewrite'] = True
+            else:
+                try:
+                    rt_result = vxlan_obj.verify_rt_rewrite_dci(dut)
+                    if rt_result['result']:
+                        st.log(f'RT-REWRITE on {dut}: Pass - {rt_result["details"]}')
+                        results[dut]['rt_rewrite'] = True
+                    else:
+                        st.log(f'RT-REWRITE on {dut}: Fail - {rt_result["details"]}')
+                        results[dut]['rt_rewrite'] = False
+                        results['overall'] = False
+                except Exception as err:
+                    st.log(f'RT-REWRITE on {dut}: Fail - {err}')
+                    results[dut]['rt_rewrite'] = False
+                    results['overall'] = False
+        
+        # ============================================================
+        # MAC and ARP Table Entries Verification
+        # ============================================================
+        if 'mac_arp' in checks_to_run:
+            try:
+                mac_arp_result = vxlan_obj.verify_mac_arp_entries_dci(dut)
+                if mac_arp_result['result']:
+                    st.log(f'MAC/ARP on {dut}: Pass - {mac_arp_result["details"]}')
+                    results[dut]['mac_arp'] = True
+                else:
+                    st.log(f'MAC/ARP on {dut}: Fail - {mac_arp_result["details"]}')
+                    results[dut]['mac_arp'] = False
+                    results['overall'] = False
+            except Exception as err:
+                st.log(f'MAC/ARP on {dut}: Fail - {err}')
+                results[dut]['mac_arp'] = False
+                results['overall'] = False
         
         # ============================================================
         # PortChannel Operational Status Verification
@@ -3026,6 +3069,530 @@ class TestVxlanDCIBase():
         if not verify_base_setup_bgw(bgw_nodes,
                                      checks=['ebgp_multihop', 'vrf_vni', 'evpn_type5', 'evpn_vni']):
             summ += 'eBGP multihop, VRF-VNI, Type-5 or EVPN VNI verification failed on BGW nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_rt_translation(self):
+        """
+        L3VNI_dci:7 - L3VNI Control Plane - Route-target translation across domains
+        
+        Description:
+            1) Configure DC1 with RT for L3VNI (e.g. 65102:10101 for DC1 BGW1)
+            2) Configure WAN with RT for cross-DC L3VNI
+            3) Configure BGW with RT translation via RT-REWRITE route-maps
+            4) Verify Type-5 routes have correct RT per domain
+            
+        RT-REWRITE route-maps per l3vni_config_diff.txt:
+            - RT-REWRITE-WAN: match local leaf RTs -> rewrite to BGW ASN RT,
+              set cross-DC VNI, RMAC local, IPv4 WAN VIP next-hop
+            - RT-REWRITE-DC: match remote BGW RTs -> rewrite to BGW ASN RT,
+              set cross-DC VNI, RMAC local, IPv6 DC VIP next-hop
+            
+        Steps:
+            1. Verify RT-REWRITE route-maps and RT values via verify_base_setup_bgw
+        """
+        tc_id = "test_base_dci_l3vni_rt_translation"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:7: Route-target translation across domains ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify RT-REWRITE route-maps and RT values on BGW nodes
+        st.banner('Step 1: Verify RT-REWRITE route-maps and RT translation on BGW nodes')
+        st.log('Each BGW has RT-REWRITE-WAN and RT-REWRITE-DC route-maps')
+        st.log('RT-REWRITE-WAN: rewrites leaf Type-5 RTs for WAN-side advertisement')
+        st.log('RT-REWRITE-DC: rewrites remote BGW Type-5 RTs for DC-side advertisement')
+        if not verify_base_setup_bgw(bgw_nodes,
+                                     checks=['rt_rewrite', 'vrf_vni', 'evpn_type5']):
+            summ += 'RT-REWRITE, VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_type5_ipv6_prefix(self):
+        """
+        L3VNI_dci:8 - L3VNI Control Plane - Type-5 route for IPv6 prefix advertisement
+        
+        Description:
+            1) Bring up BGP between Ixia and DUT
+            2) Advertise IPv6 prefixes over BGP
+            3) Verify Type-5 routes are advertised over BGWs to other DC
+            4) Verify Traffic
+            
+        Steps:
+            1. Verify Type-5 routes on BGW nodes
+            2. Verify L3VNI IPv6 traffic across DCI
+        """
+        tc_id = "test_base_dci_l3vni_type5_ipv6_prefix"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:8: Type-5 route for IPv6 prefix advertisement ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify Type-5 routes on BGW nodes
+        st.banner('Step 1: Verify Type-5 routes for IPv6 prefixes on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5', 'evpn_type5_detail']):
+            summ += 'Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Verify L3VNI IPv6 traffic across DCI
+        st.banner('Step 2: Verify L3VNI IPv6 traffic across DCI')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+            st.log('L3VNI IPv6 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI IPv6 traffic across DCI: Fail\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_type5_ipv4_prefix(self):
+        """
+        L3VNI_dci:9 - L3VNI Control Plane - Type-5 route for IPv4 prefix advertisement
+        
+        Description:
+            1) Bring up BGP between Ixia and DUT
+            2) Advertise IPv4 prefixes over BGP
+            3) Verify Type-5 routes are advertised over BGWs to other DC
+            4) Verify Traffic
+            
+        Steps:
+            1. Verify Type-5 routes on BGW nodes
+            2. Verify L3VNI IPv4 traffic across DCI
+        """
+        tc_id = "test_base_dci_l3vni_type5_ipv4_prefix"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:9: Type-5 route for IPv4 prefix advertisement ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify Type-5 routes on BGW nodes
+        st.banner('Step 1: Verify Type-5 routes for IPv4 prefixes on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5', 'evpn_type5_detail']):
+            summ += 'Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Verify L3VNI IPv4 traffic across DCI
+        st.banner('Step 2: Verify L3VNI IPv4 traffic across DCI')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            st.log('L3VNI IPv4 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI IPv4 traffic across DCI: Fail\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_ipv6_vxlan_encap_within_dc(self):
+        """
+        L3VNI_dci:10 - L3VNI Data Plane - IPv6 VXLAN encapsulation within DC fabric
+        
+        Description:
+            1) Host A on DC1 Leaf sends IPv4 packet to Host B on another DC1 Leaf
+            2) Leaf encapsulates with IPv6 VXLAN (DC-side uses IPv6 VTEP)
+            3) Verify outer IPv6 header uses VTEP addresses
+            4) Verify VXLAN header contains L3VNI
+            
+        Steps:
+            1. Verify VRF-VNI and tunnel setup within DC
+            2. Send L3VNI IPv4 and IPv6 traffic within DC
+            3. Verify tunnel counters incremented on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_ipv6_vxlan_encap_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:10: IPv6 VXLAN encapsulation within DC fabric ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup (VRF-VNI, tunnels) within DC
+        st.banner('Step 1: Verify VRF-VNI and tunnel setup within DC')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni'], checks=['vrf_vni', 'vteps', 'tunnels']):
+            summ += 'VRF-VNI or tunnel verification failed within DC\n'
+            result = False
+        
+        # Step 2: Get VXLAN counters before traffic
+        st.banner('Step 2: Get VXLAN counters before L3VNI traffic')
+        counters_before = {}
+        for dut in test_cfg['nodes']['l2l3vni']:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                counters_before[dut] = _parse_show_vxlan_counters(output)
+                rx0, tx0 = _sum_vxlan_pkts(counters_before[dut])
+                st.log('VXLAN counters before on {} (rx={}, tx={})'.format(dut, rx0, tx0))
+            except Exception as err:
+                st.log('Failed to get counters on {}: {}'.format(dut, err))
+        
+        # Step 3: Send L3VNI traffic within DC
+        st.banner('Step 3: Verify L3VNI traffic within DC (IPv6 VXLAN encap)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within'):
+            st.log('L3VNI within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 4: Verify tunnel counters incremented
+        st.banner('Step 4: Verify VXLAN tunnel counters incremented')
+        for dut in test_cfg['nodes']['l2l3vni']:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                counters_after = _parse_show_vxlan_counters(output)
+                rx0, tx0 = _sum_vxlan_pkts(counters_before.get(dut, {}))
+                rx1, tx1 = _sum_vxlan_pkts(counters_after)
+                if rx1 > rx0 or tx1 > tx0:
+                    st.log('Tunnel counters incremented on {}: Pass'.format(dut))
+                else:
+                    st.log('Tunnel counters did not increment on {} (before rx/tx={}/{}, after={}/{})'.format(
+                        dut, rx0, tx0, rx1, tx1))
+            except Exception as err:
+                st.log('Failed to verify counters on {}: {}'.format(dut, err))
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_ipv4_vxlan_encap_across_dci(self):
+        """
+        L3VNI_dci:11 - L3VNI Data Plane - IPv4 VXLAN encapsulation over WAN
+        
+        Description:
+            1) Traffic from DC1 to DC2 via WAN
+            2) At BGW: terminate IPv6 VXLAN, re-encapsulate with IPv4 VXLAN
+            3) Verify outer IPv4 header uses WAN VIP addresses
+            4) Verify VXLAN header contains cross-DC L3VNI
+            
+        Steps:
+            1. Verify VRF-VNI and tunnel setup on BGW nodes
+            2. Send L3VNI traffic across DCI
+            3. Verify tunnel counters incremented on BGW nodes
+        """
+        tc_id = "test_base_dci_l3vni_ipv4_vxlan_encap_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:11: IPv4 VXLAN encapsulation over WAN ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) + 
+                    test_cfg['nodes'].get('dc2_bgw', []) + 
+                    test_cfg['nodes'].get('dc3_bgw', []))
+        
+        # Step 1: Verify VRF-VNI and tunnels on BGW nodes
+        st.banner('Step 1: Verify VRF-VNI and tunnel setup on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'vteps', 'tunnels']):
+            summ += 'VRF-VNI or tunnel verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Get VXLAN counters before traffic on BGW nodes
+        st.banner('Step 2: Get VXLAN counters before cross-DC L3VNI traffic')
+        counters_before = {}
+        for dut in bgw_nodes:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                counters_before[dut] = _parse_show_vxlan_counters(output)
+                rx0, tx0 = _sum_vxlan_pkts(counters_before[dut])
+                st.log('VXLAN counters before on BGW {} (rx={}, tx={})'.format(dut, rx0, tx0))
+            except Exception as err:
+                st.log('Failed to get counters on {}: {}'.format(dut, err))
+        
+        # Step 3: Send L3VNI traffic across DCI
+        st.banner('Step 3: Verify L3VNI traffic across DCI (IPv4 VXLAN encap over WAN)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            st.log('L3VNI cross-DC traffic: Pass')
+        else:
+            summ += 'L3VNI cross-DC traffic: Fail\n'
+            result = False
+        
+        # Step 4: Verify tunnel counters incremented on BGW nodes
+        st.banner('Step 4: Verify VXLAN tunnel counters incremented on BGW nodes')
+        for dut in bgw_nodes:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                counters_after = _parse_show_vxlan_counters(output)
+                rx0, tx0 = _sum_vxlan_pkts(counters_before.get(dut, {}))
+                rx1, tx1 = _sum_vxlan_pkts(counters_after)
+                if rx1 > rx0 or tx1 > tx0:
+                    st.log('Tunnel counters incremented on BGW {}: Pass'.format(dut))
+                else:
+                    msg = 'Tunnel counters did not increment on BGW {} (before rx/tx={}/{}, after={}/{})\n'.format(
+                        dut, rx0, tx0, rx1, tx1)
+                    st.log(msg)
+                    summ += msg
+                    result = False
+            except Exception as err:
+                msg = 'Failed to verify counters on {}: {}\n'.format(dut, err)
+                st.log(msg)
+                summ += msg
+                result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_tunnel_counters(self):
+        """
+        L3VNI_dci:12 - L3VNI Data Plane - Aggregate tunnel counters
+        
+        Description:
+            1) Configure tunnel counters with 2000ms interval
+            2) Send L3VNI traffic within DC and across WAN
+            3) Verify DC-SIDE and WAN-SIDE tunnel counters
+            
+        Steps:
+            1. Get tunnel counters before traffic
+            2. Send L3VNI traffic within DC (DC-SIDE counters)
+            3. Verify DC-SIDE counters incremented
+            4. Send L3VNI traffic across DCI (WAN-SIDE counters)
+            5. Verify WAN-SIDE counters incremented on BGW nodes
+        """
+        tc_id = "test_base_dci_l3vni_tunnel_counters"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:12: Aggregate tunnel counters ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) + 
+                    test_cfg['nodes'].get('dc2_bgw', []) + 
+                    test_cfg['nodes'].get('dc3_bgw', []))
+        all_l3_nodes = test_cfg['nodes']['l2l3vni']
+        
+        # Step 1: Verify tunnels are up
+        st.banner('Step 1: Verify tunnels and VTEPs before counter test')
+        if not verify_base_setup_bgw(all_l3_nodes, checks=['vteps', 'tunnels']):
+            summ += 'Tunnel setup verification failed\n'
+            result = False
+        
+        # Step 2: Get counters before within-DC L3VNI traffic
+        st.banner('Step 2: Get VXLAN counters before within-DC L3VNI traffic')
+        counters_before_within = {}
+        for dut in all_l3_nodes:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                counters_before_within[dut] = _parse_show_vxlan_counters(output)
+            except Exception as err:
+                st.log('Failed to get counters on {}: {}'.format(dut, err))
+        
+        # Step 3: Send within-DC L3VNI traffic
+        st.banner('Step 3: Send L3VNI traffic within DC (DC-SIDE)')
+        if not verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            summ += 'L3VNI within-DC traffic failed\n'
+            result = False
+        
+        # Step 4: Verify DC-SIDE counters
+        st.banner('Step 4: Verify DC-SIDE tunnel counters incremented')
+        for dut in all_l3_nodes:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                after = _parse_show_vxlan_counters(output)
+                rx0, tx0 = _sum_vxlan_pkts(counters_before_within.get(dut, {}))
+                rx1, tx1 = _sum_vxlan_pkts(after)
+                if rx1 > rx0 or tx1 > tx0:
+                    st.log('DC-SIDE counters incremented on {}: Pass'.format(dut))
+                else:
+                    st.log('DC-SIDE counters did not increment on {}'.format(dut))
+            except Exception as err:
+                st.log('Failed to verify DC-SIDE counters on {}: {}'.format(dut, err))
+        
+        # Step 5: Get counters before cross-DC L3VNI traffic
+        st.banner('Step 5: Get VXLAN counters before cross-DC L3VNI traffic')
+        counters_before_cross = {}
+        for dut in bgw_nodes:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                counters_before_cross[dut] = _parse_show_vxlan_counters(output)
+            except Exception as err:
+                st.log('Failed to get counters on {}: {}'.format(dut, err))
+        
+        # Step 6: Send cross-DC L3VNI traffic
+        st.banner('Step 6: Send L3VNI traffic across DCI (WAN-SIDE)')
+        if not verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            summ += 'L3VNI cross-DC traffic failed\n'
+            result = False
+        
+        # Step 7: Verify WAN-SIDE counters on BGW nodes
+        st.banner('Step 7: Verify WAN-SIDE tunnel counters incremented on BGW nodes')
+        for dut in bgw_nodes:
+            try:
+                output = st.show(dut, "show vxlan counters", skip_tmpl=True)
+                after = _parse_show_vxlan_counters(output)
+                rx0, tx0 = _sum_vxlan_pkts(counters_before_cross.get(dut, {}))
+                rx1, tx1 = _sum_vxlan_pkts(after)
+                if rx1 > rx0 or tx1 > tx0:
+                    st.log('WAN-SIDE counters incremented on BGW {}: Pass'.format(dut))
+                else:
+                    msg = 'WAN-SIDE counters did not increment on BGW {}\n'.format(dut)
+                    st.log(msg)
+                    summ += msg
+                    result = False
+            except Exception as err:
+                msg = 'Failed to verify WAN-SIDE counters on {}: {}\n'.format(dut, err)
+                st.log(msg)
+                summ += msg
+                result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_intervlan_within_dc(self):
+        """
+        L3VNI_dci:13 - L3VNI - Verify inter-VLAN routing within DC using L3VNI
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN
+            3) Send L3VNI IPv4 and IPv6 traffic between hosts within DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes)
+            2. Send L3VNI IPv4 and IPv6 traffic within DC
+            3. Verify MAC and ARP entries on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_intervlan_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:13: Verify inter-VLAN routing within DC using L3VNI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv4 traffic within DC
+        st.banner('Step 2: Verify L3VNI IPv4 traffic within DC')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            st.log('L3VNI IPv4 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI IPv4 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 3: Send L3VNI IPv6 traffic within DC
+        st.banner('Step 3: Verify L3VNI IPv6 traffic within DC')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
+            st.log('L3VNI IPv6 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI IPv6 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 4: Verify MAC and ARP entries on leaf nodes
+        st.banner('Step 4: Verify MAC and ARP entries on leaf nodes')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed on leaf nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_ipv4_across_dci(self):
+        """
+        L3VNI_dci:14 - L3VNI - Verify inter-VLAN routing across DCI using L3VNI - IPv4 traffic
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN
+            3) Send L3VNI IPv4 traffic between hosts across DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
+            2. Send L3VNI IPv4 traffic across DCI
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_ipv4_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:14: Verify inter-VLAN routing across DCI - IPv4 ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup on BGW nodes
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv4 traffic across DCI
+        st.banner('Step 2: Verify L3VNI IPv4 traffic across DCI')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            st.log('L3VNI IPv4 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI IPv4 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC traffic\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_ipv6_across_dci(self):
+        """
+        L3VNI_dci:15 - L3VNI - Verify L3VNI traffic with IPv6 hosts across DCI
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN
+            3) Send L3VNI IPv6 traffic between hosts across DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
+            2. Send L3VNI IPv6 traffic across DCI
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_ipv6_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:15: Verify L3VNI traffic with IPv6 hosts across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup on BGW nodes
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv6 traffic across DCI
+        st.banner('Step 2: Verify L3VNI IPv6 traffic across DCI')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+            st.log('L3VNI IPv6 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI IPv6 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
             result = False
         
         report_result(result, tc_id, summ)

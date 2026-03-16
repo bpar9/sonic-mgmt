@@ -6989,6 +6989,175 @@ def verify_bgp_evpn_multihop_sessions_dci(dut):
     return result
 
 
+def verify_rt_rewrite_dci(dut):
+    """
+    Verify Route-Target translation across domains on a BGW node for L3VNI DCI.
+
+    Per l3vni_config_diff.txt, each BGW has RT-REWRITE route-maps that
+    rewrite Type-5 routes:
+      - RT-REWRITE-WAN: match local leaf RTs -> set own ASN RT, VNI, RMAC,
+        IPv4 WAN VIP next-hop (for WAN-side advertisement)
+      - RT-REWRITE-DC: match remote BGW RTs -> set own ASN RT, VNI, RMAC,
+        IPv6 DC VIP next-hop (for DC-side advertisement)
+
+    This function verifies:
+      1. RT-REWRITE-WAN and RT-REWRITE-DC route-maps are configured
+      2. Type-5 routes carry correct RT values per BGW ASN
+      3. RT values match expected pattern <BGW_ASN>:<cross_dc_vni>
+
+    Args:
+        dut: BGW node hostname to verify
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'route_maps_found': list of route-map names found,
+            'rt_values': set of RT values found in Type-5 routes,
+            'details': str summary
+        }
+    """
+    import re
+    result = {
+        'result': False,
+        'route_maps_found': [],
+        'rt_values': set(),
+        'details': ''
+    }
+
+    st.banner('Checking RT-REWRITE route-maps on {}'.format(dut))
+
+    # Step 1: Verify RT-REWRITE route-maps are configured
+    try:
+        rmap_output = st.show(dut, "do show route-map", type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        result['details'] = 'Failed to get route-maps on {}: {}'.format(dut, err)
+        st.log(result['details'])
+        return result
+
+    if rmap_output:
+        for rmap_name in ['RT-REWRITE-WAN', 'RT-REWRITE-DC']:
+            if rmap_name in rmap_output:
+                result['route_maps_found'].append(rmap_name)
+                st.log('Route-map {} found on {}'.format(rmap_name, dut))
+            else:
+                st.log('Route-map {} NOT found on {}'.format(rmap_name, dut))
+
+    if len(result['route_maps_found']) < 2:
+        result['details'] = 'Missing route-maps on {}: found {} of 2 (RT-REWRITE-WAN, RT-REWRITE-DC)'.format(
+            dut, len(result['route_maps_found']))
+        st.log(result['details'])
+        return result
+
+    # Step 2: Verify Type-5 routes carry correct RT per domain
+    try:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        result['details'] = 'Failed to get Type-5 routes on {}: {}'.format(dut, err)
+        st.log(result['details'])
+        return result
+
+    if not cli_output or not cli_output.strip():
+        result['details'] = 'No Type-5 route output on {} (route-maps present but no routes)'.format(dut)
+        st.log(result['details'])
+        return result
+
+    # Extract RT values from Type-5 route output
+    # Format: RT:<ASN>:<VNI> e.g. RT:65102:10101
+    rt_pattern = re.compile(r'RT:(\d+):(\d+)')
+    expected_cross_dc_vnis = {'10101', '10102'}
+    for line in cli_output.splitlines():
+        for rt_match in rt_pattern.finditer(line):
+            asn = rt_match.group(1)
+            vni = rt_match.group(2)
+            if vni in expected_cross_dc_vnis:
+                result['rt_values'].add('{}:{}'.format(asn, vni))
+
+    # Build summary
+    details_parts = []
+    details_parts.append('Route-maps found: {}'.format(result['route_maps_found']))
+    if result['rt_values']:
+        details_parts.append('Cross-DC RT values in Type-5 routes: {}'.format(result['rt_values']))
+    else:
+        details_parts.append('No cross-DC RT values found in Type-5 routes')
+
+    result['details'] = '; '.join(details_parts)
+    st.log(result['details'])
+
+    # Pass if both route-maps present and at least one cross-DC RT found
+    result['result'] = (len(result['route_maps_found']) == 2 and len(result['rt_values']) > 0)
+    return result
+
+
+def verify_mac_arp_entries_dci(dut):
+    """
+    Verify MAC and ARP table entries on a node for L3VNI DCI traffic.
+
+    For inter-VLAN routing (L3VNI), the node should have:
+      1. MAC entries for local and remote hosts
+      2. ARP/NDP entries for hosts in VRF-bound VLANs
+
+    This is a basic presence check to confirm that L3VNI forwarding
+    has populated the MAC and ARP tables.
+
+    Args:
+        dut: Node hostname to verify
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'mac_count': int,
+            'arp_count': int,
+            'details': str summary
+        }
+    """
+    result = {
+        'result': False,
+        'mac_count': 0,
+        'arp_count': 0,
+        'details': ''
+    }
+
+    st.banner('Checking MAC and ARP entries on {}'.format(dut))
+
+    # Step 1: Check MAC table
+    try:
+        mac_output = st.show(dut, "show mac", skip_tmpl=True)
+        if mac_output:
+            # Count non-header lines with MAC addresses
+            mac_lines = [l for l in mac_output.splitlines()
+                         if ':' in l and ('dynamic' in l.lower() or 'static' in l.lower()
+                                          or 'Vlan' in l)]
+            result['mac_count'] = len(mac_lines)
+        st.log('MAC entries on {}: {}'.format(dut, result['mac_count']))
+    except Exception as err:
+        st.log('Failed to get MAC table on {}: {}'.format(dut, err))
+
+    # Step 2: Check ARP table
+    try:
+        arp_output = st.show(dut, "show arp", skip_tmpl=True)
+        if arp_output:
+            # Count lines with IP addresses (ARP entries)
+            arp_lines = [l for l in arp_output.splitlines()
+                         if '.' in l and ':' in l]
+            result['arp_count'] = len(arp_lines)
+        st.log('ARP entries on {}: {}'.format(dut, result['arp_count']))
+    except Exception as err:
+        st.log('Failed to get ARP table on {}: {}'.format(dut, err))
+
+    # Build summary
+    details_parts = []
+    details_parts.append('{} MAC entries'.format(result['mac_count']))
+    details_parts.append('{} ARP entries'.format(result['arp_count']))
+
+    result['details'] = '; '.join(details_parts)
+    st.log(result['details'])
+
+    # Pass if at least some MAC and ARP entries exist
+    result['result'] = (result['mac_count'] > 0 and result['arp_count'] > 0)
+    return result
+
+
 def report_result(result, tc_id='', rc_msg=''):
     if result:
         st.banner('Testcase: {} :: Result: Pass'.format(tc_id))

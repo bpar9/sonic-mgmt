@@ -9,6 +9,7 @@ spine2_dc1_bgw1:
         - vrf_id: 102
           vlan_bindings: [16, 17, 18, 19, 20, 102]
           vxlan_id: 10102
+# All BGWs use cross-DC L3VNI (10101/10102) for VRF-VNI binding
     l2vni:
         - vlan_id: 11
           vxlan_id: 5011
@@ -86,10 +87,10 @@ spine3_dc1_bgw2:
     l3vni:
         - vrf_id: 101
           vlan_bindings: [11, 12, 13, 14, 15, 101]
-          vxlan_id: 5101
+          vxlan_id: 10101
         - vrf_id: 102
           vlan_bindings: [16, 17, 18, 19, 20, 102]
-          vxlan_id: 5102
+          vxlan_id: 10102
     l2vni:
         - vlan_id: 11
           vxlan_id: 5011
@@ -168,10 +169,10 @@ spine0_dc2_bgw1:
     l3vni:
         - vrf_id: 101
           vlan_bindings: [11, 12, 13, 14, 15, 101]
-          vxlan_id: 5101
+          vxlan_id: 10101
         - vrf_id: 102
           vlan_bindings: [16, 17, 18, 19, 20, 102]
-          vxlan_id: 7102
+          vxlan_id: 10102
     l2vni:
         - vlan_id: 11
           vxlan_id: 7011
@@ -249,10 +250,10 @@ spine1_dc2_bgw2:
     l3vni:
         - vrf_id: 101
           vlan_bindings: [11, 12, 13, 14, 15, 101]
-          vxlan_id: 5101
+          vxlan_id: 10101
         - vrf_id: 102
           vlan_bindings: [16, 17, 18, 19, 20, 102]
-          vxlan_id: 5102
+          vxlan_id: 10102
     l2vni:
         - vlan_id: 11
           vxlan_id: 7011
@@ -330,10 +331,10 @@ spine0_dc3_bgw1:
     l3vni:
         - vrf_id: 101
           vlan_bindings: [11, 12, 13, 14, 15, 101]
-          vxlan_id: 5101
+          vxlan_id: 10101
         - vrf_id: 102
           vlan_bindings: [16, 17, 18, 19, 20, 102]
-          vxlan_id: 9102
+          vxlan_id: 10102
     l2vni:
         - vlan_id: 11
           vxlan_id: 9011

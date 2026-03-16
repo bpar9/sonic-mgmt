@@ -2739,9 +2739,8 @@ class TestVxlanDCIBase():
             show evpn es, show evpn vni detail, show platform npu mac-age
             
         Steps:
-            1. Verify VRF-VNI mappings on all nodes (leaf and BGW)
-            2. Verify VLAN-VNI mappings on all nodes
-            3. Verify Type-5 routes on BGW nodes
+            1. Verify VRF-VNI and VLAN-VNI mappings on all nodes via verify_base_setup_bgw
+            2. Verify Type-5 routes on BGW nodes
         """
         tc_id = "test_base_dci_l3vni_base_profile"
         test_cfg['tc_id'] = tc_id
@@ -2751,44 +2750,19 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        # Step 1: Verify VRF-VNI mappings on all nodes (leaf and BGW)
-        st.banner('Step 1: Verify VRF-VNI mappings on all DCI nodes')
+        # Step 1: Verify VRF-VNI and VLAN-VNI mappings on all nodes using verify_base_setup_bgw
+        st.banner('Step 1: Verify VRF-VNI and VLAN-VNI mappings on all DCI nodes')
         st.log('Expected VRF-VNI bindings from vxlan_dci_input_file.yaml:')
         st.log('  DC1 leafs: Vrf101->5101, Vrf102->5102')
         st.log('  DC2 leafs: Vrf101->5101, Vrf102->7102')
         st.log('  DC3 leafs: Vrf101->5101, Vrf102->9102')
-        for dut in test_cfg['nodes']['l2l3vni_bgw']:
-            try:
-                exp_data = vxlan_obj.get_expected_vxlan_vrfvnimap(dut)
-                if exp_data:
-                    vxlan_obj.verify_vxlan_vrfvnimap(dut, exp_data, vl_retries=2)
-                    st.log('VRF-VNI map on {}: Pass ({} mappings)'.format(dut, len(exp_data)))
-                else:
-                    st.log('VRF-VNI map on {}: Skipped (no VRF-VNI mappings expected)'.format(dut))
-            except Exception as err:
-                msg = 'VRF-VNI map verification on {}: Fail - {}\n'.format(dut, err)
-                st.log(msg)
-                summ += msg
-                result = False
+        st.log('  BGW nodes: Vrf101->10101, Vrf102->10102 (cross-DC L3VNI)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'], checks=['vrf_vni', 'vlan_vni']):
+            summ += 'VRF-VNI or VLAN-VNI mapping verification failed on one or more nodes\n'
+            result = False
         
-        # Step 2: Verify VLAN-VNI mappings on all nodes
-        st.banner('Step 2: Verify VLAN-VNI mappings on all DCI nodes')
-        for dut in test_cfg['nodes']['l2l3vni_bgw']:
-            try:
-                exp_data = vxlan_obj.get_expected_vxlan_vlanvnimap(dut)
-                if exp_data:
-                    vxlan_obj.verify_vxlan_vlanvnimap(dut, exp_data, id_keys=['vlan', 'vni'], vl_retries=2)
-                    st.log('VLAN-VNI map on {}: Pass ({} mappings)'.format(dut, len(exp_data)))
-                else:
-                    st.log('VLAN-VNI map on {}: Skipped (no VLAN-VNI mappings expected)'.format(dut))
-            except Exception as err:
-                msg = 'VLAN-VNI map verification on {}: Fail - {}\n'.format(dut, err)
-                st.log(msg)
-                summ += msg
-                result = False
-        
-        # Step 3: Verify Type-5 routes on BGW nodes
-        st.banner('Step 3: Verify EVPN Type-5 routes on BGW nodes')
+        # Step 2: Verify Type-5 routes on BGW nodes
+        st.banner('Step 2: Verify EVPN Type-5 routes on BGW nodes')
         st.log('Type-5 route format: [5]:[0]:[prefix_len]:[prefix]')
         st.log('Expected L3VNI in extended community: 10101 (Vrf101), 10102 (Vrf102)')
         bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
@@ -2868,22 +2842,12 @@ class TestVxlanDCIBase():
                 summ += msg
                 result = False
         
-        # Step 2: Verify VRF-VNI mappings on BGW nodes
+        # Step 2: Verify VRF-VNI mappings on BGW nodes using verify_base_setup_bgw
         st.banner('Step 2: Verify VRF-VNI mappings on BGW nodes')
         st.log('BGW nodes use cross-DC L3VNI: Vrf101->10101, Vrf102->10102')
-        for dut in bgw_nodes:
-            try:
-                exp_data = vxlan_obj.get_expected_vxlan_vrfvnimap(dut)
-                if exp_data:
-                    vxlan_obj.verify_vxlan_vrfvnimap(dut, exp_data, vl_retries=2)
-                    st.log('VRF-VNI map on {}: Pass ({} mappings)'.format(dut, len(exp_data)))
-                else:
-                    st.log('VRF-VNI map on {}: Skipped (no mappings expected)'.format(dut))
-            except Exception as err:
-                msg = 'VRF-VNI map on {}: Fail - {}\n'.format(dut, err)
-                st.log(msg)
-                summ += msg
-                result = False
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni']):
+            summ += 'VRF-VNI mapping verification failed on one or more BGW nodes\n'
+            result = False
         
         report_result(result, tc_id, summ)
     
@@ -2960,22 +2924,12 @@ class TestVxlanDCIBase():
                 summ += msg
                 result = False
         
-        # Step 2: Verify VRF-VNI mappings on all BGW nodes
+        # Step 2: Verify VRF-VNI mappings on all BGW nodes using verify_base_setup_bgw
         st.banner('Step 2: Verify VRF-VNI mappings on BGW nodes')
         st.log('BGW cross-DC L3VNI from l3vni_config_diff.txt: Vrf101->10101, Vrf102->10102')
-        for dut in bgw_nodes:
-            try:
-                exp_data = vxlan_obj.get_expected_vxlan_vrfvnimap(dut)
-                if exp_data:
-                    vxlan_obj.verify_vxlan_vrfvnimap(dut, exp_data, vl_retries=2)
-                    st.log('VRF-VNI map on {}: Pass ({} mappings)'.format(dut, len(exp_data)))
-                else:
-                    st.log('VRF-VNI map on {}: Skipped (no VRF-VNI mappings expected)'.format(dut))
-            except Exception as err:
-                msg = 'VRF-VNI map verification on {}: Fail - {}\n'.format(dut, err)
-                st.log(msg)
-                summ += msg
-                result = False
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni']):
+            summ += 'VRF-VNI mapping verification failed on one or more BGW nodes\n'
+            result = False
         
         # Step 3: Verify EVPN VNI table shows L3 VNIs on BGW nodes
         st.banner('Step 3: Verify EVPN VNI table on BGW nodes')

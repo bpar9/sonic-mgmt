@@ -2611,6 +2611,120 @@ def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,
                     i+=1
     return l3_endpoint_dict
 
+
+def find_l3_dci_traffic_endpoints(host_info_dict, config_dict, vrf_vlan_dict=None):
+    """
+    Generate L3 DCI cross-DC traffic endpoints per l3vni_dci_traffic_flows.txt.
+
+    Creates exactly 23 flows across VRF101 and VRF102 with specific
+    source/destination node, interface type (SH=orphan, MH=PortChannel),
+    and VLAN pairs.
+
+    Flow summary (23 total):
+      leaf0_dc1 SH  -> leaf0_dc2 SH:  4 VRF101 + 4 VRF102 = 8
+      leaf0_dc1 SH  -> leaf0_dc2 MH:  4 VRF101 + 4 VRF102 = 8
+      leaf0_dc1 MH  -> leaf0_dc2 SH:  1 VRF101 + 1 VRF102 = 2
+      leaf0_dc1 MH  -> leaf0_dc2 MH:  1 VRF101 + 1 VRF102 = 2
+      leaf1_dc2 SH  -> leaf0_dc3 SH:  2 VRF101 + 1 VRF102 = 3
+                                                      Total = 23
+
+    Args:
+        host_info_dict: Dict of node -> interface -> vlan -> host_info
+                        (from generate_sag_hosts)
+        config_dict:    Full config dict from get_cfg_dict()
+        vrf_vlan_dict:  Dict of vrf_id -> [vlan_list].  If None, derived
+                        from config_dict.
+
+    Returns:
+        dict: Endpoint dict in same format as find_l3_traffic_endpoints,
+              keyed by 'traffic_item_<N>'.
+    """
+    if not host_info_dict:
+        return {}
+
+    # Derive VRF-VLAN mapping from config if not provided
+    if vrf_vlan_dict is None:
+        vrf_vlan_dict = {}
+        for node_name, node_cfg in config_dict.items():
+            if isinstance(node_cfg, dict) and node_cfg.get('l3vni'):
+                for item in node_cfg['l3vni']:
+                    vrf_vlan_dict[item['vrf_id']] = item['vlan_bindings']
+                break
+
+    # VLAN pairs per VRF (src_vlan -> dst_vlan) from l3vni_dci_traffic_flows.txt
+    vrf101_full_pairs = [(11, 12), (12, 13), (13, 14), (15, 11)]
+    vrf102_full_pairs = [(16, 17), (17, 18), (18, 19), (20, 16)]
+    # MH source: only 1 pair per VRF (first pair)
+    vrf101_mh_pairs = [(11, 12)]
+    vrf102_mh_pairs = [(16, 17)]
+    # leaf1_dc2 -> leaf0_dc3: 2 VRF101 + 1 VRF102
+    vrf101_dc2_dc3_pairs = [(11, 12), (12, 13)]
+    vrf102_dc2_dc3_pairs = [(16, 17)]
+
+    # Helper: resolve interface name for a node
+    # SH (orphan) = first interface with 'P1' in name
+    # MH (PortChannel) = first interface starting with 'PortChannel'
+    def _resolve_intf(node, intf_type):
+        if node not in host_info_dict:
+            return None
+        for intf_name in host_info_dict[node]:
+            if intf_type == 'SH' and 'P1' in intf_name and not intf_name.startswith('PortChannel'):
+                return intf_name
+            if intf_type == 'MH' and intf_name.startswith('PortChannel'):
+                return intf_name
+        return None
+
+    # Helper: determine VRF for a VLAN
+    def _vrf_for_vlan(vlan):
+        for vrf_id, vlans in vrf_vlan_dict.items():
+            if vlan in vlans:
+                return vrf_id
+        return ''
+
+    # Define all flow groups per l3vni_dci_traffic_flows.txt
+    # Each entry: (src_node, src_type, dst_node, dst_type, vlan_pairs)
+    flow_groups = [
+        # leaf0_dc1 SH -> leaf0_dc2 SH: full pairs
+        ('leaf0_dc1', 'SH', 'leaf0_dc2', 'SH', vrf101_full_pairs + vrf102_full_pairs),
+        # leaf0_dc1 SH -> leaf0_dc2 MH: full pairs
+        ('leaf0_dc1', 'SH', 'leaf0_dc2', 'MH', vrf101_full_pairs + vrf102_full_pairs),
+        # leaf0_dc1 MH -> leaf0_dc2 SH: 1 pair per VRF
+        ('leaf0_dc1', 'MH', 'leaf0_dc2', 'SH', vrf101_mh_pairs + vrf102_mh_pairs),
+        # leaf0_dc1 MH -> leaf0_dc2 MH: 1 pair per VRF
+        ('leaf0_dc1', 'MH', 'leaf0_dc2', 'MH', vrf101_mh_pairs + vrf102_mh_pairs),
+        # leaf1_dc2 SH -> leaf0_dc3 SH: 2 VRF101 + 1 VRF102
+        ('leaf1_dc2', 'SH', 'leaf0_dc3', 'SH', vrf101_dc2_dc3_pairs + vrf102_dc2_dc3_pairs),
+    ]
+
+    endpoints = {}
+    idx = 1
+    for src_node, src_type, dst_node, dst_type, vlan_pairs in flow_groups:
+        src_intf = _resolve_intf(src_node, src_type)
+        dst_intf = _resolve_intf(dst_node, dst_type)
+        if not src_intf or not dst_intf:
+            st.log('find_l3_dci_traffic_endpoints: cannot resolve intf '
+                   'src={}:{} dst={}:{}'.format(src_node, src_type, dst_node, dst_type))
+            continue
+        for src_vlan, dst_vlan in vlan_pairs:
+            vrf = _vrf_for_vlan(src_vlan)
+            traffic_item = 'traffic_item_{}'.format(idx)
+            endpoints[traffic_item] = {
+                'dir': '{}-->{}'.format(src_vlan, dst_vlan),
+                'src_vlan': src_vlan,
+                'src_int': src_intf,
+                'src_node': src_node,
+                'src_vrf': vrf,
+                'dst_vlan': dst_vlan,
+                'dst_int': dst_intf,
+                'dst_node': dst_node,
+                'dst_vrf': vrf,
+            }
+            idx += 1
+
+    st.log('find_l3_dci_traffic_endpoints: generated {} flows'.format(len(endpoints)))
+    return endpoints
+
+
 def create_traffic_item(device_handles, endpoints, topo_handles, transmit_mode="single_burst",
                         version = "ipv4", udp_header = False, multi_dst = None, name_prfx='TI', 
                         circuit_type='default', rx_all_ports=False, 

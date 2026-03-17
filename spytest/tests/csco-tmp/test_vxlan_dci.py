@@ -3597,6 +3597,430 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
+    def test_base_dci_l3vni_sh_ipv4_within_dc(self):
+        """
+        L3VNI_dci:18 - L3VNI Single-homed IPv4 - Traffic within DC fabric
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv4 traffic between the orphan hosts within DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI traffic streams include single-homed (orphan) host flows.
+            Reuses L3VNI_dci:13 traffic verification with IPv4 within-DC scope.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes)
+            2. Send L3VNI IPv4 traffic within DC (includes SH flows)
+            3. Verify MAC and ARP entries on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_sh_ipv4_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:18: SH IPv4 traffic within DC fabric ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv4 traffic within DC (SH hosts)
+        st.banner('Step 2: Verify L3VNI IPv4 traffic within DC (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            st.log('L3VNI SH IPv4 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI SH IPv4 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed on leaf nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_sh_ipv4_across_dci(self):
+        """
+        L3VNI_dci:19 - L3VNI Single-homed IPv4 - Traffic across DCI
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv4 traffic between the orphan hosts across DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI cross-DC traffic streams include single-homed (orphan) host flows.
+            Reuses L3VNI_dci:14 traffic verification with IPv4 cross-DC scope.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
+            2. Send L3VNI IPv4 traffic across DCI (includes SH flows)
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_sh_ipv4_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:19: SH IPv4 traffic across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup on BGW nodes
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv4 traffic across DCI (SH hosts)
+        st.banner('Step 2: Verify L3VNI IPv4 traffic across DCI (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            st.log('L3VNI SH IPv4 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI SH IPv4 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC traffic\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_sh_ipv6_within_dc(self):
+        """
+        L3VNI_dci:20 - L3VNI Single-homed IPv6 - Traffic within DC fabric
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv6 traffic between the orphan hosts within DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI traffic streams include single-homed (orphan) host flows.
+            Reuses L3VNI_dci:13 traffic verification with IPv6 within-DC scope.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes)
+            2. Send L3VNI IPv6 traffic within DC (includes SH flows)
+            3. Verify MAC and ARP entries on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_sh_ipv6_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:20: SH IPv6 traffic within DC fabric ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv6 traffic within DC (SH hosts)
+        st.banner('Step 2: Verify L3VNI IPv6 traffic within DC (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
+            st.log('L3VNI SH IPv6 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI SH IPv6 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed on leaf nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_sh_ipv6_across_dci(self):
+        """
+        L3VNI_dci:21 - L3VNI Single-homed IPv6 - Traffic across DCI
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv6 traffic between the orphan hosts across DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI cross-DC traffic streams include single-homed (orphan) host flows.
+            Reuses L3VNI_dci:15 traffic verification with IPv6 cross-DC scope.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
+            2. Send L3VNI IPv6 traffic across DCI (includes SH flows)
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_sh_ipv6_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:21: SH IPv6 traffic across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup on BGW nodes
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv6 traffic across DCI (SH hosts)
+        st.banner('Step 2: Verify L3VNI IPv6 traffic across DCI (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+            st.log('L3VNI SH IPv6 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI SH IPv6 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_mh_ipv4_within_dc(self):
+        """
+        L3VNI_dci:22 - L3VNI Multi-homed IPv4 - Traffic within DC with EVPN-MH
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv4 traffic between the MH hosts within DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
+            Reuses L3VNI_dci:13 traffic verification with IPv4 within-DC scope.
+            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5, EVPN ES)
+            2. Send L3VNI IPv4 traffic within DC (includes MH flows)
+            3. Verify MAC and ARP entries on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_mh_ipv4_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:22: MH IPv4 traffic within DC with EVPN-MH ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup including EVPN ES for MH
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES status')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv4 traffic within DC (MH hosts)
+        st.banner('Step 2: Verify L3VNI IPv4 traffic within DC (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            st.log('L3VNI MH IPv4 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI MH IPv4 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed on leaf nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_mh_ipv4_across_dci(self):
+        """
+        L3VNI_dci:23 - L3VNI Multi-homed IPv4 - Traffic across DCI with EVPN-MH
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv4 traffic between the MH hosts across DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI cross-DC traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
+            Reuses L3VNI_dci:14 traffic verification with IPv4 cross-DC scope.
+            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5, EVPN ES on BGW nodes)
+            2. Send L3VNI IPv4 traffic across DCI (includes MH flows)
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_mh_ipv4_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:23: MH IPv4 traffic across DCI with EVPN-MH ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup including EVPN ES for MH
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv4 traffic across DCI (MH hosts)
+        st.banner('Step 2: Verify L3VNI IPv4 traffic across DCI (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            st.log('L3VNI MH IPv4 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI MH IPv4 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC traffic\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_mh_ipv6_within_dc(self):
+        """
+        L3VNI_dci:24 - L3VNI Multi-homed IPv6 - Traffic within DC with EVPN-MH
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv6 traffic between the MH hosts within DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
+            Reuses L3VNI_dci:13 traffic verification with IPv6 within-DC scope.
+            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5, EVPN ES)
+            2. Send L3VNI IPv6 traffic within DC (includes MH flows)
+            3. Verify MAC and ARP entries on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_mh_ipv6_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:24: MH IPv6 traffic within DC with EVPN-MH ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup including EVPN ES for MH
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES status')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv6 traffic within DC (MH hosts)
+        st.banner('Step 2: Verify L3VNI IPv6 traffic within DC (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
+            st.log('L3VNI MH IPv6 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI MH IPv6 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed on leaf nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_mh_ipv6_across_dci(self):
+        """
+        L3VNI_dci:25 - L3VNI Multi-homed IPv6 - Traffic across DCI with EVPN-MH
+        
+        Description:
+            1) Base profile bring up
+            2) Configure hosts in each VLAN across different VRFs
+            3) Send L3VNI IPv6 traffic between the MH hosts across DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            L3VNI cross-DC traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
+            Reuses L3VNI_dci:15 traffic verification with IPv6 cross-DC scope.
+            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5, EVPN ES on BGW nodes)
+            2. Send L3VNI IPv6 traffic across DCI (includes MH flows)
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_mh_ipv6_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:25: MH IPv6 traffic across DCI with EVPN-MH ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup including EVPN ES for MH
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send L3VNI IPv6 traffic across DCI (MH hosts)
+        st.banner('Step 2: Verify L3VNI IPv6 traffic across DCI (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+            st.log('L3VNI MH IPv6 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI MH IPv6 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
     def test_base_dci_tunnel_counters_within_dc(self):
         """
         Solution_dci:7 - Verify Tunnel counters within Datacenter

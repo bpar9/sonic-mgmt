@@ -150,12 +150,14 @@ def enable_debugs(request):
 
 def config_l2l3vni(dut=None):
     """
-    Configures L2/L3 VNI on leaf/spine nodes (not BGW).
+    Configures L2/L3 VNI on leaf nodes only (not BGW).
     Uses bgp_l3vni_config_dci (dci_enabled) for L3VNI BGP; EVPN MH/ESI for multi-homing.
     If `dut` is provided, only configure the specified node.
+    BGW nodes are excluded -- they are configured separately via config_bgw_nodes().
     """
-    # Determine the nodes to configure
+    # Determine the nodes to configure (exclude BGW nodes -- they use config_bgw_nodes)
     l2l3vni_nodes = [dut] if dut else test_cfg['nodes']['l2l3vni']
+    l2l3vni_nodes = [n for n in l2l3vni_nodes if 'bgw' not in n]
     bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
     # Perform the configuration
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'nvo')
@@ -175,15 +177,15 @@ def config_l2l3vni(dut=None):
     vxlan_obj.enable_uplink_tracking_configs(l2l3vni_nodes)
 
     # configs changed after image issues 24806, 27192
-    for dut in test_cfg['nodes']['l2l3vni']:
+    for node in l2l3vni_nodes:
         cmd = 'evpn mh startup-delay 10\n'
         cmd += 'no ip nht resolve-via-default\n'
         cmd += 'no ipv6 nht resolve-via-default\n'
-        vxlan_obj.config_dut(dut, 'bgp', cmd)
-    for dut in test_cfg['nodes']['spine']:
+        vxlan_obj.config_dut(node, 'bgp', cmd)
+    for node in test_cfg['nodes']['spine']:
         cmd = 'no ip nht resolve-via-default\n'
         cmd += 'no ipv6 nht resolve-via-default\n'
-        vxlan_obj.config_dut(dut, 'bgp', cmd)
+        vxlan_obj.config_dut(node, 'bgp', cmd)
 
     # Save the configuration for the relevant nodes
     for node in l2l3vni_nodes:
@@ -193,11 +195,13 @@ def config_l2l3vni(dut=None):
 
 def unconfig_l2l3vni(dut=None):
     """
-    Unconfigures L2/L3 VNI on the specified nodes.
+    Unconfigures L2/L3 VNI on leaf nodes only (not BGW).
     If `dut` is provided, only unconfigure the specified node.
+    BGW nodes are excluded -- they are unconfigured separately via unconfig_bgw_nodes().
     """
-    # Determine the nodes to unconfigure
+    # Determine the nodes to unconfigure (exclude BGW nodes)
     l2l3vni_nodes = [dut] if dut else test_cfg['nodes']['l2l3vni']
+    l2l3vni_nodes = [n for n in l2l3vni_nodes if 'bgw' not in n]
     all_nodes = [dut] if dut else test_cfg['nodes']['all']
     bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
     # Log the operation
@@ -221,11 +225,11 @@ def unconfig_l2l3vni(dut=None):
     vxlan_obj.config_feature_parallel(l2l3vni_nodes, 'delete_vxlan')
 
     # configs changed after image issues 24806, 27192
-    for dut in test_cfg['nodes']['l2l3vni']:
+    for node in l2l3vni_nodes:
         cmd = 'no evpn mh startup-delay 10\n'
         cmd += 'ip nht resolve-via-default\n'
         cmd += 'ipv6 nht resolve-via-default\n'
-        vxlan_obj.config_dut(dut, 'bgp', cmd)
+        vxlan_obj.config_dut(node, 'bgp', cmd)
     for dut in test_cfg['nodes']['spine']:
         cmd = 'ip nht resolve-via-default\n'
         cmd += 'ipv6 nht resolve-via-default\n'
@@ -3492,7 +3496,7 @@ class TestVxlanDCIBase():
         
         # Step 4: Verify MAC and ARP entries on leaf nodes
         st.banner('Step 4: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed on leaf nodes\n'
             result = False
@@ -3541,7 +3545,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed after cross-DC traffic\n'
             result = False
@@ -3590,7 +3594,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
             result = False
@@ -3642,7 +3646,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed on leaf nodes\n'
             result = False
@@ -3695,7 +3699,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed after cross-DC traffic\n'
             result = False
@@ -3747,7 +3751,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed on leaf nodes\n'
             result = False
@@ -3800,7 +3804,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
             result = False
@@ -3853,7 +3857,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed on leaf nodes\n'
             result = False
@@ -3907,7 +3911,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed after cross-DC traffic\n'
             result = False
@@ -3960,7 +3964,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed on leaf nodes\n'
             result = False
@@ -4014,7 +4018,7 @@ class TestVxlanDCIBase():
         
         # Step 3: Verify MAC and ARP entries
         st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
-        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni'] if 'leaf' in node.lower()]
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
             result = False

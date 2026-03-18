@@ -6679,8 +6679,9 @@ def get_expected_evpn_vni(dut):
     l3vni_config = dut_cfg.get('l3vni', [])
     if isinstance(l3vni_config, list):
         for l3vni_item in l3vni_config:
-            vni = l3vni_item.get('l3vni')
-            vrf = l3vni_item.get('vrf_id', 'default')
+            vni = l3vni_item.get('vxlan_id')
+            vrf_id = l3vni_item.get('vrf_id', '')
+            vrf = 'Vrf{}'.format(vrf_id) if vrf_id else 'default'
             if vni:
                 ret_val.append({
                     'vni': str(vni),
@@ -6709,7 +6710,8 @@ def verify_evpn_type5_routes_dci(dut):
     Verify EVPN Type-5 (prefix) routes are present on a BGW node for L3VNI DCI.
 
     Runs 'show bgp l2vpn evpn route type prefix' on the BGW and checks that
-    at least one Type-5 route exists. Type-5 routes are required for cross-DC
+    at least one Type-5 route exists with the correct format
+    [5]:[0]:[prefix_len]:[prefix]. Type-5 routes are required for cross-DC
     L3VNI forwarding -- they carry IP prefix information with VRF-aware
     route-targets and are rewritten by RT-REWRITE route-maps on BGW spines.
 
@@ -6717,8 +6719,9 @@ def verify_evpn_type5_routes_dci(dut):
         dut: BGW node hostname to verify
 
     Returns:
-        Boolean: True if at least one Type-5 route is found, False otherwise
+        Boolean: True if at least one valid Type-5 route is found, False otherwise
     """
+    import re
     st.banner('Checking EVPN Type-5 (prefix) routes on {}'.format(dut))
 
     try:
@@ -6732,23 +6735,33 @@ def verify_evpn_type5_routes_dci(dut):
         st.log('No Type-5 route output on {}'.format(dut))
         return False
 
-    # Count Type-5 route entries: lines containing "[5]:[" are route lines
-    route_count = 0
+    # Validate Type-5 route format: [5]:[0]:[prefix_len]:[prefix]
+    # prefix can be IPv4 (dotted decimal) or IPv6 (colon-separated hex)
+    type5_pattern = re.compile(
+        r'\[5\]:\[0\]:\[\d+\]:\[[\d\.a-fA-F:]+\]'
+    )
+    valid_route_count = 0
+    invalid_route_count = 0
     for line in cli_output.splitlines():
         if '[5]:[' in line:
-            route_count += 1
+            if type5_pattern.search(line):
+                valid_route_count += 1
+            else:
+                invalid_route_count += 1
 
-    st.log('Found {} EVPN Type-5 routes on {}'.format(route_count, dut))
+    st.log('Found {} valid Type-5 routes on {} ({} with unexpected format)'.format(
+        valid_route_count, dut, invalid_route_count))
 
-    if route_count > 0:
-        # Log a sample of routes for debugging (first 5)
-        sample_lines = [l.strip() for l in cli_output.splitlines() if '[5]:[' in l][:5]
+    if valid_route_count > 0:
+        # Log a sample of valid routes for debugging (first 5)
+        sample_lines = [l.strip() for l in cli_output.splitlines()
+                        if type5_pattern.search(l)][:5]
         for sample in sample_lines:
-            st.log('  Type-5 route sample: {}'.format(sample))
+            st.log('  Type-5 route: {}'.format(sample))
         return True
 
     # Check for "No matching entries" or empty table indicators
-    st.log('No EVPN Type-5 routes found on {} - L3VNI cross-DC may not be active'.format(dut))
+    st.log('No valid EVPN Type-5 routes found on {} - L3VNI cross-DC may not be active'.format(dut))
     return False
 
 
@@ -6805,8 +6818,25 @@ def verify_evpn_type5_route_detail_dci(dut):
         return result
 
     lines = cli_output.splitlines()
-    # Expected cross-DC L3VNI values from l3vni_config_diff.txt
-    expected_l3vnis = {'10101', '10102'}
+    # Read expected cross-DC L3VNI values from YAML config instead of hardcoding
+    cfg_dict = get_cfg_dict()
+    expected_l3vnis = set()
+    dut_cfg = cfg_dict.get(dut, {})
+    l3vni_config = dut_cfg.get('l3vni', [])
+    if isinstance(l3vni_config, list):
+        for l3vni_item in l3vni_config:
+            vxlan_id = l3vni_item.get('vxlan_id')
+            if vxlan_id:
+                expected_l3vnis.add(str(vxlan_id))
+    # Fallback: if no L3VNI found in YAML for this node, check all BGW nodes
+    if not expected_l3vnis:
+        for node_name, node_cfg in cfg_dict.items():
+            if 'bgw' in node_name and isinstance(node_cfg, dict):
+                for item in node_cfg.get('l3vni', []):
+                    vxlan_id = item.get('vxlan_id')
+                    if vxlan_id:
+                        expected_l3vnis.add(str(vxlan_id))
+    st.log('Expected L3VNI values for {}: {}'.format(dut, expected_l3vnis))
 
     # Parse Type-5 route lines: format [5]:[0]:[prefix_len]:[prefix]
     type5_pattern = re.compile(r'\[5\]:\[0\]:\[\d+\]:\[[\d\.]+\]')
@@ -7065,7 +7095,16 @@ def verify_rt_rewrite_dci(dut):
     # Extract RT values from Type-5 route output
     # Format: RT:<ASN>:<VNI> e.g. RT:65102:10101
     rt_pattern = re.compile(r'RT:(\d+):(\d+)')
-    expected_cross_dc_vnis = {'10101', '10102'}
+    # Read expected cross-DC VNI values from YAML config instead of hardcoding
+    cfg_dict = get_cfg_dict()
+    expected_cross_dc_vnis = set()
+    for node_name, node_cfg in cfg_dict.items():
+        if 'bgw' in node_name and isinstance(node_cfg, dict):
+            for item in node_cfg.get('l3vni', []):
+                vxlan_id = item.get('vxlan_id')
+                if vxlan_id:
+                    expected_cross_dc_vnis.add(str(vxlan_id))
+    st.log('Expected cross-DC VNI values for RT check on {}: {}'.format(dut, expected_cross_dc_vnis))
     for line in cli_output.splitlines():
         for rt_match in rt_pattern.finditer(line):
             asn = rt_match.group(1)

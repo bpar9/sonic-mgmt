@@ -280,11 +280,11 @@ def config_bgw_nodes(dut=None):
     vxlan_obj.config_feature_parallel(bgw_nodes, 'nvo_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'enable_tunnel_counters')
     vxlan_obj.config_feature_parallel(bgw_nodes, 'l2vni_dci', dci_enabled=True)
-    vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_transit_wan_dci', dci_enabled=True)
-    vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_overlay_wan_dci', dci_enabled=True)
-    vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_ihop_direct_dci', dci_enabled=True)
-    # bgp_info is required for route-map source IPs and L3VNI helpers
+    # bgp_info is required for BGP config generators (router_id, as_num) and L3VNI helpers
     bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_transit_wan_dci', dci_enabled=True, bgp_info=bgp_info)
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_overlay_wan_dci', dci_enabled=True, bgp_info=bgp_info)
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_ihop_direct_dci', dci_enabled=True, bgp_info=bgp_info)
     # RM_SET_SRC4/RM_SET_SRC6 route-maps (set source IP for BGP-learned routes)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'route_maps_dci', dci_enabled=True, bgp_info=bgp_info)
     # L3VNI configuration from l3vni_config_diff.txt:

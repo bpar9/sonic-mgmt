@@ -3870,7 +3870,7 @@ def config_feature_dci(nodes, feature, **kwargs):
      transit_wan_ipv4_underlay) = config_feature_dci._dci_vip_cache
 
     # Load BGP BGW info when needed (cached across calls)
-    _BGP_BGW_FEATURES = ('bgp_transit_wan_dci', 'bgp_overlay_wan_dci')
+    _BGP_BGW_FEATURES = ('bgp_transit_wan_dci', 'bgp_overlay_wan_dci', 'bgp_ihop_direct_dci')
     if feature in _BGP_BGW_FEATURES:
         if not hasattr(config_feature_dci, "_bgp_info_bgw_cache"):
             all_bgw_nodes = [n for n in config_dict['nodes']['all'] if 'bgw' in n]

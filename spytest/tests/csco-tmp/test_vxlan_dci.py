@@ -283,10 +283,11 @@ def config_bgw_nodes(dut=None):
     vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_transit_wan_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_overlay_wan_dci', dci_enabled=True)
     vxlan_obj.config_feature_parallel(bgw_nodes, 'bgp_ihop_direct_dci', dci_enabled=True)
-    vxlan_obj.config_feature_parallel(bgw_nodes, 'route_maps_dci', dci_enabled=True)
-    # L3VNI configuration from l3vni_config_diff.txt:
-    # bgp_info is required for L3VNI helpers to look up per-node ASNs and derive RT values
+    # bgp_info is required for route-map source IPs and L3VNI helpers
     bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
+    # RM_SET_SRC4/RM_SET_SRC6 route-maps (set source IP for BGP-learned routes)
+    vxlan_obj.config_feature_parallel(bgw_nodes, 'route_maps_dci', dci_enabled=True, bgp_info=bgp_info)
+    # L3VNI configuration from l3vni_config_diff.txt:
     # SONiC CLI: VLAN 101/102, VRF, VRF-VLAN bind, VXLAN map (vxlan-dc/vxlan-wan), VRF-VNI map
     vxlan_obj.config_feature_parallel(bgw_nodes, 'l3vni_sonic_bgw_dci', dci_enabled=True, bgp_info=bgp_info)
     # FRR: VRF-VNI bindings, extcommunity-lists, RT-REWRITE route-maps, BGP VRF with route-targets

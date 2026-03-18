@@ -3935,7 +3935,15 @@ def config_feature_dci(nodes, feature, **kwargs):
             dc_direct_peers = bgp_info_bgw[node].get('neighbor_dc_direct', [])
             config_out = generate_bgp_ihop_direct_config(bgp_info_bgw[node], ihop_peers, dc_direct_peers)
         elif feature == 'route_maps_dci':
-            config_out = generate_source_route_maps(bgp_info[node])
+            # Build data dict with loopback IPs for generate_source_route_maps
+            # bgp_info[node] has router_id (Loopback0 IPv4) but not loopback_ipv6
+            node_bgp = bgp_info.get(node, {})
+            loopback_v6_map = generate_loopback_ip(version='v6')
+            rm_data = {
+                'loopback_ipv4': node_bgp.get('router_id', ''),
+                'loopback_ipv6': loopback_v6_map.get(node, '')
+            }
+            config_out = generate_source_route_maps(rm_data)
         elif feature == 'l3vni_sonic_bgw_dci':
             config_out = generate_l3vni_bgw_sonic_config(node, config_dict, bgp_info)
         elif feature == 'l3vni_frr_bgw_dci':

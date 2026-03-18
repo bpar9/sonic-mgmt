@@ -942,7 +942,7 @@ def generate_source_route_maps(bgw_data, loopback_v4="Loopback0", loopback_v6="L
     output += 'set src {}\n'.format(lo_v6_ip)
     output += 'exit\n'
     
-    output += 'route-map RM_SET_SRC4 permit 10\n'
+    output += 'route-map RM_SET_SRC4 permit 20\n'
     output += 'set src {}\n'.format(lo_v4_ip)
     output += 'exit\n'
     
@@ -3392,7 +3392,7 @@ def generate_dci_vip_maps():
         loopback_ipv4_wan_overlay[node] = "{}.{}.{}.{}".format(
             overlay_base + i * 10, overlay_base + i * 10, overlay_base + i * 10, overlay_base + i * 10)
         if dc and dc != 'dc1':
-            loopback20_ips[node] = "80.80.80.{}".format(80 + len(loopback20_ips))
+            loopback20_ips[node] = "100.100.100.{}".format(1 + len(loopback20_ips))
     generate_dci_vip_maps._loopback20_ips = loopback20_ips
     return (loopback_ipv6_dc_vip,
             loopback_ipv4_wan_vip,
@@ -3936,11 +3936,11 @@ def config_feature_dci(nodes, feature, **kwargs):
             config_out = generate_bgp_ihop_direct_config(bgp_info_bgw[node], ihop_peers, dc_direct_peers)
         elif feature == 'route_maps_dci':
             # Build data dict with loopback IPs for generate_source_route_maps
-            # bgp_info[node] has router_id (Loopback0 IPv4) but not loopback_ipv6
-            node_bgp = bgp_info.get(node, {})
+            # Use Loopback1 (WAN overlay) IP for RM_SET_SRC4, not router_id (Loopback0)
+            # Reference: DC1 BGW1 uses 10.10.10.10 (Loopback1), not 10.200.200.102 (Loopback0)
             loopback_v6_map = generate_loopback_ip(version='v6')
             rm_data = {
-                'loopback_ipv4': node_bgp.get('router_id', ''),
+                'loopback_ipv4': loopback_ipv4_wan_overlay.get(node, ''),
                 'loopback_ipv6': loopback_v6_map.get(node, '')
             }
             config_out = generate_source_route_maps(rm_data)

@@ -791,6 +791,7 @@ def generate_bgp_transit_wan_config(bgw_data, ebgp_multihop=1, add_redistribute=
     output += 'address-family ipv4 unicast\n'
     if add_redistribute:
         output += 'redistribute connected\n'
+    output += 'neighbor TRANSIT activate\n'
     output += 'neighbor TRANSIT_WAN activate\n'
     output += 'exit-address-family\n'
     output += 'end\n'
@@ -1257,15 +1258,21 @@ def delete_l3vni_bgw_frr_config(node_name, config_dict, bgp_info):
 
 def generate_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
     """
-    Generate leaf VRF route-target imports from local BGW cross-DC L3VNI.
+    Generate leaf VRF route-target export/import for intra-DC EVPN and
+    route-target imports from local BGW cross-DC L3VNI.
 
-    Per l3vni_config_diff.txt lines 1-39, each leaf needs to import
-    route-targets from its local (same-DC) BGWs' cross-DC L3VNI so that
-    Type-5 prefix routes from remote DCs are accepted into the leaf's VRF.
+    Per l3vni_config_diff.txt lines 1-39, each leaf needs:
+    1. Intra-DC route-target export (own ASN:leaf_VNI)
+    2. Intra-DC route-target import from other same-DC leafs (peer_ASN:leaf_VNI)
+    3. Cross-DC route-target import from local BGWs (bgw_ASN:cross_dc_VNI)
 
-    Example for DC1 leaf (Vrf101, cross-DC VNI 10101):
-        route-target import 65102:10101   (DC1 BGW1)
-        route-target import 65103:10101   (DC1 BGW2)
+    Example for DC1 leaf3 (ASN 65203, Vrf102, leaf VNI 5102, cross-DC VNI 10102):
+        route-target export 65203:5102
+        route-target import 65200:5102   (DC1 leaf0)
+        route-target import 65201:5102   (DC1 leaf1)
+        route-target import 65202:5102   (DC1 leaf2)
+        route-target import 65102:10102  (DC1 BGW1)
+        route-target import 65103:10102  (DC1 BGW2)
 
     Args:
         node_name: Leaf node hostname (e.g. 'leaf0_dc1')
@@ -1273,7 +1280,7 @@ def generate_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
         bgp_info: Dict of node -> {router_id, as_num}
 
     Returns:
-        FRR config string with route-target import statements
+        FRR config string with route-target export/import statements
     """
     dc = _get_dc_from_name(node_name)
     if not dc or 'bgw' in node_name:
@@ -1294,15 +1301,26 @@ def generate_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
         if 'bgw' in n and dc in n and n in bgp_info
     ))
 
-    if not local_bgw_asns:
-        return ''
+    # Find other leaf nodes in the same DC and collect their ASNs
+    local_leaf_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict.get('nodes', {}).get('all', [])
+        if 'bgw' not in n and 'spine' not in n and dc in n
+        and n != node_name and n in bgp_info
+    ))
 
     output = ''
     for l3vni_item in config['l3vni']:
         vrf_id = l3vni_item['vrf_id']
+        leaf_vni = l3vni_item.get('vxlan_id', 5000 + vrf_id)
         cross_dc_vni = 10000 + vrf_id
         output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
         output += 'address-family l2vpn evpn\n'
+        # Intra-DC: export own leaf route-target
+        output += 'route-target export {}:{}\n'.format(as_num, leaf_vni)
+        # Intra-DC: import from other same-DC leafs
+        for leaf_asn in local_leaf_asns:
+            output += 'route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        # Cross-DC: import from local BGWs
         for bgw_asn in local_bgw_asns:
             output += 'route-target import {}:{}\n'.format(bgw_asn, cross_dc_vni)
         output += 'exit-address-family\n'
@@ -1317,10 +1335,11 @@ def generate_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
 
 def delete_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
     """
-    Remove leaf VRF route-target imports from local BGW cross-DC L3VNI.
+    Remove leaf VRF route-target export/import for intra-DC EVPN and
+    cross-DC L3VNI.
 
-    Reverse of generate_l3vni_leaf_rt_config: removes the route-target import
-    statements that were added for cross-DC L3VNI on leaf nodes.
+    Reverse of generate_l3vni_leaf_rt_config: removes the route-target
+    export/import statements that were added for intra-DC and cross-DC L3VNI.
 
     Args:
         node_name: Leaf node hostname (e.g. 'leaf0_dc1')
@@ -1347,15 +1366,25 @@ def delete_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
         if 'bgw' in n and dc in n and n in bgp_info
     ))
 
-    if not local_bgw_asns:
-        return ''
+    local_leaf_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict.get('nodes', {}).get('all', [])
+        if 'bgw' not in n and 'spine' not in n and dc in n
+        and n != node_name and n in bgp_info
+    ))
 
     output = ''
     for l3vni_item in config['l3vni']:
         vrf_id = l3vni_item['vrf_id']
+        leaf_vni = l3vni_item.get('vxlan_id', 5000 + vrf_id)
         cross_dc_vni = 10000 + vrf_id
         output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
         output += 'address-family l2vpn evpn\n'
+        # Remove intra-DC export
+        output += 'no route-target export {}:{}\n'.format(as_num, leaf_vni)
+        # Remove intra-DC imports from other same-DC leafs
+        for leaf_asn in local_leaf_asns:
+            output += 'no route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        # Remove cross-DC imports from local BGWs
         for bgw_asn in local_bgw_asns:
             output += 'no route-target import {}:{}\n'.format(bgw_asn, cross_dc_vni)
         output += 'exit-address-family\n'
@@ -6612,7 +6641,7 @@ def get_evpn_vni(dut):
     }, ...]
     """
     cmd = 'show evpn vni'
-    output = config_dut(dut, 'bgp', cmd, get_output=True)
+    output = st.show(dut, cmd, type='vtysh', skip_tmpl=True)
     
     ret_val = []
     
@@ -6691,10 +6720,15 @@ def get_expected_evpn_vni(dut):
             vrf_id = l3vni_item.get('vrf_id', '')
             vrf = 'Vrf{}'.format(vrf_id) if vrf_id else 'default'
             if vni:
+                # BGW vxlan_if includes VLAN suffix: 'vxlan-dc-101', 'vxlan-dc-102'
+                if is_bgw:
+                    vxlan_if = 'vxlan-dc-{}'.format(vrf_id) if vrf_id else 'vxlan-dc'
+                else:
+                    vxlan_if = 'VXLAN'
                 ret_val.append({
                     'vni': str(vni),
                     'type': 'L3',
-                    'vxlan_if': 'vxlan-dc' if is_bgw else 'VXLAN',
+                    'vxlan_if': vxlan_if,
                     'tenant_vrf': vrf,
                     'num_remote_vteps': 'n/a'  # L3 VNIs don't have remote VTEPs
                 })

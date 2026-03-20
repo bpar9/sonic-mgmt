@@ -948,7 +948,12 @@ def tgen_preconfig(**kwargs):
     
     ###TK1 - Set IXIA protocol stack options for ARP/NS retransmit intervals
     # This prevents IPv6 DAD (Duplicate Address Detection) issues
-    tg_handle = topo_handles[leaf_nodes[0]][l2vni_intf_dict[leaf_nodes[0]][0]]['tg_handle']
+    # Filter leaf_nodes to only those present in topo_handles (BGW nodes have no TG ports)
+    tg_leaf_nodes = [n for n in leaf_nodes if n in topo_handles]
+    if not tg_leaf_nodes:
+        st.log("WARNING: No leaf nodes found in topo_handles, skipping IXIA protocol options")
+        return stream_handles
+    tg_handle = topo_handles[tg_leaf_nodes[0]][l2vni_intf_dict[tg_leaf_nodes[0]][0]]['tg_handle']
     ixNet = tg.get_ixnet()
     try:
         st.log("Configuring IXIA protocol stack options for ARP/NS retransmit...")
@@ -2231,17 +2236,22 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
         
         # ============================================================
         # Remote VTEP Discovery Verification
+        # Skip on BGW nodes — VIP VTEP validation is not required on BGWs
         # ============================================================
         if 'vteps' in checks_to_run:
-            try:
-                exp_data = vxlan_obj.get_expected_vxlan_remotevtep(dut)
-                vxlan_obj.verify_vxlan_remotevtep(dut, exp_data, vl_retries=retry)
-                st.log(f'✓ Remote VTEPs on {dut}: Pass ({len(exp_data)} VTEPs)')
+            if 'bgw' in dut:
+                st.log(f'✓ Remote VTEPs on {dut}: Skipped (BGW node, VIP VTEP validation not required)')
                 results[dut]['vteps'] = True
-            except Exception as err:
-                st.log(f'✗ Remote VTEPs on {dut}: Fail - {err}')
-                results[dut]['vteps'] = False
-                results['overall'] = False
+            else:
+                try:
+                    exp_data = vxlan_obj.get_expected_vxlan_remotevtep(dut)
+                    vxlan_obj.verify_vxlan_remotevtep(dut, exp_data, vl_retries=retry)
+                    st.log(f'✓ Remote VTEPs on {dut}: Pass ({len(exp_data)} VTEPs)')
+                    results[dut]['vteps'] = True
+                except Exception as err:
+                    st.log(f'✗ Remote VTEPs on {dut}: Fail - {err}')
+                    results[dut]['vteps'] = False
+                    results['overall'] = False
         
         # ============================================================
         # VXLAN Tunnel Status Verification

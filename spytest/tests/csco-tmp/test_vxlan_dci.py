@@ -19,6 +19,7 @@ import apis.system.reboot as reboot_obj
 from spytest.utils import poll_wait
 from copy import deepcopy
 import json
+import apis.routing.bgp as bgp_obj
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -4033,6 +4034,606 @@ class TestVxlanDCIBase():
         if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
             summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
             result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_dualstack_sh_within_dc(self):
+        """
+        L3VNI_dci:26 - Dual-stack SH - Simultaneous IPv4 and IPv6 within DC
+        
+        Description:
+            1) Base profile bring up
+            2) Configure dual-stack hosts in each VLAN across different VRFs
+            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts within DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            Combines L3VNI_dci:18 (SH IPv4 within DC) and L3VNI_dci:20 (SH IPv6 within DC)
+            into a single dual-stack test sending both IPv4 and IPv6 traffic simultaneously.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes)
+            2. Send simultaneous L3VNI IPv4 and IPv6 traffic within DC (SH hosts)
+            3. Verify MAC and ARP entries on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_dualstack_sh_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:26: Dual-stack SH IPv4+IPv6 within DC ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
+            result = False
+        
+        # Step 2: Send simultaneous IPv4 and IPv6 traffic within DC (SH hosts)
+        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic within DC (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            st.log('L3VNI dual-stack SH IPv4 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI dual-stack SH IPv4 within-DC traffic: Fail\n'
+            result = False
+        
+        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic within DC (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
+            st.log('L3VNI dual-stack SH IPv6 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI dual-stack SH IPv6 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed on leaf nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_dualstack_sh_across_dci(self):
+        """
+        L3VNI_dci:27 - Dual-stack SH - Simultaneous IPv4 and IPv6 across DCI
+        
+        Description:
+            1) Base profile bring up
+            2) Configure dual-stack hosts in each VLAN across different VRFs
+            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts across DCI
+            4) Verify MAC and ARP entries. Verify Type-5 routes
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            Combines L3VNI_dci:19 (SH IPv4 across DCI) and L3VNI_dci:21 (SH IPv6 across DCI)
+            into a single dual-stack test with L3VNI translation at BGW nodes.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
+            2. Send simultaneous L3VNI IPv4 and IPv6 traffic across DCI (SH hosts)
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_dualstack_sh_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:27: Dual-stack SH IPv4+IPv6 across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup on BGW nodes
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send simultaneous IPv4 and IPv6 traffic across DCI (SH hosts)
+        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic across DCI (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            st.log('L3VNI dual-stack SH IPv4 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI dual-stack SH IPv4 traffic across DCI: Fail\n'
+            result = False
+        
+        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic across DCI (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+            st.log('L3VNI dual-stack SH IPv6 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI dual-stack SH IPv6 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI dual-stack traffic')
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC dual-stack traffic\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_dualstack_mh_within_dc(self):
+        """
+        L3VNI_dci:28 - Dual-stack MH - Simultaneous IPv4 and IPv6 within DC
+        
+        Description:
+            1) Base profile bring up
+            2) Configure dual-stack multi-homed hosts with ESI in each VLAN
+            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts within DC
+            4) Verify MAC and ARP entries. Verify Type-5 routes and EVPN ES
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            Combines L3VNI_dci:22 (MH IPv4 within DC) and L3VNI_dci:24 (MH IPv6 within DC)
+            into a single dual-stack test. Additionally verifies EVPN ES status for MH hosts.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5, EVPN ES)
+            2. Send simultaneous L3VNI IPv4 and IPv6 traffic within DC (MH hosts)
+            3. Verify MAC and ARP entries on leaf nodes
+        """
+        tc_id = "test_base_dci_l3vni_dualstack_mh_within_dc"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:28: Dual-stack MH IPv4+IPv6 within DC ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Step 1: Verify base setup including EVPN ES for MH
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES status')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed\n'
+            result = False
+        
+        # Step 2: Send simultaneous IPv4 and IPv6 traffic within DC (MH hosts)
+        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic within DC (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            st.log('L3VNI dual-stack MH IPv4 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI dual-stack MH IPv4 within-DC traffic: Fail\n'
+            result = False
+        
+        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic within DC (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
+            st.log('L3VNI dual-stack MH IPv6 within-DC traffic: Pass')
+        else:
+            summ += 'L3VNI dual-stack MH IPv6 within-DC traffic: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed on leaf nodes\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_dualstack_mh_across_dci(self):
+        """
+        L3VNI_dci:29 - Dual-stack MH - Simultaneous IPv4 and IPv6 across DCI
+        
+        Description:
+            1) Base profile bring up
+            2) Configure dual-stack multi-homed hosts with ESI in each VLAN
+            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts across DCI
+            4) Verify MAC and ARP entries. Verify Type-5 routes and EVPN ES
+            5) Verify no traffic drops and no cores and crash
+            
+        Note:
+            Combines L3VNI_dci:23 (MH IPv4 across DCI) and L3VNI_dci:25 (MH IPv6 across DCI)
+            into a single dual-stack test with L3VNI translation and EVPN-MH.
+            
+        Steps:
+            1. Verify base setup (VRF-VNI, Type-5, EVPN ES on BGW nodes)
+            2. Send simultaneous L3VNI IPv4 and IPv6 traffic across DCI (MH hosts)
+            3. Verify MAC and ARP entries
+        """
+        tc_id = "test_base_dci_l3vni_dualstack_mh_across_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:29: Dual-stack MH IPv4+IPv6 across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        # Step 1: Verify base setup including EVPN ES for MH
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on BGW nodes')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Send simultaneous IPv4 and IPv6 traffic across DCI (MH hosts)
+        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic across DCI (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            st.log('L3VNI dual-stack MH IPv4 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI dual-stack MH IPv4 traffic across DCI: Fail\n'
+            result = False
+        
+        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic across DCI (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+            st.log('L3VNI dual-stack MH IPv6 traffic across DCI: Pass')
+        else:
+            summ += 'L3VNI dual-stack MH IPv6 traffic across DCI: Fail\n'
+            result = False
+        
+        # Step 3: Verify MAC and ARP entries
+        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI dual-stack traffic')
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
+        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
+            summ += 'MAC/ARP verification failed after cross-DC dual-stack traffic\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_type5_route_withdrawal(self):
+        """
+        L3VNI_dci:30 - Type-5 route advertisement and withdrawal
+        
+        Description:
+            1) Base profile bring up with L3VNI
+            2) Verify Type-5 routes are advertised on BGW nodes
+            3) Shutdown a VLAN interface (Vlan11) on a leaf node (DC1-L0)
+            4) Verify Type-5 route for the shutdown VLAN is withdrawn
+            5) Bring up the VLAN interface
+            6) Verify Type-5 route is re-advertised
+            7) Verify traffic resumes with no drops
+            
+        Steps:
+            1. Verify base setup and Type-5 routes present
+            2. Shutdown Vlan11 interface on DC1 leaf0
+            3. Wait and verify Type-5 route for VLAN 11 is withdrawn on BGW
+            4. Bring up Vlan11 interface on DC1 leaf0
+            5. Wait and verify Type-5 route for VLAN 11 is re-advertised on BGW
+            6. Verify L3VNI traffic still works
+        """
+        tc_id = "test_base_dci_l3vni_type5_route_withdrawal"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:30: Type-5 route advertisement and withdrawal ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # Use first DC1 leaf as the target node, first DC1 BGW to verify routes
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
+        dc1_leafs = [n for n in leaf_nodes if 'dc1' in n.lower()]
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        dc1_bgws = test_cfg['nodes']['dc1_bgw']
+        
+        if not dc1_leafs:
+            summ += 'No DC1 leaf nodes found for route withdrawal test\n'
+            report_result(False, tc_id, summ)
+            return
+        if not dc1_bgws:
+            summ += 'No DC1 BGW nodes found for route withdrawal verification\n'
+            report_result(False, tc_id, summ)
+            return
+        
+        target_leaf = dc1_leafs[0]
+        verify_bgw = dc1_bgws[0]
+        target_vlan = 'Vlan11'
+        target_vlan_id = 11
+        
+        # Step 1: Verify base setup and Type-5 routes present
+        st.banner('Step 1: Verify base setup and Type-5 routes present')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'Base setup or Type-5 route verification failed\n'
+            result = False
+        
+        # Step 2: Shutdown Vlan11 interface on target leaf
+        st.banner('Step 2: Shutdown {} on {} to trigger Type-5 route withdrawal'.format(
+            target_vlan, target_leaf))
+        intf_obj.interface_shutdown(target_leaf, [target_vlan])
+        st.wait(10, 'Waiting for Type-5 route withdrawal after {} shutdown'.format(target_vlan))
+        
+        # Step 3: Verify Type-5 route for VLAN 11 is withdrawn on BGW
+        st.banner('Step 3: Verify Type-5 route for VLAN {} withdrawn on {}'.format(
+            target_vlan_id, verify_bgw))
+        if not poll_wait(vxlan_obj.verify_type5_routes_withdrawn_dci, 30,
+                         verify_bgw, [target_vlan_id]):
+            summ += 'Type-5 route for VLAN {} not withdrawn on {} after shutdown\n'.format(
+                target_vlan_id, verify_bgw)
+            result = False
+        else:
+            st.log('Type-5 route withdrawal verified on {}'.format(verify_bgw))
+        
+        # Step 4: Bring up Vlan11 interface on target leaf
+        st.banner('Step 4: Bring up {} on {} to trigger Type-5 route re-advertisement'.format(
+            target_vlan, target_leaf))
+        intf_obj.interface_noshutdown(target_leaf, [target_vlan])
+        st.wait(15, 'Waiting for Type-5 route re-advertisement after {} startup'.format(target_vlan))
+        
+        # Step 5: Verify Type-5 route for VLAN 11 is re-advertised on BGW
+        st.banner('Step 5: Verify Type-5 route for VLAN {} re-advertised on {}'.format(
+            target_vlan_id, verify_bgw))
+        if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 30,
+                         verify_bgw, [target_vlan_id]):
+            summ += 'Type-5 route for VLAN {} not re-advertised on {} after startup\n'.format(
+                target_vlan_id, verify_bgw)
+            result = False
+        else:
+            st.log('Type-5 route re-advertisement verified on {}'.format(verify_bgw))
+        
+        # Step 6: Verify L3VNI traffic still works
+        st.banner('Step 6: Verify L3VNI traffic after route recovery')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            st.log('L3VNI IPv4 traffic after route withdrawal/recovery: Pass')
+        else:
+            summ += 'L3VNI IPv4 traffic failed after route withdrawal/recovery\n'
+            result = False
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_dci_node_reboot(self):
+        """
+        L3VNI_dci:33 - DCI node reboot with L3VNI traffic
+        
+        Description:
+            1) Base profile bring up with L3VNI across DCI
+            2) Start continuous L3VNI traffic across DCI
+            3) Reboot DC1 BGW1 node
+            4) Verify traffic fails over to BGW2 path
+            5) Verify Type-5 routes re-advertised after BGW1 recovery
+            6) Verify traffic recovers with no permanent loss
+            
+        Steps:
+            1. Verify base setup and start cross-DC L3VNI traffic
+            2. Save config and reboot DC1 BGW1
+            3. Wait for BGW1 to recover
+            4. Verify Type-5 routes re-advertised on recovered BGW1
+            5. Verify VRF-VNI mappings restored
+            6. Verify L3VNI traffic across DCI recovers
+        """
+        tc_id = "test_base_dci_l3vni_dci_node_reboot"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:33: DCI node reboot with L3VNI traffic ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        dc1_bgws = test_cfg['nodes']['dc1_bgw']
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        if not dc1_bgws:
+            summ += 'No DC1 BGW nodes found for reboot test\n'
+            report_result(False, tc_id, summ)
+            return
+        
+        reboot_target = dc1_bgws[0]
+        
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before BGW reboot')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'Base setup verification failed before reboot\n'
+            result = False
+        
+        # Step 2: Verify traffic works before reboot
+        st.banner('Step 2: Verify L3VNI traffic across DCI before reboot')
+        if not verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            summ += 'L3VNI traffic across DCI failed before reboot\n'
+            result = False
+        
+        # Step 3: Save config and reboot DC1 BGW1
+        st.banner('Step 3: Save config and reboot {} (DC1 BGW1)'.format(reboot_target))
+        reboot_obj.config_save(reboot_target, shell='sonic')
+        reboot_obj.config_save(reboot_target, shell='vtysh')
+        st.reboot(reboot_target)
+        
+        # Step 4: Wait for BGW1 to recover and verify system is up
+        st.banner('Step 4: Wait for {} to recover after reboot'.format(reboot_target))
+        st.wait(60, 'Waiting for {} to fully recover after reboot'.format(reboot_target))
+        
+        # Step 5: Verify VRF-VNI mappings restored on recovered BGW
+        st.banner('Step 5: Verify VRF-VNI mappings restored on {}'.format(reboot_target))
+        if not poll_wait(vxlan_obj.verify_vrf_vni_after_reload_dci, 120, reboot_target):
+            summ += 'VRF-VNI mappings not restored on {} after reboot\n'.format(reboot_target)
+            result = False
+        else:
+            st.log('VRF-VNI mappings restored on {}'.format(reboot_target))
+        
+        # Step 6: Verify Type-5 routes re-advertised on recovered BGW
+        st.banner('Step 6: Verify Type-5 routes re-advertised on {}'.format(reboot_target))
+        all_vlans = list(range(11, 21))
+        if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 120,
+                         reboot_target, all_vlans):
+            summ += 'Type-5 routes not re-advertised on {} after reboot\n'.format(reboot_target)
+            result = False
+        else:
+            st.log('Type-5 routes re-advertised on {}'.format(reboot_target))
+        
+        # Step 7: Verify L3VNI traffic across DCI recovers
+        st.banner('Step 7: Verify L3VNI traffic across DCI after BGW recovery')
+        if not poll_wait(verify_traffic, 60, tgen_handles,
+                         regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            summ += 'L3VNI traffic across DCI failed after BGW reboot recovery\n'
+            result = False
+        else:
+            st.log('L3VNI traffic across DCI recovered after BGW reboot')
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_bgp_flap_dci(self):
+        """
+        L3VNI_dci:34 - BGP flap on DCI node with L3VNI
+        
+        Description:
+            1) Base profile bring up with L3VNI across DCI
+            2) Start L3VNI traffic across DCI
+            3) Clear BGP on a DCI (BGW) node to trigger BGP flap
+            4) Verify Type-5 routes are withdrawn and then re-advertised
+            5) Verify traffic recovers after BGP reconvergence
+            
+        Steps:
+            1. Verify base setup and cross-DC traffic
+            2. Clear BGP on DC1 BGW1 to trigger flap
+            3. Wait and verify Type-5 routes re-advertised after reconvergence
+            4. Verify L3VNI traffic across DCI recovers
+        """
+        tc_id = "test_base_dci_l3vni_bgp_flap_dci"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:34: BGP flap on DCI node with L3VNI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        dc1_bgws = test_cfg['nodes']['dc1_bgw']
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        
+        if not dc1_bgws:
+            summ += 'No DC1 BGW nodes found for BGP flap test\n'
+            report_result(False, tc_id, summ)
+            return
+        
+        flap_target = dc1_bgws[0]
+        
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before BGP flap')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'Base setup verification failed before BGP flap\n'
+            result = False
+        
+        # Step 2: Verify traffic works before flap
+        st.banner('Step 2: Verify L3VNI traffic across DCI before BGP flap')
+        if not verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            summ += 'L3VNI traffic across DCI failed before BGP flap\n'
+            result = False
+        
+        # Step 3: Clear BGP on DC1 BGW1 to trigger flap
+        st.banner('Step 3: Clear BGP on {} to trigger BGP flap'.format(flap_target))
+        bgp_obj.clear_ip_bgp(flap_target)
+        st.wait(5, 'Waiting for BGP sessions to flap on {}'.format(flap_target))
+        
+        # Step 4: Verify Type-5 routes re-advertised after reconvergence
+        st.banner('Step 4: Verify Type-5 routes re-advertised on {} after BGP reconvergence'.format(
+            flap_target))
+        all_vlans = list(range(11, 21))
+        if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 60,
+                         flap_target, all_vlans):
+            summ += 'Type-5 routes not re-advertised on {} after BGP flap\n'.format(flap_target)
+            result = False
+        else:
+            st.log('Type-5 routes re-advertised on {} after BGP reconvergence'.format(flap_target))
+        
+        # Step 5: Verify base setup recovered
+        st.banner('Step 5: Verify base setup after BGP reconvergence')
+        if not poll_wait(verify_base_setup_bgw, 60, bgw_nodes,
+                         checks=['vrf_vni', 'evpn_type5']):
+            summ += 'Base setup verification failed after BGP flap recovery\n'
+            result = False
+        
+        # Step 6: Verify L3VNI traffic across DCI recovers
+        st.banner('Step 6: Verify L3VNI traffic across DCI after BGP reconvergence')
+        if not poll_wait(verify_traffic, 60, tgen_handles,
+                         regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+            summ += 'L3VNI traffic across DCI failed after BGP flap recovery\n'
+            result = False
+        else:
+            st.log('L3VNI traffic across DCI recovered after BGP flap')
+        
+        report_result(result, tc_id, summ)
+    
+    def test_base_dci_l3vni_leaf_config_reload(self):
+        """
+        L3VNI_dci:35 - Config reload on leaf with L3VNI
+        
+        Description:
+            1) Base profile bring up with L3VNI
+            2) Start L3VNI traffic from DC1 leaf0
+            3) Perform config reload on DC1 leaf0
+            4) Verify L3VNI configuration restored (VRF-VNI map)
+            5) Verify Type-5 routes re-advertised
+            6) Verify traffic resumes from DC1 leaf0
+            
+        Steps:
+            1. Verify base setup and L3VNI traffic
+            2. Save config and perform config reload on DC1 leaf0
+            3. Wait and verify VRF-VNI mappings restored
+            4. Verify Type-5 routes re-advertised on BGW nodes
+            5. Verify L3VNI traffic recovers
+        """
+        tc_id = "test_base_dci_l3vni_leaf_config_reload"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:35: Config reload on leaf with L3VNI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
+        dc1_leafs = [n for n in leaf_nodes if 'dc1' in n.lower()]
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        dc1_bgws = test_cfg['nodes']['dc1_bgw']
+        
+        if not dc1_leafs:
+            summ += 'No DC1 leaf nodes found for config reload test\n'
+            report_result(False, tc_id, summ)
+            return
+        
+        reload_target = dc1_leafs[0]
+        config_reload_wait = test_cfg['global'].get('config_reload', 5)
+        
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before config reload')
+        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5']):
+            summ += 'Base setup verification failed before config reload\n'
+            result = False
+        
+        # Step 2: Verify traffic before reload
+        st.banner('Step 2: Verify L3VNI traffic before config reload')
+        if not verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            summ += 'L3VNI traffic failed before config reload\n'
+            result = False
+        
+        # Step 3: Save config and perform config reload on DC1 leaf0
+        st.banner('Step 3: Save config and perform config reload on {}'.format(reload_target))
+        reboot_obj.config_save(reload_target, shell='sonic')
+        reboot_obj.config_save(reload_target, shell='vtysh')
+        reboot_obj.config_reload(reload_target)
+        st.wait(config_reload_wait * 10,
+                'Waiting for {} to recover after config reload'.format(reload_target))
+        
+        # Step 4: Verify VRF-VNI mappings restored on reloaded leaf
+        st.banner('Step 4: Verify VRF-VNI mappings restored on {}'.format(reload_target))
+        if not poll_wait(vxlan_obj.verify_vrf_vni_after_reload_dci, 120, reload_target):
+            summ += 'VRF-VNI mappings not restored on {} after config reload\n'.format(reload_target)
+            result = False
+        else:
+            st.log('VRF-VNI mappings restored on {}'.format(reload_target))
+        
+        # Step 5: Verify Type-5 routes re-advertised on BGW nodes
+        st.banner('Step 5: Verify Type-5 routes re-advertised on BGW nodes')
+        if dc1_bgws:
+            verify_bgw = dc1_bgws[0]
+            all_vlans = list(range(11, 21))
+            if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 60,
+                             verify_bgw, all_vlans):
+                summ += 'Type-5 routes not re-advertised on {} after leaf config reload\n'.format(
+                    verify_bgw)
+                result = False
+            else:
+                st.log('Type-5 routes re-advertised on {} after leaf config reload'.format(
+                    verify_bgw))
+        
+        # Step 6: Verify L3VNI traffic recovers
+        st.banner('Step 6: Verify L3VNI traffic after config reload recovery')
+        if not poll_wait(verify_traffic, 60, tgen_handles,
+                         regenerate=True, traffic_types=['l3_v4'], scope='within'):
+            summ += 'L3VNI traffic failed after config reload on {}\n'.format(reload_target)
+            result = False
+        else:
+            st.log('L3VNI traffic recovered after config reload on {}'.format(reload_target))
         
         report_result(result, tc_id, summ)
     

@@ -791,7 +791,9 @@ def generate_bgp_transit_wan_config(bgw_data, ebgp_multihop=1, add_redistribute=
     output += 'address-family ipv4 unicast\n'
     if add_redistribute:
         output += 'redistribute connected\n'
-    output += 'neighbor TRANSIT activate\n'
+    # Only activate TRANSIT_WAN in ipv4 af — TRANSIT is the DC underlay peer-group
+    # (activated in ipv6 af by generate_bgp_underlay_config), not the WAN peer-group.
+    # Per reference config dci_l2vni_l3vni_fullconfig_Feb24.txt lines 296-298.
     output += 'neighbor TRANSIT_WAN activate\n'
     output += 'exit-address-family\n'
     output += 'end\n'
@@ -915,12 +917,18 @@ def generate_bgp_ihop_direct_config(bgw_data, ihop_peers=None, dc_direct_peers=N
 def generate_source_route_maps(bgw_data, loopback_v4="Loopback0", loopback_v6="Loopback0"):
     """
     Generate route-maps to set source IP for BGP updates.
-    
+
+    NOTE: This function must only be called for BGW nodes, NOT leaf nodes.
+    Per reference config (dci_l2vni_l3vni_fullconfig_Feb24.txt), RM_SET_SRC4/RM_SET_SRC6
+    only exist on BGW nodes (lines 351, 635, 944, 1248, 2994). Leaf nodes do NOT have
+    these route-maps. The caller (config_feature_dci) enforces this via _DCI_ONLY_FEATURES
+    guard for the 'route_maps_dci' feature.
+
     Args:
         bgw_data: BGW node data dictionary
         loopback_v4: Loopback interface for IPv4 source (default: Loopback0)
         loopback_v6: Loopback interface for IPv6 source (default: Loopback0)
-    
+
     Returns:
         Configuration string
     """
@@ -6811,20 +6819,31 @@ def get_expected_type5_routes(dut):
             break  # All BGWs share same cross-DC VNI
 
     # Build expected Type-5 route prefixes
-    # Per SAG addressing, leaf SVI gateway = 80.<vlan>.0.1/24
-    # Type-5 route prefix = 80.<vlan>.0.0/24 (network address)
+    # Per SAG addressing:
+    #   - IPv4: leaf SVI gateway = 80.<vlan>.0.1/24, Type-5 prefix = 80.<vlan>.0.0/24
+    #   - IPv6: leaf SVI gateway = 8000:<vlan>::1/64, Type-5 prefix = 8000:<vlan>::/64
     expected_routes = []
     for vlan_id in sorted(vlan_vrf_map.keys()):
         vrf = vlan_vrf_map[vlan_id]
         l3vni = vrf_l3vni_map.get(vrf, '')
+        # IPv4 prefix
         ipv4_prefix = '80.{}.0.0/24'.format(vlan_id)
-        route_entry = {
+        ipv4_entry = {
             'prefix': ipv4_prefix,
             'vrf': vrf,
         }
         if l3vni:
-            route_entry['l3vni'] = l3vni
-        expected_routes.append(route_entry)
+            ipv4_entry['l3vni'] = l3vni
+        expected_routes.append(ipv4_entry)
+        # IPv6 prefix
+        ipv6_prefix = '8000:{}::/64'.format(vlan_id)
+        ipv6_entry = {
+            'prefix': ipv6_prefix,
+            'vrf': vrf,
+        }
+        if l3vni:
+            ipv6_entry['l3vni'] = l3vni
+        expected_routes.append(ipv6_entry)
 
     st.log('Expected Type-5 routes for {} ({} prefixes): {}'.format(
         dut, len(expected_routes),

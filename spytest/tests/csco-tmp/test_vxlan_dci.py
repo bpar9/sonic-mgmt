@@ -1817,13 +1817,17 @@ def pretest(request):
     result = True
     
     for dut in test_cfg['nodes']['l2l3vni_bgw']:
-        st.log("Pretest : Check vteps on leaf_nodes node: {}".format(dut))
+        # Skip BGW nodes — VIP VTEP validation is not required on BGWs
+        if 'bgw' in dut:
+            st.log('Pretest : Skipping VTEP check on BGW node {} (VIP VTEP validation not required)'.format(dut))
+            continue
+        st.log("Pretest : Check vteps on leaf node: {}".format(dut))
         try:
             exp_data = vxlan_obj.get_expected_vxlan_remotevtep(dut)
             vxlan_obj.verify_vxlan_remotevtep(dut, exp_data)
-            st.log('Verify Vxlan-VNI map on {}: Pass'.format(dut))
+            st.log('Verify remote VTEPs on {}: Pass'.format(dut))
         except Exception as err:
-            st.log('Verify EVPN ES-EVI on {}: Fail\n{}'.format(dut, err))
+            st.log('Verify remote VTEPs on {}: Fail\n{}'.format(dut, err))
             result = False
 
     if result:

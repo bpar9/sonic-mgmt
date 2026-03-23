@@ -4679,12 +4679,14 @@ def get_expected_vxlan_remotevtep(dut):
 
         #
         # 1b) DC IPv6 VTEPs: DUT DC VIP -> local leaves' loopbacks
+        # Only include actual leaf nodes — non-BGW spines and sibling BGWs
+        # do NOT form VXLAN tunnels visible in 'show vxlan remotevtep'.
         #
         src_v6 = loopback_ipv6_dc_vip.get(dut)
         if src_v6:
             local_leaves = [
                 n for n in nodes.get('l2l3vni', [])
-                if _get_dc_from_name(n) == dut_dc
+                if _get_dc_from_name(n) == dut_dc and 'leaf' in n
             ]
 
             local_leaves_sorted = sorted(local_leaves)

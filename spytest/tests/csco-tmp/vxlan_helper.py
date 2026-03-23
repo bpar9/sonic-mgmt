@@ -6820,6 +6820,37 @@ def get_expected_type5_routes(dut):
         if vrf_l3vni_map:
             break  # All BGWs share same cross-DC VNI
 
+    # Compute expected path count and local leaf ASNs for the BGW's DC.
+    # Path count = local_dc_leaves + remote_dc_bgws
+    #   DC1 BGWs: 4 leaves + 2 DC2 BGWs + 1 DC3 BGW = 7
+    #   DC2 BGWs: 2 leaves + 2 DC1 BGWs + 1 DC3 BGW = 5
+    #   DC3 BGW:  1 leaf   + 2 DC1 BGWs + 2 DC2 BGWs = 5
+    bgp_info = get_bgp_underlay_info_cached()
+    dut_dc = _get_dc_from_name(dut)
+
+    # Collect local leaf ASNs (same-DC leaf nodes)
+    local_leaf_asns = set()
+    # Collect all remote BGW ASNs (other-DC BGW nodes)
+    remote_bgw_asns = set()
+    local_leaf_count = 0
+    remote_bgw_count = 0
+
+    for node_name in sorted(bgp_info.keys()):
+        node_dc = _get_dc_from_name(node_name)
+        if 'leaf' in node_name and node_dc == dut_dc:
+            local_leaf_count += 1
+            local_leaf_asns.add(str(bgp_info[node_name]['as_num']))
+        elif 'bgw' in node_name and node_dc != dut_dc:
+            remote_bgw_count += 1
+            remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
+
+    expected_path_count = local_leaf_count + remote_bgw_count
+
+    st.log('Type-5 path count for {} ({}): {} local leaves + {} remote BGWs = {}'.format(
+        dut, dut_dc, local_leaf_count, remote_bgw_count, expected_path_count))
+    st.log('Local leaf ASNs: {}, Remote BGW ASNs: {}'.format(
+        local_leaf_asns, remote_bgw_asns))
+
     # Build expected Type-5 route prefixes
     # Per SAG addressing:
     #   - IPv4: leaf SVI gateway = 80.<vlan>.0.1/24, Type-5 prefix = 80.<vlan>.0.0/24
@@ -6833,6 +6864,9 @@ def get_expected_type5_routes(dut):
         ipv4_entry = {
             'prefix': ipv4_prefix,
             'vrf': vrf,
+            'path_count': str(expected_path_count),
+            'local_leaf_asns': local_leaf_asns,
+            'remote_bgw_asns': remote_bgw_asns,
         }
         if l3vni:
             ipv4_entry['l3vni'] = l3vni
@@ -6842,6 +6876,9 @@ def get_expected_type5_routes(dut):
         ipv6_entry = {
             'prefix': ipv6_prefix,
             'vrf': vrf,
+            'path_count': str(expected_path_count),
+            'local_leaf_asns': local_leaf_asns,
+            'remote_bgw_asns': remote_bgw_asns,
         }
         if l3vni:
             ipv6_entry['l3vni'] = l3vni
@@ -6858,82 +6895,159 @@ def _parse_type5_routes_from_output(cli_output):
     Parse 'show bgp l2vpn evpn route type prefix' output into structured data.
 
     Extracts Type-5 route prefixes and their extended community attributes
-    (L3VNI via ET: tag, RT values) from the FRR CLI output.
-
-    Each Type-5 route entry in FRR output spans multiple lines:
-      Line 1: *>i[5]:[0]:[24]:[80.11.0.0]
-      Line 2:                     <next-hop>          <metric> <locprf> <weight> <path>
-      Line 3:                     RT:65200:5101 ET:5101 Rmac:xx:xx:xx:xx:xx:xx
+    (L3VNI via ET: tag, RT values) from the FRR CLI output.  Returns a
+    deduplicated list (one entry per unique prefix) for backward compatibility
+    with verify_evpn_type5_routes().
 
     Returns:
         list of dicts: [{'prefix': '80.11.0.0/24', 'l3vni': '5101',
                          'rt': '65200:5101', 'next_hop': '...'}, ...]
-        Prefixes are deduplicated (first occurrence kept per unique prefix).
+    """
+    detailed = _parse_type5_routes_detailed(cli_output)
+    routes = []
+    for prefix in sorted(detailed.keys()):
+        info = detailed[prefix]
+        # Use first path's attributes for backward compat
+        first_path = info['paths'][0] if info['paths'] else {}
+        route_entry = {'prefix': prefix}
+        if first_path.get('et'):
+            route_entry['l3vni'] = first_path['et']
+        if first_path.get('rt'):
+            route_entry['rt'] = first_path['rt']
+        if first_path.get('next_hop'):
+            route_entry['next_hop'] = first_path['next_hop']
+        has_ipv6 = any(p.get('ipv6_nexthop') for p in info['paths'])
+        route_entry['ipv6_nexthop'] = 'yes' if has_ipv6 else 'no'
+        routes.append(route_entry)
+    return routes
+
+
+def _parse_type5_routes_detailed(cli_output):
+    """
+    Parse 'show bgp l2vpn evpn route type prefix' output capturing ALL paths
+    per prefix with per-path attributes.
+
+    FRR output format per prefix (multiple paths possible):
+      Route [5]:[0]:[24]:[80.11.0.0] VNI 5101
+       *>i2000:1::1                                   0    100      0 65200 i
+                          RT:65200:5101 ET:5101 Rmac:00:01:02:aa:bb:cc
+        >i2000:1::2                                   0    100      0 65201 i
+                          RT:65201:5101 ET:5101 Rmac:00:01:02:aa:bb:dd
+       * i103.103.103.103                              0    100      0 65103 65201 i
+                          RT:65103:10101 ET:10101 Rmac:00:01:02:cc:dd:ee
+
+    Path status indicators:
+      '*' = valid      '>' = best       'i' = internal (iBGP)
+
+    Returns:
+        dict keyed by prefix string:
+        {
+          '80.11.0.0/24': {
+            'path_count': 7,
+            'paths': [
+              {
+                'is_best': True,
+                'is_valid': True,
+                'next_hop': '2000:1::1',
+                'as_path': '65200',
+                'rt': '65200:5101',
+                'et': '5101',
+                'rmac': '00:01:02:aa:bb:cc',
+                'ipv6_nexthop': True,
+              },
+              ...
+            ],
+            'best_path': <ref to best path dict or None>,
+          },
+          ...
+        }
     """
     import re
-    routes = []
-    seen_prefixes = set()
+    prefixes = {}
 
-    # Pattern to extract prefix_len and prefix from Type-5 route line
-    type5_pattern = re.compile(
-        r'\[5\]:\[0\]:\[(\d+)\]:\[([\d\.a-fA-F:]+)\]'
+    # Patterns
+    # Route header: "Route [5]:[0]:[24]:[80.11.0.0] VNI ..."
+    route_hdr_re = re.compile(
+        r'Route\s+\[5\]:\[0\]:\[(\d+)\]:\[([\d\.a-fA-F:]+)\]'
     )
-    # Pattern to extract ET (encap type / VNI) from extended community line
-    et_pattern = re.compile(r'ET:(\d+)')
-    # Pattern to extract RT from extended community line
-    rt_pattern = re.compile(r'RT:(\d+:\d+)')
-    # Pattern to detect IPv6 next-hop
-    ipv6_nh_pattern = re.compile(r'([0-9a-fA-F]+:[0-9a-fA-F:]+::[0-9a-fA-F]*)')
+    # Path line: starts with status chars then next-hop, metric, locprf, weight, as-path
+    # e.g. " *>i2000:1::1         0    100      0 65200 i"
+    # e.g. " * i103.103.103.103   0    100      0 65103 65201 i"
+    path_line_re = re.compile(
+        r'^(\s*[\*\s][\>\s][iIeE\s])\s*'        # status: valid(*), best(>), origin(i)
+        r'([\d\.a-fA-F:]+)\s+'                    # next-hop
+        r'(\d+)\s+(\d+)\s+(\d+)\s+'               # metric, locprf, weight
+        r'([\d\s]*)'                               # AS path (space-separated ASNs)
+        r'([iIeE\?])\s*$'                         # origin code
+    )
+    # Extended community line: RT:xxx ET:xxx Rmac:xxx
+    et_re = re.compile(r'ET:(\d+)')
+    rt_re = re.compile(r'RT:(\d+:\d+)')
+    rmac_re = re.compile(r'Rmac:([0-9a-fA-F:]+)')
+    ipv6_re = re.compile(r'^[0-9a-fA-F]+:[0-9a-fA-F:]*::[0-9a-fA-F]*$')
 
     lines = cli_output.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        match = type5_pattern.search(line)
-        if match:
-            prefix_len = match.group(1)
-            prefix_addr = match.group(2)
-            prefix = '{}/{}'.format(prefix_addr, prefix_len)
+    current_prefix = None
+    current_path = None
 
-            # Look ahead in next lines for extended community attributes
-            l3vni = ''
-            rt_val = ''
-            next_hop = ''
-            has_ipv6_nh = False
-            # Scan up to 5 lines after the route line for attributes
-            for j in range(i + 1, min(i + 6, len(lines))):
-                attr_line = lines[j]
-                # Stop if we hit the next route entry
-                if '[5]:[' in attr_line or '[2]:[' in attr_line or \
-                   '[3]:[' in attr_line or '[1]:[' in attr_line:
-                    break
-                et_match = et_pattern.search(attr_line)
-                if et_match and not l3vni:
-                    l3vni = et_match.group(1)
-                rt_match = rt_pattern.search(attr_line)
-                if rt_match and not rt_val:
-                    rt_val = rt_match.group(1)
-                ipv6_match = ipv6_nh_pattern.search(attr_line)
-                if ipv6_match:
-                    has_ipv6_nh = True
-                    if not next_hop:
-                        next_hop = ipv6_match.group(1)
+    for line in lines:
+        # Check for route header
+        hdr_match = route_hdr_re.search(line)
+        if hdr_match:
+            prefix_len = hdr_match.group(1)
+            prefix_addr = hdr_match.group(2)
+            current_prefix = '{}/{}'.format(prefix_addr, prefix_len)
+            if current_prefix not in prefixes:
+                prefixes[current_prefix] = {
+                    'path_count': 0,
+                    'paths': [],
+                    'best_path': None,
+                }
+            current_path = None
+            continue
 
-            # Deduplicate by prefix (keep first occurrence)
-            if prefix not in seen_prefixes:
-                seen_prefixes.add(prefix)
-                route_entry = {'prefix': prefix}
-                if l3vni:
-                    route_entry['l3vni'] = l3vni
-                if rt_val:
-                    route_entry['rt'] = rt_val
-                if next_hop:
-                    route_entry['next_hop'] = next_hop
-                route_entry['ipv6_nexthop'] = 'yes' if has_ipv6_nh else 'no'
-                routes.append(route_entry)
-        i += 1
+        if current_prefix is None:
+            continue
 
-    return routes
+        # Check for path line
+        path_match = path_line_re.match(line)
+        if path_match:
+            status_str = path_match.group(1)
+            next_hop = path_match.group(2)
+            as_path_str = path_match.group(6).strip()
+
+            is_valid = '*' in status_str
+            is_best = '>' in status_str
+
+            current_path = {
+                'is_best': is_best,
+                'is_valid': is_valid,
+                'next_hop': next_hop,
+                'as_path': as_path_str,
+                'rt': '',
+                'et': '',
+                'rmac': '',
+                'ipv6_nexthop': bool(ipv6_re.match(next_hop)),
+            }
+            prefixes[current_prefix]['paths'].append(current_path)
+            prefixes[current_prefix]['path_count'] += 1
+            if is_best:
+                prefixes[current_prefix]['best_path'] = current_path
+            continue
+
+        # Check for extended community attributes (follows a path line)
+        if current_path is not None:
+            et_match = et_re.search(line)
+            if et_match and not current_path['et']:
+                current_path['et'] = et_match.group(1)
+            rt_match = rt_re.search(line)
+            if rt_match and not current_path['rt']:
+                current_path['rt'] = rt_match.group(1)
+            rmac_match = rmac_re.search(line)
+            if rmac_match and not current_path['rmac']:
+                current_path['rmac'] = rmac_match.group(1)
+
+    return prefixes
 
 
 def get_evpn_type5_routes(dut):
@@ -7119,6 +7233,216 @@ def verify_evpn_type5_route_detail_dci(dut):
     st.log(result['details'])
     result['result'] = True
     return result
+
+
+@VerifyLoop()
+def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
+    """
+    Comprehensive EVPN Type-5 route verification with per-prefix pass/fail.
+
+    For every BGW and every tenant prefix, mark pass only if:
+      1. prefix exists
+      2. path count matches expected for that site
+      3. at least one local-site leaf path exists
+      4. at least one remote normalized path exists
+      5. best path is local-site leaf path
+      6. route has RT, ET, and RMAC
+
+    Uses compare_exp_actual_data() for structured tabular output.
+
+    Args:
+        dut: BGW node hostname
+        exp_routes: list from get_expected_type5_routes() with path_count,
+                    local_leaf_asns, remote_bgw_asns fields
+    """
+    st.banner('Comprehensive Type-5 verification on {}'.format(dut))
+
+    # Get detailed actual routes (all paths per prefix)
+    cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                         type='vtysh', skip_tmpl=True)
+    if not cli_output or not cli_output.strip():
+        raise CompareEmptyData('No Type-5 route output on {}'.format(dut))
+
+    detailed = _parse_type5_routes_detailed(cli_output)
+    if not detailed:
+        raise CompareEmptyData('No Type-5 routes parsed from output on {}'.format(dut))
+
+    st.log('Parsed {} unique Type-5 prefixes with detailed path info from {}'.format(
+        len(detailed), dut))
+
+    # Build expected and actual data for compare_exp_actual_data
+    exp_data = []
+    act_data = []
+
+    for exp_route in exp_routes:
+        prefix = exp_route['prefix']
+        expected_path_count = exp_route.get('path_count', '0')
+        local_leaf_asns = exp_route.get('local_leaf_asns', set())
+        remote_bgw_asns = exp_route.get('remote_bgw_asns', set())
+
+        # Build expected row
+        exp_row = {
+            'prefix': prefix,
+            'path_count': str(expected_path_count),
+            'has_local_leaf_path': 'yes',
+            'has_remote_bgw_path': 'yes',
+            'best_path_is_local_leaf': 'yes',
+            'has_rt': 'yes',
+            'has_et': 'yes',
+            'has_rmac': 'yes',
+        }
+        exp_data.append(exp_row)
+
+        # Build actual row from parsed detailed data
+        if prefix not in detailed:
+            act_row = {
+                'prefix': prefix,
+                'path_count': '0',
+                'has_local_leaf_path': 'no',
+                'has_remote_bgw_path': 'no',
+                'best_path_is_local_leaf': 'no',
+                'has_rt': 'no',
+                'has_et': 'no',
+                'has_rmac': 'no',
+            }
+            act_data.append(act_row)
+            continue
+
+        info = detailed[prefix]
+        actual_path_count = info['path_count']
+
+        # Classify paths as local-leaf or remote-BGW based on AS path
+        has_local_leaf = False
+        has_remote_bgw = False
+        for path in info['paths']:
+            as_path = path.get('as_path', '')
+            # First ASN in as_path is the originator
+            first_asn = as_path.split()[0] if as_path else ''
+            if first_asn in local_leaf_asns:
+                has_local_leaf = True
+            elif first_asn in remote_bgw_asns:
+                has_remote_bgw = True
+            else:
+                # Single-ASN path from local leaf (iBGP reflected)
+                # or multi-hop path through remote BGW
+                # Check if ANY ASN in path is a local leaf ASN
+                path_asns = set(as_path.split())
+                if path_asns & local_leaf_asns:
+                    has_local_leaf = True
+                if path_asns & remote_bgw_asns:
+                    has_remote_bgw = True
+
+        # Check best path source
+        best_path = info.get('best_path')
+        best_is_local_leaf = False
+        if best_path:
+            bp_as_path = best_path.get('as_path', '')
+            bp_first_asn = bp_as_path.split()[0] if bp_as_path else ''
+            if bp_first_asn in local_leaf_asns:
+                best_is_local_leaf = True
+            else:
+                # Check all ASNs in best path
+                bp_asns = set(bp_as_path.split())
+                if bp_asns & local_leaf_asns and not (bp_asns & remote_bgw_asns):
+                    best_is_local_leaf = True
+
+        # Check route attributes (at least one path has RT, ET, RMAC)
+        has_rt = any(p.get('rt') for p in info['paths'])
+        has_et = any(p.get('et') for p in info['paths'])
+        has_rmac = any(p.get('rmac') for p in info['paths'])
+
+        act_row = {
+            'prefix': prefix,
+            'path_count': str(actual_path_count),
+            'has_local_leaf_path': 'yes' if has_local_leaf else 'no',
+            'has_remote_bgw_path': 'yes' if has_remote_bgw else 'no',
+            'best_path_is_local_leaf': 'yes' if best_is_local_leaf else 'no',
+            'has_rt': 'yes' if has_rt else 'no',
+            'has_et': 'yes' if has_et else 'no',
+            'has_rmac': 'yes' if has_rmac else 'no',
+        }
+        act_data.append(act_row)
+
+        # Log detailed path info for debugging
+        st.log('  {} paths={} local_leaf={} remote_bgw={} best_local={} '
+               'RT={} ET={} RMAC={}'.format(
+                   prefix, actual_path_count, has_local_leaf, has_remote_bgw,
+                   best_is_local_leaf, has_rt, has_et, has_rmac))
+
+    # Run structured comparison — raises CompareFailed if mismatch
+    compare_exp_actual_data(exp_data, act_data,
+                            ['prefix'])
+    return act_data
+
+
+@VerifyLoop()
+def verify_evpn_type5_rib_fib(dut, exp_routes, **kwargs):
+    """
+    Verify tenant subnet routes are installed in RIB/FIB on BGW nodes.
+
+    Runs 'show ip route vrf Vrf101' and 'show ip route vrf Vrf102' and
+    checks that each expected tenant subnet prefix is present as a BGP route.
+    BGWs rely on imported Type-5 routes for tenant reachability, so routes
+    must be in the RIB/FIB for packet forwarding to work.
+
+    Args:
+        dut: BGW node hostname
+        exp_routes: list from get_expected_type5_routes() with 'prefix' and 'vrf' keys
+    """
+    import re
+    st.banner('RIB/FIB install check on {}'.format(dut))
+
+    # Group expected prefixes by VRF
+    vrf_prefixes = {}
+    for route in exp_routes:
+        vrf = route.get('vrf', '')
+        prefix = route.get('prefix', '')
+        if not vrf or not prefix:
+            continue
+        # Only check IPv4 prefixes for 'show ip route vrf'
+        # IPv6 prefixes (containing ':') need 'show ipv6 route vrf'
+        if ':' in prefix:
+            continue
+        vrf_prefixes.setdefault(vrf, []).append(prefix)
+
+    if not vrf_prefixes:
+        st.log('No IPv4 prefixes to check in RIB/FIB on {}'.format(dut))
+        return []
+
+    exp_data = []
+    act_data = []
+
+    for vrf in sorted(vrf_prefixes.keys()):
+        prefixes = vrf_prefixes[vrf]
+        st.log('Checking RIB/FIB for {} prefixes in {} on {}'.format(
+            len(prefixes), vrf, dut))
+
+        # Get routing table for this VRF
+        cli_output = st.show(dut, "do show ip route vrf {}".format(vrf),
+                             type='vtysh', skip_tmpl=True)
+        if not cli_output:
+            cli_output = ''
+
+        for prefix in prefixes:
+            exp_data.append({
+                'prefix': prefix,
+                'vrf': vrf,
+                'in_rib': 'yes',
+            })
+
+            # Check if prefix appears in routing table output
+            # FRR format: "B>* 80.11.0.0/24 [20/0] via ..." or "B>  80.11.0.0/24 ..."
+            prefix_escaped = re.escape(prefix)
+            found = bool(re.search(prefix_escaped, cli_output))
+
+            act_data.append({
+                'prefix': prefix,
+                'vrf': vrf,
+                'in_rib': 'yes' if found else 'no',
+            })
+
+    compare_exp_actual_data(exp_data, act_data, ['prefix', 'vrf'])
+    return act_data
 
 
 def verify_bgp_evpn_multihop_sessions_dci(dut):

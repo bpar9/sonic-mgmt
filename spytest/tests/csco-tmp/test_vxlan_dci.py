@@ -2087,6 +2087,8 @@ ALL_CHECKS = [
     'rt_rewrite',        # RT-REWRITE route-map verification (BGW nodes only)
     'mac_arp',           # MAC and ARP table entries for L3VNI hosts
     'portchannel',       # PortChannel operational status
+    'evpn_type5_comprehensive',  # Comprehensive Type-5: path-count, best-path, RT/ET/RMAC (BGW only)
+    'rib_fib',           # RIB/FIB install check: show ip route vrf on BGWs
 ]
 
 # Pre-defined check sets for verify_base_setup_bgw (e.g. checks='bgp_only' after BGP reset)
@@ -2097,7 +2099,8 @@ CHECK_SETS = {
     'evpn_only': ['evpn_es', 'evpn_es_evi', 'evpn_type1', 'evpn_type4'],
     'data_plane': ['vlan_vni', 'vrf_vni', 'vteps', 'tunnels'],
     'control_plane': ['bgp', 'evpn_es', 'evpn_type1', 'evpn_type4', 'evpn_type5',
-                      'evpn_type5_detail', 'ebgp_multihop', 'evpn_vni', 'rt_rewrite'],
+                      'evpn_type5_detail', 'ebgp_multihop', 'evpn_vni', 'rt_rewrite',
+                      'evpn_type5_comprehensive', 'rib_fib'],
 }
 
 
@@ -2134,6 +2137,8 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
         'ebgp_multihop' - eBGP multihop EVPN sessions between BGWs across DCs (BGW only)
         'evpn_vni'      - EVPN VNI table with L3 VNI verification (BGW only)
         'portchannel'   - PortChannel operational status
+        'evpn_type5_comprehensive' - Comprehensive Type-5: path-count, best-path, RT/ET/RMAC (BGW only)
+        'rib_fib'       - RIB/FIB install check: tenant subnets in routing table (BGW only)
     
     Returns:
         If return_dict=False (default): Boolean - True if all checks pass, False otherwise
@@ -2555,6 +2560,47 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                     results[dut]['portchannel'] = False
                     results['overall'] = False
         
+        # ============================================================
+        # Comprehensive Type-5 Verification (path-count, best-path, RT/ET/RMAC)
+        # ============================================================
+        if 'evpn_type5_comprehensive' in checks_to_run:
+            if 'bgw' not in dut:
+                st.log(f'Type-5 comprehensive on {dut}: Skipped (not a BGW node)')
+                results[dut]['evpn_type5_comprehensive'] = True
+            else:
+                try:
+                    exp_routes = vxlan_obj.get_expected_type5_routes(dut)
+                    vxlan_obj.verify_evpn_type5_comprehensive(
+                        dut, exp_routes, vl_retries=retry)
+                    st.log(f'Type-5 comprehensive on {dut}: Pass '
+                           f'({len(exp_routes)} prefixes, path-count/best-path/attrs verified)')
+                    results[dut]['evpn_type5_comprehensive'] = True
+                except Exception as err:
+                    st.log(f'Type-5 comprehensive on {dut}: Fail - {err}')
+                    results[dut]['evpn_type5_comprehensive'] = False
+                    results['overall'] = False
+
+        # ============================================================
+        # RIB/FIB Install Check (show ip route vrf on BGWs)
+        # ============================================================
+        if 'rib_fib' in checks_to_run:
+            if 'bgw' not in dut:
+                st.log(f'RIB/FIB check on {dut}: Skipped (not a BGW node)')
+                results[dut]['rib_fib'] = True
+            else:
+                try:
+                    exp_routes = vxlan_obj.get_expected_type5_routes(dut)
+                    vxlan_obj.verify_evpn_type5_rib_fib(
+                        dut, exp_routes, vl_retries=retry)
+                    ipv4_count = sum(1 for r in exp_routes if ':' not in r['prefix'])
+                    st.log(f'RIB/FIB install on {dut}: Pass '
+                           f'({ipv4_count} IPv4 prefixes in routing table)')
+                    results[dut]['rib_fib'] = True
+                except Exception as err:
+                    st.log(f'RIB/FIB install on {dut}: Fail - {err}')
+                    results[dut]['rib_fib'] = False
+                    results['overall'] = False
+
         # Per-node summary
         node_passed = all(results[dut].values())
         if node_passed:
@@ -2975,7 +3021,8 @@ class TestVxlanDCIBase():
         st.log('Type-5 route format: [5]:[0]:[prefix_len]:[prefix]')
         st.log('Expected L3VNI in extended community: 10101 (Vrf101), 10102 (Vrf102)')
         if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
-                                     checks=['vrf_vni', 'vlan_vni', 'evpn_type5']):
+                                     checks=['vrf_vni', 'vlan_vni', 'evpn_type5',
+                                             'evpn_type5_comprehensive', 'rib_fib']):
             summ += 'VRF-VNI, VLAN-VNI or Type-5 route verification failed on one or more nodes\n'
             result = False
         

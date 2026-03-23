@@ -6936,14 +6936,49 @@ def _parse_type5_routes_from_output(cli_output):
     return routes
 
 
+def get_evpn_type5_routes(dut):
+    """
+    Get actual EVPN Type-5 (prefix) routes from CLI output.
+
+    Parses 'show bgp l2vpn evpn route type prefix' into structured data
+    suitable for compare_exp_actual_data().
+
+    Args:
+        dut: Node hostname to query
+
+    Returns:
+        list of dicts: [{'prefix': '80.11.0.0/24', 'l3vni': '5101', ...}, ...]
+    """
+    cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                         type='vtysh', skip_tmpl=True)
+    if not cli_output or not cli_output.strip():
+        return []
+    return _parse_type5_routes_from_output(cli_output)
+
+
+@VerifyLoop()
+def verify_evpn_type5_routes(dut, exp_data, id_keys=['prefix'], **kwargs):
+    """
+    Verify EVPN Type-5 routes using compare_exp_actual_data (same pattern as
+    verify_vxlan_vrfvnimap / verify_vxlan_vlanvnimap).
+
+    Produces tabular Expected vs Actual comparison output.
+
+    Args:
+        dut: Node hostname to verify
+        exp_data: list of dicts with expected route data (at minimum 'prefix' key)
+        id_keys: list of keys to match on (default ['prefix'])
+    """
+    act_routes = get_evpn_type5_routes(dut)
+    act_data = [{'prefix': r['prefix']} for r in act_routes]
+    compare_exp_actual_data(exp_data, act_data, id_keys)
+    return act_data
+
+
 def verify_evpn_type5_routes_dci(dut):
     """
-    Verify EVPN Type-5 (prefix) routes on a BGW node against expected SAG addressing data.
-
-    Builds expected Type-5 route prefixes from DCI_NORMAL_SAG_ADDRESSING.md data
-    (leaf SVI subnets: 80.<vlan>.0.0/24 for VLANs 11-20) and compares against
-    actual 'show bgp l2vpn evpn route type prefix' output using
-    compare_exp_actual_data().
+    Legacy wrapper — verifies EVPN Type-5 routes using the standard
+    get_expected + verify pattern.
 
     Args:
         dut: BGW node hostname to verify
@@ -6951,45 +6986,16 @@ def verify_evpn_type5_routes_dci(dut):
     Returns:
         Boolean: True if all expected Type-5 route prefixes are present
     """
-    st.banner('Checking EVPN Type-5 (prefix) routes on {}'.format(dut))
-
-    # Build expected Type-5 route prefixes from SAG addressing
     exp_routes = get_expected_type5_routes(dut)
     if not exp_routes:
         st.log('No expected Type-5 routes generated for {} - skipping'.format(dut))
         return True
 
-    # Get actual Type-5 routes from CLI
-    try:
-        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
-                             type='vtysh', skip_tmpl=True)
-    except Exception as err:
-        st.log('Failed to get Type-5 routes on {}: {}'.format(dut, err))
-        return False
-
-    if not cli_output or not cli_output.strip():
-        st.log('No Type-5 route output on {}'.format(dut))
-        return False
-
-    # Parse actual routes into structured data
-    act_routes = _parse_type5_routes_from_output(cli_output)
-    st.log('Parsed {} unique Type-5 route prefixes from {}'.format(
-        len(act_routes), dut))
-
-    if not act_routes:
-        st.log('No Type-5 routes parsed from output on {}'.format(dut))
-        return False
-
-    # Build expected data for compare_exp_actual_data (prefix-only check)
     exp_data = [{'prefix': r['prefix']} for r in exp_routes]
-    act_data = [{'prefix': r['prefix']} for r in act_routes]
-
     try:
-        compare_exp_actual_data(exp_data, act_data, ['prefix'])
-        st.log('EVPN Type-5 routes on {}: Pass ({} expected prefixes verified)'.format(
-            dut, len(exp_data)))
+        verify_evpn_type5_routes(dut, exp_data)
         return True
-    except (CompareFailed, CompareEmptyData) as err:
+    except Exception as err:
         st.log('EVPN Type-5 routes on {}: Fail - {}'.format(dut, err))
         return False
 

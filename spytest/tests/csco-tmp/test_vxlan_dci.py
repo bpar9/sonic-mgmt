@@ -2387,14 +2387,11 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                 results[dut]['evpn_type5'] = True
             else:
                 try:
-                    type5_present = vxlan_obj.verify_evpn_type5_routes_dci(dut)
-                    if type5_present:
-                        st.log(f'EVPN Type 5 Routes on {dut}: Pass')
-                        results[dut]['evpn_type5'] = True
-                    else:
-                        st.log(f'EVPN Type 5 Routes on {dut}: Fail - no Type-5 routes found')
-                        results[dut]['evpn_type5'] = False
-                        results['overall'] = False
+                    exp_routes = vxlan_obj.get_expected_type5_routes(dut)
+                    exp_data = [{'prefix': r['prefix']} for r in exp_routes]
+                    vxlan_obj.verify_evpn_type5_routes(dut, exp_data, vl_retries=retry)
+                    st.log(f'EVPN Type 5 Routes on {dut}: Pass ({len(exp_data)} prefixes)')
+                    results[dut]['evpn_type5'] = True
                 except Exception as err:
                     st.log(f'EVPN Type 5 Routes on {dut}: Fail - {err}')
                     results[dut]['evpn_type5'] = False

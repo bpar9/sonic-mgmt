@@ -6890,38 +6890,6 @@ def get_expected_type5_routes(dut):
     return expected_routes
 
 
-def _parse_type5_routes_from_output(cli_output):
-    """
-    Parse 'show bgp l2vpn evpn route type prefix' output into structured data.
-
-    Extracts Type-5 route prefixes and their extended community attributes
-    (L3VNI via ET: tag, RT values) from the FRR CLI output.  Returns a
-    deduplicated list (one entry per unique prefix) for backward compatibility
-    with verify_evpn_type5_routes().
-
-    Returns:
-        list of dicts: [{'prefix': '80.11.0.0/24', 'l3vni': '5101',
-                         'rt': '65200:5101', 'next_hop': '...'}, ...]
-    """
-    detailed = _parse_type5_routes_detailed(cli_output)
-    routes = []
-    for prefix in sorted(detailed.keys()):
-        info = detailed[prefix]
-        # Use first path's attributes for backward compat
-        first_path = info['paths'][0] if info['paths'] else {}
-        route_entry = {'prefix': prefix}
-        if first_path.get('et'):
-            route_entry['l3vni'] = first_path['et']
-        if first_path.get('rt'):
-            route_entry['rt'] = first_path['rt']
-        if first_path.get('next_hop'):
-            route_entry['next_hop'] = first_path['next_hop']
-        has_ipv6 = any(p.get('ipv6_nexthop') for p in info['paths'])
-        route_entry['ipv6_nexthop'] = 'yes' if has_ipv6 else 'no'
-        routes.append(route_entry)
-    return routes
-
-
 def _parse_type5_routes_detailed(cli_output):
     """
     Parse 'show bgp l2vpn evpn route type prefix' output capturing ALL paths
@@ -7048,191 +7016,6 @@ def _parse_type5_routes_detailed(cli_output):
                 current_path['rmac'] = rmac_match.group(1)
 
     return prefixes
-
-
-def get_evpn_type5_routes(dut):
-    """
-    Get actual EVPN Type-5 (prefix) routes from CLI output.
-
-    Parses 'show bgp l2vpn evpn route type prefix' into structured data
-    suitable for compare_exp_actual_data().
-
-    Args:
-        dut: Node hostname to query
-
-    Returns:
-        list of dicts: [{'prefix': '80.11.0.0/24', 'l3vni': '5101', ...}, ...]
-    """
-    cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
-                         type='vtysh', skip_tmpl=True)
-    if not cli_output or not cli_output.strip():
-        return []
-    return _parse_type5_routes_from_output(cli_output)
-
-
-@VerifyLoop()
-def verify_evpn_type5_routes(dut, exp_data, id_keys=['prefix'], **kwargs):
-    """
-    Verify EVPN Type-5 routes using compare_exp_actual_data (same pattern as
-    verify_vxlan_vrfvnimap / verify_vxlan_vlanvnimap).
-
-    Produces tabular Expected vs Actual comparison output.
-
-    Args:
-        dut: Node hostname to verify
-        exp_data: list of dicts with expected route data (at minimum 'prefix' key)
-        id_keys: list of keys to match on (default ['prefix'])
-    """
-    act_routes = get_evpn_type5_routes(dut)
-    act_data = [{'prefix': r['prefix']} for r in act_routes]
-    compare_exp_actual_data(exp_data, act_data, id_keys)
-    return act_data
-
-
-def verify_evpn_type5_routes_dci(dut):
-    """
-    Legacy wrapper — verifies EVPN Type-5 routes using the standard
-    get_expected + verify pattern.
-
-    Args:
-        dut: BGW node hostname to verify
-
-    Returns:
-        Boolean: True if all expected Type-5 route prefixes are present
-    """
-    exp_routes = get_expected_type5_routes(dut)
-    if not exp_routes:
-        st.log('No expected Type-5 routes generated for {} - skipping'.format(dut))
-        return True
-
-    exp_data = [{'prefix': r['prefix']} for r in exp_routes]
-    try:
-        verify_evpn_type5_routes(dut, exp_data)
-        return True
-    except Exception as err:
-        st.log('EVPN Type-5 routes on {}: Fail - {}'.format(dut, err))
-        return False
-
-
-def verify_evpn_type5_route_detail_dci(dut):
-    """
-    Verify EVPN Type-5 (prefix) route details on a BGW node for L3VNI DCI.
-
-    Builds expected Type-5 route data from DCI_NORMAL_SAG_ADDRESSING.md
-    (prefixes per VRF with cross-DC L3VNI values) and compares against
-    actual 'show bgp l2vpn evpn route type prefix' output using
-    compare_exp_actual_data().
-
-    Expected data per route:
-      - prefix: 80.<vlan>.0.0/24 (from SAG addressing)
-      - vrf: Vrf101 (VLANs 11-15) or Vrf102 (VLANs 16-20)
-      - l3vni: 10101 (Vrf101) or 10102 (Vrf102) cross-DC L3VNI
-
-    Additionally verifies that IPv6 VTEP next-hops are present in the output
-    (required for DC-side RT-REWRITE-DC route-map).
-
-    Args:
-        dut: BGW node hostname to verify
-
-    Returns:
-        dict: {
-            'result': True/False,
-            'route_count': int,
-            'l3vni_found': set of L3VNI values found in extended communities,
-            'ipv6_nexthop_found': True if any IPv6 next-hop seen,
-            'details': str summary
-        }
-    """
-    result = {
-        'result': False,
-        'route_count': 0,
-        'l3vni_found': set(),
-        'ipv6_nexthop_found': False,
-        'details': ''
-    }
-
-    st.banner('Checking EVPN Type-5 route details on {}'.format(dut))
-
-    # Build expected Type-5 route data from SAG addressing
-    exp_routes = get_expected_type5_routes(dut)
-    if not exp_routes:
-        result['details'] = 'No expected Type-5 routes generated for {}'.format(dut)
-        st.log(result['details'])
-        return result
-
-    # Get actual Type-5 routes from CLI
-    try:
-        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
-                             type='vtysh', skip_tmpl=True)
-    except Exception as err:
-        result['details'] = 'Failed to get Type-5 routes on {}: {}'.format(dut, err)
-        st.log(result['details'])
-        return result
-
-    if not cli_output or not cli_output.strip():
-        result['details'] = 'No Type-5 route output on {}'.format(dut)
-        st.log(result['details'])
-        return result
-
-    # Parse actual routes into structured data
-    act_routes = _parse_type5_routes_from_output(cli_output)
-    result['route_count'] = len(act_routes)
-
-    if not act_routes:
-        result['details'] = 'No Type-5 routes parsed from output on {}'.format(dut)
-        st.log(result['details'])
-        return result
-
-    st.log('Parsed {} unique Type-5 route prefixes from {}'.format(
-        len(act_routes), dut))
-
-    # Collect L3VNI and IPv6 next-hop info from actual routes
-    for route in act_routes:
-        if route.get('l3vni'):
-            result['l3vni_found'].add(route['l3vni'])
-        if route.get('ipv6_nexthop') == 'yes':
-            result['ipv6_nexthop_found'] = True
-
-    # Step 1: Compare expected vs actual prefixes using compare_exp_actual_data
-    # Use prefix-only comparison to verify all expected SAG subnets are present
-    exp_data = [{'prefix': r['prefix']} for r in exp_routes]
-    act_data = [{'prefix': r['prefix']} for r in act_routes]
-
-    try:
-        compare_exp_actual_data(exp_data, act_data, ['prefix'])
-    except (CompareFailed, CompareEmptyData) as err:
-        result['details'] = 'Type-5 prefix comparison failed on {}: {}'.format(dut, err)
-        st.log(result['details'])
-        return result
-
-    # Step 2: Verify expected L3VNI values are present in extended communities
-    expected_l3vnis = set()
-    for route in exp_routes:
-        if route.get('l3vni'):
-            expected_l3vnis.add(route['l3vni'])
-
-    if expected_l3vnis:
-        st.log('Expected L3VNI values: {}, Found: {}'.format(
-            expected_l3vnis, result['l3vni_found']))
-        missing_l3vnis = expected_l3vnis - result['l3vni_found']
-        if missing_l3vnis:
-            st.log('WARNING: L3VNI values {} not found in ext-communities on {} '
-                   '(may appear in routes from other RDs)'.format(
-                       missing_l3vnis, dut))
-
-    # Build summary
-    details_parts = []
-    details_parts.append('{} Type-5 prefixes verified ({} expected)'.format(
-        result['route_count'], len(exp_routes)))
-    if result['l3vni_found']:
-        details_parts.append('L3VNI in ext-community: {}'.format(result['l3vni_found']))
-    if result['ipv6_nexthop_found']:
-        details_parts.append('IPv6 VTEP next-hop present')
-
-    result['details'] = '; '.join(details_parts)
-    st.log(result['details'])
-    result['result'] = True
-    return result
 
 
 @VerifyLoop()
@@ -7806,8 +7589,8 @@ def verify_type5_routes_withdrawn_dci(dut, withdrawn_vlans):
         st.log('No Type-5 route output on {} - routes are withdrawn'.format(dut))
         return True
 
-    act_routes = _parse_type5_routes_from_output(cli_output)
-    act_prefixes = set(r['prefix'] for r in act_routes)
+    detailed = _parse_type5_routes_detailed(cli_output)
+    act_prefixes = set(detailed.keys())
 
     withdrawn_prefixes = set()
     for vlan_id in withdrawn_vlans:
@@ -7852,8 +7635,8 @@ def verify_type5_routes_readvertised_dci(dut, expected_vlans):
         st.log('No Type-5 route output on {} - routes not re-advertised yet'.format(dut))
         return False
 
-    act_routes = _parse_type5_routes_from_output(cli_output)
-    act_prefixes = set(r['prefix'] for r in act_routes)
+    detailed = _parse_type5_routes_detailed(cli_output)
+    act_prefixes = set(detailed.keys())
 
     expected_prefixes = set()
     for vlan_id in expected_vlans:

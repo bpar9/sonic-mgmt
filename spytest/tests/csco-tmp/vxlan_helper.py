@@ -6895,14 +6895,19 @@ def _parse_type5_routes_detailed(cli_output):
     Parse 'show bgp l2vpn evpn route type prefix' output capturing ALL paths
     per prefix with per-path attributes.
 
-    FRR output format per prefix (multiple paths possible):
-      Route [5]:[0]:[24]:[80.11.0.0] VNI 5101
-       *>i2000:1::1                                   0    100      0 65200 i
+    FRR compact list output format (multiple paths per prefix, across RDs):
+      Route Distinguisher: 10.10.10.1:2
+      *>i[5]:[0]:[24]:[80.11.0.0]
+                          2000:1::1                    0    100      0 65200 i
                           RT:65200:5101 ET:5101 Rmac:00:01:02:aa:bb:cc
-        >i2000:1::2                                   0    100      0 65201 i
-                          RT:65201:5101 ET:5101 Rmac:00:01:02:aa:bb:dd
-       * i103.103.103.103                              0    100      0 65103 65201 i
+       * i[5]:[0]:[24]:[80.11.0.0]
+                          103.103.103.103              0    100      0 65103 65201 i
                           RT:65103:10101 ET:10101 Rmac:00:01:02:cc:dd:ee
+
+    Note: st.show() with skip_tmpl=True returns output with spytest framework
+    log prefixes on each line (e.g. "2026-03-23 20:11:18,750 T0000: INFO
+    [D3-spine2_dc1_bgw1] *>i[5]:[0]:[24]:[80.11.0.0]"). These are stripped
+    before parsing.
 
     Path status indicators:
       '*' = valid      '>' = best       'i' = internal (iBGP)
@@ -6933,69 +6938,92 @@ def _parse_type5_routes_detailed(cli_output):
     import re
     prefixes = {}
 
-    # Patterns
-    # Route header: "Route [5]:[0]:[24]:[80.11.0.0] VNI ..."
-    route_hdr_re = re.compile(
-        r'Route\s+\[5\]:\[0\]:\[(\d+)\]:\[([\d\.a-fA-F:]+)\]'
+    # Strip spytest framework log prefix from each line.
+    # e.g. "2026-03-23 20:11:18,750 T0000: INFO  [D3-spine2_dc1_bgw1] "
+    # Same pattern used by _show_evpn_type2_grep().
+    _log_prefix_re = re.compile(
+        r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[^\]]*\]\s*"
     )
-    # Path line: starts with status chars then next-hop, metric, locprf, weight, as-path
-    # e.g. " *>i2000:1::1         0    100      0 65200 i"
-    # e.g. " * i103.103.103.103   0    100      0 65103 65201 i"
-    path_line_re = re.compile(
-        r'^(\s*[\*\s][\>\s][iIeE\s])\s*'        # status: valid(*), best(>), origin(i)
-        r'([\d\.a-fA-F:]+)\s+'                    # next-hop
-        r'(\d+)\s+(\d+)\s+(\d+)\s+'               # metric, locprf, weight
-        r'([\d\s]*)'                               # AS path (space-separated ASNs)
-        r'([iIeE\?])\s*$'                         # origin code
+    lines = cli_output.splitlines()
+    lines = [_log_prefix_re.sub("", line) for line in lines]
+
+    # --- Patterns ---
+
+    # NLRI line: status chars + [5]:[0]:[mask]:[prefix]
+    # e.g. "*>i[5]:[0]:[24]:[80.11.0.0]"  or  " * i[5]:[0]:[64]:[8000:11::]"
+    nlri_re = re.compile(
+        r'\[5\]:\[0\]:\[(\d+)\]:\[([\d\.a-fA-F:]+)\]'
     )
-    # Extended community line: RT:xxx ET:xxx Rmac:xxx
+
+    # Next-hop line with full metrics (iBGP/eBGP learned routes):
+    # e.g. "                    2000:1::1                    0    100      0 65200 i"
+    # e.g. "                    103.103.103.103              0    100      0 65103 65201 i"
+    nexthop_full_re = re.compile(
+        r'^\s+'
+        r'([\d\.]+|[0-9a-fA-F]+:[0-9a-fA-F:]+)'   # next-hop (IPv4 or IPv6)
+        r'(?:\([^)]+\))?'                            # optional (hostname)
+        r'\s+'                                       # separator
+        r'(\d+)\s+(\d+)\s+(\d+)\s+'                  # metric, locprf, weight
+        r'([\d\s]*?)'                                 # AS path (space-separated ASNs)
+        r'([iIeE\?])\s*$'                            # origin code
+    )
+
+    # Next-hop line without metrics (locally-originated, next-hop on own line):
+    # e.g. "                    fd27::1(leaf0_dc1)"
+    nexthop_only_re = re.compile(
+        r'^\s+'
+        r'([\d\.]+|[0-9a-fA-F]+:[0-9a-fA-F:]+)'   # next-hop
+        r'(?:\([^)]+\))?'                            # optional (hostname)
+        r'\s*$'
+    )
+
+    # Weight-only continuation (follows next-hop-only for local routes):
+    # e.g. "                                                       32768 i"
+    weight_origin_re = re.compile(
+        r'^\s+(\d+)\s+([iIeE\?])\s*$'
+    )
+
+    # Extended community attributes
     et_re = re.compile(r'ET:(\d+)')
     rt_re = re.compile(r'RT:(\d+:\d+)')
     rmac_re = re.compile(r'Rmac:([0-9a-fA-F:]+)')
-    ipv6_re = re.compile(r'^[0-9a-fA-F]+:[0-9a-fA-F:]*::[0-9a-fA-F]*$')
 
-    lines = cli_output.splitlines()
     current_prefix = None
     current_path = None
 
     for line in lines:
-        # Check for route header
-        hdr_match = route_hdr_re.search(line)
-        if hdr_match:
-            prefix_len = hdr_match.group(1)
-            prefix_addr = hdr_match.group(2)
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Check for NLRI line containing [5]:[0]:[mask]:[prefix]
+        nlri_match = nlri_re.search(line)
+        if nlri_match:
+            prefix_len = nlri_match.group(1)
+            prefix_addr = nlri_match.group(2)
             current_prefix = '{}/{}'.format(prefix_addr, prefix_len)
+
             if current_prefix not in prefixes:
                 prefixes[current_prefix] = {
                     'path_count': 0,
                     'paths': [],
                     'best_path': None,
                 }
-            current_path = None
-            continue
 
-        if current_prefix is None:
-            continue
-
-        # Check for path line
-        path_match = path_line_re.match(line)
-        if path_match:
-            status_str = path_match.group(1)
-            next_hop = path_match.group(2)
-            as_path_str = path_match.group(6).strip()
-
-            is_valid = '*' in status_str
-            is_best = '>' in status_str
+            # Extract status from text before [5]:
+            pre_nlri = line[:nlri_match.start()]
+            is_valid = '*' in pre_nlri
+            is_best = '>' in pre_nlri
 
             current_path = {
                 'is_best': is_best,
                 'is_valid': is_valid,
-                'next_hop': next_hop,
-                'as_path': as_path_str,
+                'next_hop': '',
+                'as_path': '',
                 'rt': '',
                 'et': '',
                 'rmac': '',
-                'ipv6_nexthop': bool(ipv6_re.match(next_hop)),
+                'ipv6_nexthop': False,
             }
             prefixes[current_prefix]['paths'].append(current_path)
             prefixes[current_prefix]['path_count'] += 1
@@ -7003,8 +7031,33 @@ def _parse_type5_routes_detailed(cli_output):
                 prefixes[current_prefix]['best_path'] = current_path
             continue
 
-        # Check for extended community attributes (follows a path line)
-        if current_path is not None:
+        if current_path is None or current_prefix is None:
+            continue
+
+        # Check for next-hop line (only if current path doesn't have one yet)
+        if not current_path['next_hop']:
+            nh_full = nexthop_full_re.match(line)
+            if nh_full:
+                next_hop = nh_full.group(1)
+                as_path_str = nh_full.group(5).strip()
+                current_path['next_hop'] = next_hop
+                current_path['as_path'] = as_path_str
+                current_path['ipv6_nexthop'] = ':' in next_hop
+                continue
+
+            nh_only = nexthop_only_re.match(line)
+            if nh_only:
+                next_hop = nh_only.group(1)
+                current_path['next_hop'] = next_hop
+                current_path['ipv6_nexthop'] = ':' in next_hop
+                continue
+
+        # Check for weight-only continuation (locally-originated routes)
+        if weight_origin_re.match(line):
+            continue
+
+        # Check for extended community attributes (RT:xxx ET:xxx Rmac:xxx)
+        if 'RT:' in line or 'ET:' in line or 'Rmac:' in line:
             et_match = et_re.search(line)
             if et_match and not current_path['et']:
                 current_path['et'] = et_match.group(1)
@@ -7048,6 +7101,9 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
 
     detailed = _parse_type5_routes_detailed(cli_output)
     if not detailed:
+        # Log first 10 lines of raw output for debugging parser issues
+        sample = '\n'.join(cli_output.splitlines()[:10])
+        st.log('Type-5 parse debug - first 10 raw lines on {}:\n{}'.format(dut, sample))
         raise CompareEmptyData('No Type-5 routes parsed from output on {}'.format(dut))
 
     st.log('Parsed {} unique Type-5 prefixes with detailed path info from {}'.format(

@@ -6955,25 +6955,30 @@ def _parse_type5_routes_detailed(cli_output):
         r'\[5\]:\[0\]:\[(\d+)\]:\[([\d\.a-fA-F:]+)\]'
     )
 
-    # Next-hop line with full metrics (iBGP/eBGP learned routes):
-    # e.g. "                    2000:1::1                    0    100      0 65200 i"
-    # e.g. "                    103.103.103.103              0    100      0 65103 65201 i"
-    nexthop_full_re = re.compile(
-        r'^\s+'
-        r'([\d\.]+|[0-9a-fA-F]+:[0-9a-fA-F:]+)'   # next-hop (IPv4 or IPv6)
-        r'(?:\([^)]+\))?'                            # optional (hostname)
-        r'\s+'                                       # separator
-        r'(\d+)\s+(\d+)\s+(\d+)\s+'                  # metric, locprf, weight
-        r'([\d\s]*?)'                                 # AS path (space-separated ASNs)
-        r'([iIeE\?])\s*$'                            # origin code
+    # Next-hop line with metrics and AS path, ending with origin code.
+    # After log-prefix stripping, leading whitespace may be removed, so
+    # the line can start at column 0 or be indented.
+    # FRR columns: Next Hop | Metric | LocPrf | Weight | Path
+    # Metric and LocPrf may be blank (just whitespace).  Weight is always
+    # present.  After weight the AS-path ASNs follow (single-space separated)
+    # then the origin code (i/e/?).
+    # Examples after log-prefix stripping:
+    #   "103.103.103.103                        0 65104 65204 ?"
+    #   "2000:1::4                0             0 65203 ?"
+    nexthop_metrics_re = re.compile(
+        r'^\s*'
+        r'([\d\.]{7,}|[0-9a-fA-F]+:[0-9a-fA-F:]+)'  # next-hop (IPv4 or IPv6)
+        r'(?:\([^)]+\))?'                              # optional (hostname)
+        r'(.*?)'                                       # metrics + AS path blob
+        r'\s+([iIeE\?])\s*$'                          # origin code
     )
 
     # Next-hop line without metrics (locally-originated, next-hop on own line):
-    # e.g. "                    fd27::1(leaf0_dc1)"
+    # e.g. "fd27::1(leaf0_dc1)" or "                    fd27::1(leaf0_dc1)"
     nexthop_only_re = re.compile(
-        r'^\s+'
-        r'([\d\.]+|[0-9a-fA-F]+:[0-9a-fA-F:]+)'   # next-hop
-        r'(?:\([^)]+\))?'                            # optional (hostname)
+        r'^\s*'
+        r'([\d\.]{7,}|[0-9a-fA-F]+:[0-9a-fA-F:]+)'  # next-hop
+        r'(?:\([^)]+\))?'                              # optional (hostname)
         r'\s*$'
     )
 
@@ -7036,10 +7041,22 @@ def _parse_type5_routes_detailed(cli_output):
 
         # Check for next-hop line (only if current path doesn't have one yet)
         if not current_path['next_hop']:
-            nh_full = nexthop_full_re.match(line)
-            if nh_full:
-                next_hop = nh_full.group(1)
-                as_path_str = nh_full.group(5).strip()
+            nh_m = nexthop_metrics_re.match(line)
+            if nh_m:
+                next_hop = nh_m.group(1)
+                middle = nh_m.group(2)
+                # Split the middle blob by 2+ spaces to separate FRR
+                # fixed-width columns (Metric, LocPrf, Weight+Path).
+                # The LAST group contains "weight AS_path" where weight
+                # is the first token and AS path ASNs follow.
+                groups = [g.strip() for g in re.split(r'\s{2,}', middle)
+                          if g.strip()]
+                as_path_str = ''
+                if groups:
+                    last = groups[-1]
+                    tokens = last.split()
+                    # First token is weight; remaining tokens are AS path
+                    as_path_str = ' '.join(tokens[1:]) if len(tokens) > 1 else ''
                 current_path['next_hop'] = next_hop
                 current_path['as_path'] = as_path_str
                 current_path['ipv6_nexthop'] = ':' in next_hop

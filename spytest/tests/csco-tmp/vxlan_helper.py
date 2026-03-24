@@ -7950,23 +7950,39 @@ def collect_diags(tc_id=''):
                 st.error('Error collecting : {}'.format(cmd))
 
 
-def verify_type5_routes_withdrawn_dci(dut, withdrawn_vlans):
+def verify_type5_route_presence_dci(dut, vlan_ids, expect_present=True):
     """
-    Verify that Type-5 routes for specific VLANs are withdrawn (absent) on a BGW node.
+    Verify Type-5 route presence or absence for specific VLANs using comprehensive
+    Type-5 verification (get_expected_type5_routes + _parse_type5_routes_detailed).
 
-    After shutting down an interface/VLAN, the corresponding Type-5 route prefix
-    (80.<vlan>.0.0/24) should no longer appear in the EVPN table.
+    When expect_present=True (re-advertisement check):
+      - Gets expected route data from get_expected_type5_routes(dut) for the given VLANs
+      - Parses actual Type-5 output and verifies each prefix exists with expected path count
+      - Uses structured expected-vs-actual comparison for detailed reporting
+
+    When expect_present=False (withdrawal check):
+      - Parses actual Type-5 output and verifies the VLAN prefixes are NOT present
+      - Both IPv4 (80.<vlan>.0.0/24) and IPv6 (8000:<vlan>::/64) prefixes are checked
 
     Args:
-        dut: BGW node hostname to verify
-        withdrawn_vlans: list of VLAN IDs whose Type-5 routes should be absent
+        dut: Node hostname (BGW or leaf) to verify
+        vlan_ids: list of VLAN IDs to check (e.g. [11] for Vlan11)
+        expect_present: True to verify routes exist, False to verify routes are withdrawn
 
     Returns:
-        Boolean: True if all specified routes are withdrawn (not present)
+        Boolean: True if verification passes
     """
-    st.banner('Verifying Type-5 routes withdrawn for VLANs {} on {}'.format(
-        withdrawn_vlans, dut))
+    action = 'present' if expect_present else 'withdrawn'
+    st.banner('Verifying Type-5 routes {} for VLANs {} on {}'.format(
+        action, vlan_ids, dut))
 
+    # Build the set of prefixes to check (both IPv4 and IPv6 per VLAN)
+    target_prefixes = set()
+    for vlan_id in vlan_ids:
+        target_prefixes.add('80.{}.0.0/24'.format(vlan_id))
+        target_prefixes.add('8000:{}::/64'.format(vlan_id))
+
+    # Parse actual Type-5 output
     try:
         cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
                              type='vtysh', skip_tmpl=True)
@@ -7975,70 +7991,80 @@ def verify_type5_routes_withdrawn_dci(dut, withdrawn_vlans):
         return False
 
     if not cli_output or not cli_output.strip():
-        st.log('No Type-5 route output on {} - routes are withdrawn'.format(dut))
+        if not expect_present:
+            st.log('No Type-5 route output on {} - routes are withdrawn'.format(dut))
+            return True
+        else:
+            st.log('No Type-5 route output on {} - routes not present yet'.format(dut))
+            return False
+
+    detailed = _parse_type5_routes_detailed(cli_output)
+    act_prefixes = set(detailed.keys())
+
+    if not expect_present:
+        # Withdrawal check: verify target prefixes are NOT in actual output
+        still_present = target_prefixes & act_prefixes
+        if still_present:
+            st.log('Type-5 routes still present for withdrawn VLANs on {}: {}'.format(
+                dut, still_present))
+            return False
+        st.log('Type-5 routes successfully withdrawn for VLANs {} on {}'.format(
+            vlan_ids, dut))
         return True
 
-    detailed = _parse_type5_routes_detailed(cli_output)
-    act_prefixes = set(detailed.keys())
+    # Re-advertisement / presence check: use comprehensive Type-5 verification
+    # Get full expected routes and filter to target VLANs
+    exp_routes = get_expected_type5_routes(dut)
+    filtered_exp = [r for r in exp_routes if r['prefix'] in target_prefixes]
 
-    withdrawn_prefixes = set()
-    for vlan_id in withdrawn_vlans:
-        withdrawn_prefixes.add('80.{}.0.0/24'.format(vlan_id))
-
-    still_present = withdrawn_prefixes & act_prefixes
-    if still_present:
-        st.log('Type-5 routes still present for withdrawn VLANs on {}: {}'.format(
-            dut, still_present))
+    if not filtered_exp:
+        st.log('No expected Type-5 routes generated for VLANs {} on {}'.format(
+            vlan_ids, dut))
         return False
 
-    st.log('Type-5 routes successfully withdrawn for VLANs {} on {}'.format(
-        withdrawn_vlans, dut))
-    return True
+    # Verify each expected prefix: existence + path count + attributes
+    all_pass = True
+    for exp_route in filtered_exp:
+        prefix = exp_route['prefix']
+        expected_path_count = int(exp_route.get('path_count', 0))
 
+        if prefix not in detailed:
+            st.log('Type-5 prefix {} NOT found on {} (expected {} paths)'.format(
+                prefix, dut, expected_path_count))
+            all_pass = False
+            continue
 
-def verify_type5_routes_readvertised_dci(dut, expected_vlans):
-    """
-    Verify that Type-5 routes for specific VLANs are re-advertised (present) on a BGW node.
+        info = detailed[prefix]
+        actual_path_count = info['path_count']
 
-    After bringing an interface/VLAN back up, the corresponding Type-5 route prefix
-    (80.<vlan>.0.0/24) should reappear in the EVPN table.
+        if actual_path_count != expected_path_count:
+            st.log('Type-5 prefix {} on {}: path count mismatch '
+                   '(expected={}, actual={})'.format(
+                       prefix, dut, expected_path_count, actual_path_count))
+            all_pass = False
+        else:
+            # Check route attributes (RT, ET, RMAC present)
+            has_rt = any(p.get('rt') for p in info['paths'])
+            has_et = any(p.get('et') for p in info['paths'])
+            has_rmac = any(p.get('rmac') for p in info['paths'])
+            if not (has_rt and has_et and has_rmac):
+                st.log('Type-5 prefix {} on {}: missing attributes '
+                       '(rt={}, et={}, rmac={})'.format(
+                           prefix, dut, has_rt, has_et, has_rmac))
+                all_pass = False
+            else:
+                st.log('Type-5 prefix {} on {}: Pass '
+                       '({} paths, rt/et/rmac ok)'.format(
+                           prefix, dut, actual_path_count))
 
-    Args:
-        dut: BGW node hostname to verify
-        expected_vlans: list of VLAN IDs whose Type-5 routes should be present
+    if all_pass:
+        st.log('Type-5 route presence verified for VLANs {} on {}'.format(
+            vlan_ids, dut))
+    else:
+        st.log('Type-5 route presence verification FAILED for VLANs {} on {}'.format(
+            vlan_ids, dut))
 
-    Returns:
-        Boolean: True if all specified routes are present
-    """
-    st.banner('Verifying Type-5 routes re-advertised for VLANs {} on {}'.format(
-        expected_vlans, dut))
-
-    try:
-        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
-                             type='vtysh', skip_tmpl=True)
-    except Exception as err:
-        st.log('Failed to get Type-5 routes on {}: {}'.format(dut, err))
-        return False
-
-    if not cli_output or not cli_output.strip():
-        st.log('No Type-5 route output on {} - routes not re-advertised yet'.format(dut))
-        return False
-
-    detailed = _parse_type5_routes_detailed(cli_output)
-    act_prefixes = set(detailed.keys())
-
-    expected_prefixes = set()
-    for vlan_id in expected_vlans:
-        expected_prefixes.add('80.{}.0.0/24'.format(vlan_id))
-
-    missing = expected_prefixes - act_prefixes
-    if missing:
-        st.log('Type-5 routes missing for VLANs on {}: {}'.format(dut, missing))
-        return False
-
-    st.log('Type-5 routes successfully re-advertised for VLANs {} on {}'.format(
-        expected_vlans, dut))
-    return True
+    return all_pass
 
 
 def verify_vrf_vni_after_reload_dci(dut):

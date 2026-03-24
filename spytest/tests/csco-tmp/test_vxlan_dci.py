@@ -4352,8 +4352,8 @@ class TestVxlanDCIBase():
         # Step 3: Verify Type-5 route for VLAN 11 is withdrawn on BGW
         st.banner('Step 3: Verify Type-5 route for VLAN {} withdrawn on {}'.format(
             target_vlan_id, verify_bgw))
-        if not poll_wait(vxlan_obj.verify_type5_routes_withdrawn_dci, 30,
-                         verify_bgw, [target_vlan_id]):
+        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
+                         verify_bgw, [target_vlan_id], expect_present=False):
             summ += 'Type-5 route for VLAN {} not withdrawn on {} after shutdown\n'.format(
                 target_vlan_id, verify_bgw)
             result = False
@@ -4369,8 +4369,8 @@ class TestVxlanDCIBase():
         # Step 5: Verify Type-5 route for VLAN 11 is re-advertised on BGW
         st.banner('Step 5: Verify Type-5 route for VLAN {} re-advertised on {}'.format(
             target_vlan_id, verify_bgw))
-        if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 30,
-                         verify_bgw, [target_vlan_id]):
+        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
+                         verify_bgw, [target_vlan_id], expect_present=True):
             summ += 'Type-5 route for VLAN {} not re-advertised on {} after startup\n'.format(
                 target_vlan_id, verify_bgw)
             result = False
@@ -4458,8 +4458,8 @@ class TestVxlanDCIBase():
         # Step 6: Verify Type-5 routes re-advertised on recovered BGW
         st.banner('Step 6: Verify Type-5 routes re-advertised on {}'.format(reboot_target))
         all_vlans = list(range(11, 21))
-        if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 120,
-                         reboot_target, all_vlans):
+        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 120,
+                         reboot_target, all_vlans, expect_present=True):
             summ += 'Type-5 routes not re-advertised on {} after reboot\n'.format(reboot_target)
             result = False
         else:
@@ -4532,8 +4532,8 @@ class TestVxlanDCIBase():
         st.banner('Step 4: Verify Type-5 routes re-advertised on {} after BGP reconvergence'.format(
             flap_target))
         all_vlans = list(range(11, 21))
-        if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 60,
-                         flap_target, all_vlans):
+        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 60,
+                         flap_target, all_vlans, expect_present=True):
             summ += 'Type-5 routes not re-advertised on {} after BGP flap\n'.format(flap_target)
             result = False
         else:
@@ -4630,8 +4630,8 @@ class TestVxlanDCIBase():
         if dc1_bgws:
             verify_bgw = dc1_bgws[0]
             all_vlans = list(range(11, 21))
-            if not poll_wait(vxlan_obj.verify_type5_routes_readvertised_dci, 60,
-                             verify_bgw, all_vlans):
+            if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 60,
+                             verify_bgw, all_vlans, expect_present=True):
                 summ += 'Type-5 routes not re-advertised on {} after leaf config reload\n'.format(
                     verify_bgw)
                 result = False

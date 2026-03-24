@@ -2509,24 +2509,22 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                     results['overall'] = False
         
         # ============================================================
-        # Comprehensive Type-5 Verification (path-count, best-path, RT/ET/RMAC)
+        # Comprehensive Type-5 Verification (path-count, best-path, RT/ET/RMAC, IPv6 NH)
+        # Supports both BGW and leaf nodes via get_expected_type5_routes()
         # ============================================================
         if 'evpn_type5_comprehensive' in checks_to_run:
-            if 'bgw' not in dut:
-                st.log(f'Type-5 comprehensive on {dut}: Skipped (not a BGW node)')
+            try:
+                exp_routes = vxlan_obj.get_expected_type5_routes(dut)
+                vxlan_obj.verify_evpn_type5_comprehensive(
+                    dut, exp_routes, vl_retries=retry)
+                node_type = 'BGW' if 'bgw' in dut else 'leaf'
+                st.log(f'Type-5 comprehensive on {dut} ({node_type}): Pass '
+                       f'({len(exp_routes)} prefixes, path-count/best-path/attrs verified)')
                 results[dut]['evpn_type5_comprehensive'] = True
-            else:
-                try:
-                    exp_routes = vxlan_obj.get_expected_type5_routes(dut)
-                    vxlan_obj.verify_evpn_type5_comprehensive(
-                        dut, exp_routes, vl_retries=retry)
-                    st.log(f'Type-5 comprehensive on {dut}: Pass '
-                           f'({len(exp_routes)} prefixes, path-count/best-path/attrs verified)')
-                    results[dut]['evpn_type5_comprehensive'] = True
-                except Exception as err:
-                    st.log(f'Type-5 comprehensive on {dut}: Fail - {err}')
-                    results[dut]['evpn_type5_comprehensive'] = False
-                    results['overall'] = False
+            except Exception as err:
+                st.log(f'Type-5 comprehensive on {dut}: Fail - {err}')
+                results[dut]['evpn_type5_comprehensive'] = False
+                results['overall'] = False
 
         # ============================================================
         # RIB/FIB Install Check (show ip route vrf on BGWs)
@@ -2982,22 +2980,24 @@ class TestVxlanDCIBase():
         
         Description:
             1) Refer to L3VNI_dci:1 for base profile bring up
-            2) Verify Type-5 route advertised: [5]:[0]:[24]:[prefix]
+            2) Verify Type-5 route advertised on leaf nodes: [5]:[0]:[24]:[prefix]
             3) Verify L3VNI=10101/10102 in extended community
             4) Verify next-hop is IPv6 VTEP
-               - DC-side (OVERLAY peer-group) uses IPv6 next-hop (DC VIP):
+               - Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP
+                 next-hop set by RT-REWRITE-DC route-map (DC VIP):
                  DC1 BGWs: 4000:1::1, DC2 BGWs: 6000:1::1, DC3 BGW: 7000:1::1
-            5) Verify VRF-VNI mappings on BGW nodes
+            5) Verify VRF-VNI mappings on leaf nodes
             
-        RT export per BGW from l3vni_config_diff.txt:
-            DC1 BGW1 (AS 65102): RT 65102:10101, 65102:10102
-            DC1 BGW2 (AS 65103): RT 65103:10101, 65103:10102
-            DC2 BGW1 (AS 65104): RT 65104:10101, 65104:10102
-            DC2 BGW2 (AS 65105): RT 65105:10101, 65105:10102
-            DC3 BGW1 (AS 65106): RT 65106:10101, 65106:10102
+        Leaf path sources:
+            - Other same-DC leafs via spine RR (IPv6 VTEP next-hop)
+            - Same-DC BGWs carrying remote-DC routes (IPv6 VTEP next-hop via RT-REWRITE-DC)
+            DC1 leafs: 3 other leafs + 2 BGWs = 5 paths
+            DC2 leafs: 1 other leaf  + 2 BGWs = 3 paths
+            DC3 leaf:  0 other leafs + 1 BGW  = 1 path
             
         Steps:
-            1. Verify Type-5 route details, VRF-VNI mappings and Type-5 routes via verify_base_setup_bgw
+            1. Verify Type-5 routes with IPv6 VTEP next-hop on leaf nodes
+            2. Verify VRF-VNI mappings on leaf nodes
         """
         tc_id = "test_base_dci_l3vni_type5_route_ipv6_vtep"
         test_cfg['tc_id'] = tc_id
@@ -3007,15 +3007,17 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw']
+                      if 'leaf' in node.lower()]
         
-        # Step 1: Verify Type-5 route details, VRF-VNI and Type-5 routes on BGW nodes
-        st.banner('Step 1: Verify Type-5 route details, VRF-VNI and Type-5 routes on BGW nodes')
+        # Step 1: Verify Type-5 routes with IPv6 VTEP next-hop on leaf nodes
+        st.banner('Step 1: Verify Type-5 routes with IPv6 VTEP next-hop on leaf nodes')
         st.log('Checking: route format [5]:[0]:[prefix_len]:[prefix], L3VNI in ext-community, IPv6 VTEP next-hop')
-        st.log('BGW nodes use cross-DC L3VNI: Vrf101->10101, Vrf102->10102')
-        if not verify_base_setup_bgw(bgw_nodes,
+        st.log('Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP next-hop')
+        st.log('Leaf nodes: {}'.format(leaf_nodes))
+        if not verify_base_setup_bgw(leaf_nodes,
                                      checks=['evpn_type5_comprehensive', 'vrf_vni']):
-            summ += 'Type-5 route detail, VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            summ += 'Type-5 route or VRF-VNI verification failed on leaf nodes\n'
             result = False
         
         report_result(result, tc_id, summ)
@@ -3089,16 +3091,23 @@ class TestVxlanDCIBase():
             1) Configure DC1 with RT for L3VNI (e.g. 65102:10101 for DC1 BGW1)
             2) Configure WAN with RT for cross-DC L3VNI
             3) Configure BGW with RT translation via RT-REWRITE route-maps
-            4) Verify Type-5 routes have correct RT per domain
+            4) Verify Type-5 routes have correct RT per domain on BGW nodes
+            5) Verify Type-5 routes on leaf nodes reflect RT-REWRITE-DC rewritten RTs
             
         RT-REWRITE route-maps per l3vni_config_diff.txt:
             - RT-REWRITE-WAN: match local leaf RTs -> rewrite to BGW ASN RT,
               set cross-DC VNI, RMAC local, IPv4 WAN VIP next-hop
             - RT-REWRITE-DC: match remote BGW RTs -> rewrite to BGW ASN RT,
               set cross-DC VNI, RMAC local, IPv6 DC VIP next-hop
+              
+        RT per-domain verification (expected-vs-actual comparison):
+            - On each BGW: remote BGW RTs (e.g. 65104:10101) and local leaf RTs
+              (e.g. 65200:5101) must be present in Type-5 route output
+            - On each leaf: Type-5 routes from same-DC BGWs carry rewritten RTs
             
         Steps:
-            1. Verify RT-REWRITE route-maps and RT values via verify_base_setup_bgw
+            1. Verify RT-REWRITE route-maps and RT per-domain on BGW nodes
+            2. Verify Type-5 routes on leaf nodes with correct RT values
         """
         tc_id = "test_base_dci_l3vni_rt_translation"
         test_cfg['tc_id'] = tc_id
@@ -3109,15 +3118,27 @@ class TestVxlanDCIBase():
         summ = ''
         
         bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw']
+                      if 'leaf' in node.lower()]
         
-        # Step 1: Verify RT-REWRITE route-maps and RT values on BGW nodes
-        st.banner('Step 1: Verify RT-REWRITE route-maps and RT translation on BGW nodes')
+        # Step 1: Verify RT-REWRITE route-maps and RT per-domain on BGW nodes
+        st.banner('Step 1: Verify RT-REWRITE route-maps and RT per-domain on BGW nodes')
         st.log('Each BGW has RT-REWRITE-WAN and RT-REWRITE-DC route-maps')
         st.log('RT-REWRITE-WAN: rewrites leaf Type-5 RTs for WAN-side advertisement')
         st.log('RT-REWRITE-DC: rewrites remote BGW Type-5 RTs for DC-side advertisement')
+        st.log('Verifying expected-vs-actual RT values per domain on each BGW')
         if not verify_base_setup_bgw(bgw_nodes,
                                      checks=['rt_rewrite', 'vrf_vni', 'evpn_type5_comprehensive']):
             summ += 'RT-REWRITE, VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Verify Type-5 routes on leaf nodes with correct RT values
+        st.banner('Step 2: Verify Type-5 routes on leaf nodes reflect RT translation')
+        st.log('Leaf nodes receive Type-5 routes from same-DC BGWs with rewritten RTs')
+        st.log('Leaf nodes: {}'.format(leaf_nodes))
+        if not verify_base_setup_bgw(leaf_nodes,
+                                     checks=['evpn_type5_comprehensive', 'vrf_vni']):
+            summ += 'Type-5 route or VRF-VNI verification failed on leaf nodes\n'
             result = False
         
         report_result(result, tc_id, summ)

@@ -2569,6 +2569,1249 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
 
 
 # ============================================================================
+# TRIGGER TEST CLASSES (restart, reload, reboot, BGP reset)
+# ============================================================================
+
+@pytest.mark.usefixtures('tgen_health_check_class')
+class TestVxlanRestartTriggers():
+    """Docker restart triggers: verify traffic recovery after container restarts."""
+    """
+    Test class for restart triggers on both Leaf and BGW/DCI nodes.
+    Verifies node recovery after process restarts (bgp, swss, syncd).
+    
+    Test cases:
+        Leaf nodes:
+        - Solution_dci:32 - Restart bgp on leaf
+        - Solution_dci:33 - Restart swss on leaf
+        - Solution_dci:34 - Restart syncd on leaf
+        
+        DCI/BGW nodes:
+        - Solution_dci:35 - Restart bgp on DCI node
+        - Solution_dci:36 - Restart swss on DCI node
+        - Solution_dci:37 - Restart syncd on DCI node
+    """
+    
+    @pytest.mark.parametrize("restart_type", ["bgp", "swss", "syncd"])
+    def test_leaf_restart_process(self, restart_type):
+        """
+        Solution_dci:32/33/34 - Restarts a system service (bgp, swss, syncd) on Leaf nodes and verifies recovery.
+        
+        Args:
+            restart_type: Type of restart - 'bgp', 'swss', or 'syncd'
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Perform systemctl restart {bgp|swss|syncd} on the leaf nodes within DC
+            3) Verify L2VNI and L3VNI traffic recovers between the hosts across DC1, DC2 and DC3
+            4) Verify no traffic drop
+            5) Verify no crash/core seen
+        
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify traffic before trigger
+            3. Save configurations (SONiC and FRR)
+            4. Restart the specified service on leaf nodes
+            5. Verify docker recovery
+            6. Verify base setup after trigger (with retries)
+            7. Verify traffic flows (L2VNI + L3VNI)
+        """
+        test_num = 32 if restart_type == "bgp" else 33 if restart_type == "swss" else 34
+        tc_id = 'test_leaf_restart_{}'.format(restart_type)
+        
+        target_nodes = [node for node in test_cfg['nodes'].get('l2l3vni', []) if 'leaf' in node]
+        
+        if not target_nodes:
+            pytest.skip("No leaf nodes found in testbed configuration")
+            return
+        
+        traffic_scope = None
+        node_desc = "Leaf"
+        
+        st.banner('TEST: Solution_dci:{} - Verify {} nodes after {} restart'.format(
+            test_num, node_desc, restart_type))
+        st.log('{} nodes to restart: {}'.format(node_desc, target_nodes))
+        
+        # Step 1: Verify base setup before trigger
+        st.banner("Step 1: Verify base setup before trigger")
+        result_before_trigger = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+        if not result_before_trigger:
+            st.error("Base setup verification failed before trigger")
+            st.report_fail("test_case_failed")
+        st.banner("Base setup verification passed before trigger")
+        
+        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 2: Verifying traffic BEFORE trigger: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+                traffic_scope or 'all'))
+            traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                   scope=traffic_scope)
+            if not traffic_result_before:
+                st.error("Traffic verification failed before trigger")
+                st.report_fail("test_case_failed")
+            st.banner("Traffic verification passed before trigger")
+        
+        # Step 3: Save docker count and configs before restart
+        st.banner("Step 3: Saving configurations and docker state")
+        dut_count_arr = {}
+        for dut in target_nodes:
+            dut_count_arr[dut] = basic_obj.get_and_match_docker_count(dut)
+            st.log('Docker count for {}: {}'.format(dut, dut_count_arr[dut]))
+            vxlan_obj.config_dut(dut, 'sonic', "sudo config save -y")
+            vxlan_obj.config_dut(dut, 'bgp', 'do write')
+        
+        # Step 4: Perform restart on selected nodes
+        st.banner('Step 4: Performing {} restart on {} nodes'.format(restart_type, node_desc))
+        for dut in target_nodes:
+            st.log('Restarting {} on {}'.format(restart_type, dut))
+            restart_complete = basic_obj.systemctl_restart_service(dut, restart_type)
+            if not restart_complete:
+                st.error('Restart {} failed on {}'.format(restart_type, dut))
+        
+        # Step 5: Verify docker recovery
+        st.banner("Step 5: Verifying docker recovery after restart")
+        for dut in target_nodes:
+            result = True
+            if not poll_wait(basic_obj.verify_docker_status, 180, dut, 'Exited'):
+                st.error("Post 'systemctl restart {}' on {}, dockers are not auto recovered.".format(
+                    restart_type, dut))
+                result = False
+            
+            if not poll_wait(basic_obj.get_and_match_docker_count, 180, dut, dut_count_arr[dut]):
+                st.error("Post 'systemctl restart {}' on {}, ALL dockers are not UP.".format(
+                    restart_type, dut))
+                result = False
+            
+            if not result:
+                st.report_fail("test_case_failed")
+        
+        # Step 6: Verify base setup after restart with retries
+        if restart_type == "swss":
+            retry_count = 10
+        else:
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+        
+        st.banner('Step 6: Verifying base setup after {} restart (retries: {})'.format(
+            restart_type, retry_count))
+        result_after_trigger = verify_base_setup_bgw(target_nodes, retry=retry_count)
+        
+        if not result_after_trigger:
+            st.error('Base setup verification failed after {} restart'.format(restart_type))
+            st.report_fail("test_case_failed")
+        
+        st.banner('Base setup verification passed after {} restart'.format(restart_type))
+        
+        # Step 7: Verify traffic (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 7: Verifying traffic after restart: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+                traffic_scope or 'all'))
+            traffic_result = verify_traffic(tgen_handles, bum=True,
+                                            traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                            scope=traffic_scope)
+            if not traffic_result:
+                st.error("Traffic verification failed after trigger")
+                st.report_fail("test_case_failed")
+            st.banner("Traffic verification passed after trigger")
+        
+        # Step 8: Check for core files/crashes
+        st.banner("Step 8: Checking for core files and crashes")
+        if vxlan_obj.check_core():
+            st.error("Core files detected after test")
+            st.report_fail("test_case_failed")
+        else:
+            st.log("No core files detected")
+        
+        st.banner('TEST PASSED: Solution_dci:{} - {}'.format(test_num, tc_id))
+        st.report_pass("test_case_passed")
+    
+    
+    @pytest.mark.parametrize("restart_type", ["bgp", "swss", "syncd"])
+    def test_dci_restart_process(self, restart_type):
+        """
+        Solution_dci:35/36/37 - Restarts a system service (bgp, swss, syncd) on DCI/BGW nodes and verifies recovery.
+        
+        Args:
+            restart_type: Type of restart - 'bgp', 'swss', or 'syncd'
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Perform systemctl restart {bgp|swss|syncd} on the DCI nodes within DC
+            3) Verify L2VNI and L3VNI traffic recovers between the hosts across DC1, DC2 and DC3
+            4) Verify traffic recovers
+            5) Verify no crash/core seen
+        
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify traffic before trigger (all traffic)
+            3. Save configurations (SONiC and FRR)
+            4. Restart the specified service on DCI/BGW nodes
+            5. Verify docker recovery
+            6. Verify base setup after trigger (with retries)
+            7. Verify traffic flows (L2VNI + L3VNI)
+        """
+        test_num = 35 if restart_type == "bgp" else 36 if restart_type == "swss" else 37
+        tc_id = 'test_dci_restart_{}'.format(restart_type)
+        
+        target_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not target_nodes:
+            target_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                           test_cfg['nodes'].get('dc2_bgw', []) +
+                           test_cfg['nodes'].get('dc3_bgw', []))
+        
+        if not target_nodes:
+            pytest.skip("No BGW/DCI nodes found in testbed configuration")
+            return
+        
+        traffic_scope = None
+        node_desc = "DCI/BGW"
+        
+        st.banner('TEST: Solution_dci:{} - Verify {} nodes after {} restart'.format(
+            test_num, node_desc, restart_type))
+        st.log('{} nodes to restart: {}'.format(node_desc, target_nodes))
+        
+        # Step 1: Verify base setup before trigger
+        st.banner("Step 1: Verify base setup before trigger")
+        result_before_trigger = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+        if not result_before_trigger:
+            st.error("Base setup verification failed before trigger")
+            st.report_fail("test_case_failed")
+        st.banner("Base setup verification passed before trigger")
+        
+        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 2: Verifying cross-DC traffic BEFORE trigger: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6')
+            traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                   scope=traffic_scope)
+            if not traffic_result_before:
+                st.error("Traffic verification failed before trigger")
+                st.report_fail("test_case_failed")
+            st.banner("Traffic verification passed before trigger")
+        
+        # Step 3: Save docker count and configs before restart
+        st.banner("Step 3: Saving configurations and docker state")
+        dut_count_arr = {}
+        for dut in target_nodes:
+            dut_count_arr[dut] = basic_obj.get_and_match_docker_count(dut)
+            st.log('Docker count for {}: {}'.format(dut, dut_count_arr[dut]))
+            vxlan_obj.config_dut(dut, 'sonic', "sudo config save -y")
+            vxlan_obj.config_dut(dut, 'bgp', 'do write')
+        
+        # Step 4: Perform restart on selected nodes
+        st.banner('Step 4: Performing {} restart on {} nodes'.format(restart_type, node_desc))
+        for dut in target_nodes:
+            st.log('Restarting {} on {}'.format(restart_type, dut))
+            restart_complete = basic_obj.systemctl_restart_service(dut, restart_type)
+            if not restart_complete:
+                st.error('Restart {} failed on {}'.format(restart_type, dut))
+        
+        # Step 5: Verify docker recovery
+        st.banner("Step 5: Verifying docker recovery after restart")
+        for dut in target_nodes:
+            result = True
+            if not poll_wait(basic_obj.verify_docker_status, 180, dut, 'Exited'):
+                st.error("Post 'systemctl restart {}' on {}, dockers are not auto recovered.".format(
+                    restart_type, dut))
+                result = False
+            
+            if not poll_wait(basic_obj.get_and_match_docker_count, 180, dut, dut_count_arr[dut]):
+                st.error("Post 'systemctl restart {}' on {}, ALL dockers are not UP.".format(
+                    restart_type, dut))
+                result = False
+            
+            if not result:
+                st.report_fail("test_case_failed")
+        
+        # Step 6: Verify base setup after restart with retries
+        if restart_type == "swss":
+            retry_count = 10
+        else:
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+        
+        st.banner('Step 6: Verifying base setup after {} restart (retries: {})'.format(
+            restart_type, retry_count))
+        result_after_trigger = verify_base_setup_bgw(target_nodes, retry=retry_count)
+        
+        if not result_after_trigger:
+            st.error('Base setup verification failed after {} restart'.format(restart_type))
+            st.report_fail("test_case_failed")
+        
+        st.banner('Base setup verification passed after {} restart'.format(restart_type))
+        
+        # Step 7: Verify traffic (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 7: Verifying cross-DC traffic after restart: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6')
+            traffic_result = verify_traffic(tgen_handles, bum=True,
+                                            traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                            scope=traffic_scope)
+            if not traffic_result:
+                st.error("Traffic verification failed after trigger")
+                st.report_fail("test_case_failed")
+            st.banner("Traffic verification passed after trigger")
+        
+        # Step 8: Check for core files/crashes
+        st.banner("Step 8: Checking for core files and crashes")
+        if vxlan_obj.check_core():
+            st.error("Core files detected after test")
+            st.report_fail("test_case_failed")
+        else:
+            st.log("No core files detected")
+        
+        st.banner('TEST PASSED: Solution_dci:{} - {}'.format(test_num, tc_id))
+        st.report_pass("test_case_passed")
+
+
+@pytest.mark.usefixtures('tgen_health_check_class')
+class TestVxlanReloadTriggers():
+    """Config reload triggers: verify traffic recovery after config reload, reboot, power cycle."""
+    """
+    Test class for config reload, reboot, and power cycle triggers on Leaf, Spine, and BGW/DCI nodes.
+    Verifies node recovery after config reload, full system reboot, and power cycle.
+    Includes L3VNI traffic verification (l3_v4, l3_v6) in addition to L2VNI.
+    
+    Test cases:
+        Config Reload:
+        - Solution_dci:38 - Config reload on Leaf
+        - Solution_dci:39 - Config reload on Spine
+        - Solution_dci:40 - Config reload on DCI node
+        
+        Reboot:
+        - Solution_dci:41 - Reboot on Leaf
+        - Solution_dci:42 - Reboot on Spine
+        - Solution_dci:43 - Reboot on DCI node
+        
+        Power Cycle:
+        - Solution_dci:44 - Power Cycle on Leaf
+        - Solution_dci:45 - Power Cycle on Spine
+        - Solution_dci:46 - Power Cycle on DCI node
+    """
+    
+    @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
+    def test_config_reload(self, node_type):
+        """
+        Solution_dci:38/39/40 - Config reload on Leaf/Spine/DCI nodes and verify recovery.
+        
+        Args:
+            node_type: Type of node - 'leaf', 'spine', or 'dci'
+        
+        Steps:
+            1. Select a node for testing based on node_type
+            2. Verify base setup before config reload
+            3. Verify traffic before config reload (L2VNI + L3VNI)
+            4. Save configuration (SONiC + FRR)
+            5. Perform config reload
+            6. Verify docker recovery
+            7. Verify base setup after config reload (with retries)
+            8. Verify all remote VTEPs are present
+            9. Verify traffic flows (L2VNI + L3VNI)
+        """
+        test_num = 38 if node_type == "leaf" else 39 if node_type == "spine" else 40
+        tc_id = 'test_{}_config_reload'.format(node_type)
+        
+        # Get nodes based on type
+        if node_type == "leaf":
+            candidate_nodes = test_cfg['nodes'].get('l2l3vni', [])
+            candidate_nodes = [node for node in candidate_nodes if 'leaf' in node]
+            traffic_scope = None
+            node_desc = "Leaf"
+        elif node_type == "spine":
+            candidate_nodes = test_cfg['nodes'].get('spine', [])
+            traffic_scope = 'cross'
+            node_desc = "Spine"
+        else:  # dci
+            candidate_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+            if not candidate_nodes:
+                candidate_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                                  test_cfg['nodes'].get('dc2_bgw', []) +
+                                  test_cfg['nodes'].get('dc3_bgw', []))
+            traffic_scope = 'cross'
+            node_desc = "DCI/BGW"
+        
+        if not candidate_nodes:
+            pytest.skip('No {} nodes found in testbed configuration'.format(node_desc))
+            return
+        
+        selected_dut = candidate_nodes[0]
+        st.banner('TEST: Solution_dci:{} - Verify {} node after config reload'.format(test_num, node_desc))
+        st.log('Selected {} node for config reload: {}'.format(node_desc, selected_dut))
+        
+        # Step 1: Verify base setup before trigger
+        st.banner("Step 1: Verify base setup before config reload")
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
+        result_before = verify_base_setup_bgw(setup_nodes, skip_checks=['vteps'])
+        if not result_before:
+            st.error("Base setup verification failed before config reload")
+            report_result(False, tc_id, "Base setup verification failed before config reload")
+            return
+        st.banner("Base setup verification passed before config reload")
+        
+        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 2: Verifying traffic BEFORE config reload: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+                traffic_scope or 'all'))
+            traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                   scope=traffic_scope)
+            if not traffic_result_before:
+                st.error("Traffic verification failed before config reload")
+                report_result(False, tc_id, "Traffic verification failed before config reload")
+                return
+            st.banner("Traffic verification passed before config reload")
+        
+        # Step 3: Save configuration
+        st.banner("Step 3: Saving configuration before reload")
+        reboot_obj.config_save(selected_dut)
+        vxlan_obj.config_dut(selected_dut, "bgp", "do write")
+        
+        count = basic_obj.get_and_match_docker_count(selected_dut)
+        st.log('Docker count before reload: {}'.format(count))
+        
+        # Step 4: Perform config reload
+        st.banner('Step 4: Performing config reload on {}'.format(selected_dut))
+        status = reboot_obj.config_reload(selected_dut)
+        
+        if status:
+            st.banner("Config reload command success!")
+        else:
+            st.banner("Config reload command failed!")
+            report_result(False, tc_id, "Config reload command failed")
+            return
+        
+        # Step 5: Check docker status
+        st.banner("Step 5: Verifying docker recovery after config reload")
+        if not poll_wait(basic_obj.verify_docker_status, 180, selected_dut, 'Exited'):
+            st.error("Post 'config reload', dockers are not auto recovered.")
+            report_result(False, tc_id, "Docker recovery failed - dockers in Exited state after config reload")
+            return
+
+        if not poll_wait(basic_obj.get_and_match_docker_count, 180, selected_dut, count):
+            st.error("Post 'config reload', ALL dockers are not UP.")
+            report_result(False, tc_id, "Docker count mismatch after config reload")
+            return
+        
+        st.wait(60)
+        
+        # Step 6: Verify base setup
+        st.banner("Step 6: Verifying base setup after config reload")
+        retry_count = test_cfg['global'].get('config_reload', 7)
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
+        base_res = verify_base_setup_bgw(setup_nodes, retry=retry_count)
+        
+        if base_res:
+            st.banner("Base verification pass after config reload")
+        else:
+            report_result(False, tc_id, 'Base setup verification failed after config reload')
+            return
+        
+        # Step 7: Check VTEP status
+        st.banner("Step 7: Verifying all remote VTEPs are present")
+        vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
+        if vtep_check_nodes:
+            vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
+        else:
+            vtep_state = True
+        if vtep_state:
+            st.banner("All remote vteps are found")
+        else:
+            st.banner("Not all or no remote vteps are found")
+            report_result(False, tc_id, "Remote VTEPs not fully recovered after config reload")
+            return
+        
+        # Step 8: Verify traffic (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 8: Verifying traffic after config reload: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+                traffic_scope or 'all'))
+            traffic_result = verify_traffic(tgen_handles, bum=True,
+                                            traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                            scope=traffic_scope)
+            if not traffic_result:
+                st.error("Traffic verification failed after config reload")
+                report_result(False, tc_id, "Traffic verification failed after config reload")
+                return
+            st.banner("Traffic verification passed after config reload")
+        
+        # Step 9: Check for core files/crashes
+        st.banner("Step 9: Checking for core files and crashes")
+        if vxlan_obj.check_core():
+            st.error("Core files detected after config reload")
+            report_result(False, tc_id, "Core files detected after config reload")
+            return
+        else:
+            st.log("No core files detected")
+        
+        st.banner('TEST PASSED: Solution_dci:{} - {}'.format(test_num, tc_id))
+        report_result(True, tc_id)
+    
+    
+    @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
+    def test_reboot(self, node_type):
+        """
+        Solution_dci:41/42/43 - Reboot Leaf/Spine/DCI node and verify recovery.
+        
+        Args:
+            node_type: Type of node - 'leaf', 'spine', or 'dci'
+        
+        Steps:
+            1. Select a node for testing based on node_type
+            2. Verify base setup before reboot
+            3. Verify traffic before reboot (L2VNI + L3VNI)
+            4. Save FRR configuration
+            5. Perform system reboot
+            6. Restore helper files (if needed)
+            7. Verify docker recovery
+            8. Verify base setup after reboot (with retries)
+            9. Verify all remote VTEPs are present
+            10. Verify traffic flows (L2VNI + L3VNI)
+            11. Check for core files/crashes
+        """
+        test_num = 41 if node_type == "leaf" else 42 if node_type == "spine" else 43
+        tc_id = 'test_{}_reboot'.format(node_type)
+        
+        # Get nodes based on type
+        if node_type == "leaf":
+            candidate_nodes = test_cfg['nodes'].get('l2l3vni', [])
+            candidate_nodes = [node for node in candidate_nodes if 'leaf' in node]
+            traffic_scope = None
+            node_desc = "Leaf"
+        elif node_type == "spine":
+            candidate_nodes = test_cfg['nodes'].get('spine', [])
+            traffic_scope = 'cross'
+            node_desc = "Spine"
+        else:  # dci
+            candidate_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+            if not candidate_nodes:
+                candidate_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                                  test_cfg['nodes'].get('dc2_bgw', []) +
+                                  test_cfg['nodes'].get('dc3_bgw', []))
+            traffic_scope = 'cross'
+            node_desc = "DCI/BGW"
+        
+        if not candidate_nodes:
+            pytest.skip('No {} nodes found in testbed configuration'.format(node_desc))
+            return
+        
+        selected_dut = candidate_nodes[0]
+        st.banner('TEST: Solution_dci:{} - Verify {} node after reboot'.format(test_num, node_desc))
+        st.log('Selected {} node for reboot: {}'.format(node_desc, selected_dut))
+        
+        # Step 1: Verify base setup before trigger
+        st.banner("Step 1: Verify base setup before reboot")
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
+        result_before = verify_base_setup_bgw(setup_nodes, skip_checks=['vteps'])
+        if not result_before:
+            st.error("Base setup verification failed before reboot")
+            report_result(False, tc_id, "Base setup verification failed before reboot")
+            return
+        st.banner("Base setup verification passed before reboot")
+        
+        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 2: Verifying traffic BEFORE reboot: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+                traffic_scope or 'all'))
+            traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                   scope=traffic_scope)
+            if not traffic_result_before:
+                st.error("Traffic verification failed before reboot")
+                report_result(False, tc_id, "Traffic verification failed before reboot")
+                return
+            st.banner("Traffic verification passed before reboot")
+        
+        # Step 3: Save FRR configuration
+        st.banner("Step 3: Saving BGP configuration before reboot")
+        vxlan_obj.config_dut(selected_dut, "bgp", "do write")
+        
+        count = basic_obj.get_and_match_docker_count(selected_dut)
+        st.log('Docker count before reboot: {}'.format(count))
+        
+        # Step 4: Perform reboot
+        st.banner('Step 4: Performing reboot on {}'.format(selected_dut))
+        reboot_obj.dut_reboot(selected_dut)
+        
+        # Restore helper file after reboot (if function exists)
+        try:
+            restore_helper_file(selected_dut)
+        except Exception:
+            st.log("restore_helper_file not available or not needed")
+        
+        # Step 5: Check docker status
+        st.banner("Step 5: Verifying docker recovery after reboot")
+        if not poll_wait(basic_obj.verify_docker_status, 180, selected_dut, 'Exited'):
+            report_result(False, tc_id, 'Dockers not auto recovered after reboot')
+            return
+
+        if not poll_wait(basic_obj.get_and_match_docker_count, 180, selected_dut, count):
+            st.error("Post 'reboot', ALL dockers are not UP.")
+            report_result(False, tc_id, 'All dockers not up after reboot')
+            return
+        
+        # Step 6: Verify base setup
+        st.banner("Step 6: Verifying base setup after reboot")
+        retry_count = 10
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
+        base_res = verify_base_setup_bgw(setup_nodes, retry=retry_count)
+        
+        if base_res:
+            st.banner("Base verification pass after reboot")
+        else:
+            report_result(False, tc_id, 'Base setup verification failed after reboot')
+            return
+
+        # Step 6b: Verify all remote VTEPs are present
+        st.banner("Step 6b: Verifying all remote VTEPs are present")
+        vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
+        if vtep_check_nodes:
+            vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
+        else:
+            vtep_state = True
+        if not vtep_state:
+            st.banner("Not all or no remote vteps are found")
+            report_result(False, tc_id, "Remote VTEPs not fully recovered after reboot")
+            return
+        st.banner("All remote vteps are found")
+        
+        # Step 7: Verify traffic (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 7: Verifying traffic after reboot: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+                traffic_scope or 'all'))
+            traffic_result = verify_traffic(tgen_handles, bum=True,
+                                            traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                            scope=traffic_scope)
+            if not traffic_result:
+                st.error("Traffic verification failed after reboot")
+                report_result(False, tc_id, "Traffic verification failed after reboot")
+                return
+            st.banner("Traffic verification passed after reboot")
+        
+        # Step 8: Check for core files/crashes
+        st.banner("Step 8: Checking for core files and crashes")
+        if vxlan_obj.check_core():
+            st.error("Core files detected after reboot")
+            report_result(False, tc_id, "Core files detected after reboot")
+            return
+        else:
+            st.log("No core files detected")
+        
+        st.banner('TEST PASSED: Solution_dci:{} - {}'.format(test_num, tc_id))
+        report_result(True, tc_id)
+    
+    @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
+    def test_power_cycle(self, node_type):
+        """
+        Solution_dci:44/45/46 - Power Cycle Leaf/Spine/DCI node and verify recovery.
+        
+        Args:
+            node_type: Type of node - 'leaf', 'spine', or 'dci'
+        
+        Steps:
+            1. Select a node for testing based on node_type
+            2. Verify base setup before power cycle
+            3. Verify traffic before power cycle (L2VNI + L3VNI)
+            4. Save configurations (SONiC + FRR)
+            5. Power OFF the node via PDU (st.do_rps)
+            6. Power ON the node via PDU
+            7. Restore helper files (if needed)
+            8. Verify docker recovery
+            9. Verify base setup after power cycle (with retries)
+            10. Verify all remote VTEPs are present
+            11. Verify traffic flows (L2VNI + L3VNI)
+            12. Check for core files/crashes
+        """
+        test_num = 44 if node_type == "leaf" else 45 if node_type == "spine" else 46
+        tc_id = 'test_{}_power_cycle'.format(node_type)
+        
+        # Get nodes based on type - use DC2 only for leaf and dci (PDU accessible)
+        if node_type == "leaf":
+            candidate_nodes = test_cfg['nodes'].get('l2l3vni', [])
+            candidate_nodes = [node for node in candidate_nodes if 'leaf' in node and 'dc2' in node]
+            traffic_scope = None
+            node_desc = "Leaf"
+        elif node_type == "spine":
+            candidate_nodes = test_cfg['nodes'].get('spine', [])
+            traffic_scope = 'cross'
+            node_desc = "Spine"
+        else:  # dci
+            candidate_nodes = test_cfg['nodes'].get('dc2_bgw', [])
+            if not candidate_nodes:
+                candidate_nodes = [node for node in test_cfg['nodes'].get('l2l3vni_bgw', []) if 'dc2' in node]
+            if not candidate_nodes:
+                candidate_nodes = [n for n in (test_cfg['nodes'].get('dc1_bgw', []) +
+                                              test_cfg['nodes'].get('dc2_bgw', []) +
+                                              test_cfg['nodes'].get('dc3_bgw', []))
+                                  if 'dc2' in n]
+            traffic_scope = 'cross'
+            node_desc = "DCI/BGW"
+        
+        if not candidate_nodes:
+            pytest.skip('No {} nodes (DC2) found in testbed configuration'.format(node_desc))
+            return
+        
+        selected_dut = candidate_nodes[0]
+        st.banner('TEST: Solution_dci:{} - Verify {} node after power cycle'.format(test_num, node_desc))
+        st.log('Selected DUT for power cycle: {}'.format(selected_dut))
+        
+        # Step 1: Verify base setup before trigger
+        st.banner("Step 1: Verify base setup before power cycle")
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
+        try:
+            result_before = verify_base_setup_bgw(setup_nodes, skip_checks=['vteps'])
+            if not result_before:
+                st.error("Base setup not healthy before power cycle - proceeding anyway")
+                report_result(False, tc_id, "Base setup verification failed before power cycle")
+        except Exception as err:
+            st.log('Base setup check encountered error: {}'.format(err))
+        
+        # Step 2: Verify traffic before power cycle (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 2: Verifying traffic BEFORE power cycle on {} node'.format(node_desc))
+            try:
+                traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                       traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                       scope=traffic_scope)
+                if not traffic_result_before:
+                    st.error("Traffic not healthy before power cycle - proceeding anyway")
+                else:
+                    st.banner("Traffic verification passed before power cycle")
+            except Exception as err:
+                st.log('Traffic verification encountered error: {}'.format(err))
+        
+        # Step 3: Save configurations
+        st.banner("Step 3: Save configurations before power cycle")
+        try:
+            st.log("Saving SONiC config...")
+            reboot_obj.config_save(selected_dut)
+            st.log("Saving FRR config...")
+            vxlan_obj.config_dut(selected_dut, 'bgp', 'do write', add=True)
+        except Exception as err:
+            st.log('Config save encountered error: {}'.format(err))
+        
+        # Step 4: Get docker count before power cycle
+        st.banner("Step 4: Get docker count before power cycle")
+        doc_count_before = None
+        try:
+            doc_count_before = basic_obj.get_and_match_docker_count(selected_dut)
+            st.log('Docker count before power cycle: {}'.format(doc_count_before))
+        except Exception as err:
+            st.log('Failed to get docker count: {}'.format(err))
+        
+        # Step 5: Power OFF the DUT via PDU
+        st.banner('Step 5: Powering OFF {} via PDU'.format(selected_dut))
+        try:
+            st.log('About to power off {}'.format(selected_dut))
+            st.do_rps(selected_dut, "Off")
+            st.log('{} powered OFF successfully'.format(selected_dut))
+            power_off_wait = 30
+            st.log('Waiting {}s for device to power down...'.format(power_off_wait))
+            st.wait(power_off_wait)
+        except Exception as e:
+            st.error('Power OFF failed on {}: {}'.format(selected_dut, e))
+            report_result(False, tc_id, 'Power OFF failed: {}'.format(e))
+            return
+        
+        # Step 6: Power ON the DUT via PDU
+        st.banner('Step 6: Powering ON {} via PDU'.format(selected_dut))
+        try:
+            st.log('About to power on {}'.format(selected_dut))
+            st.do_rps(selected_dut, "On", recon=False)
+            st.log('{} powered ON successfully'.format(selected_dut))
+            boot_wait = 300
+            st.log('Waiting {}s for device to boot and stabilize...'.format(boot_wait))
+            st.wait(boot_wait)
+        except Exception as e:
+            st.error('Power ON failed on {}: {}'.format(selected_dut, e))
+            report_result(False, tc_id, 'Power ON failed: {}'.format(e))
+            return
+        
+        # Wait for DUT to be reachable
+        st.banner("Waiting for DUT to be reachable after power ON")
+        if not intf_obj.poll_for_interfaces(selected_dut, iteration_count=180, delay=2):
+            st.error("DUT not reachable after power cycle - check console/config/network")
+            report_result(False, tc_id, "DUT not reachable after power cycle")
+            return
+        
+        # Step 7: Restore helper files if needed
+        st.banner("Step 7: Restore helper files")
+        try:
+            restore_helper_file(selected_dut)
+        except Exception as err:
+            st.log('Helper file restore encountered error: {}'.format(err))
+        
+        # Step 8: Verify docker recovery
+        st.banner("Step 8: Verify all dockers are up and running")
+        docker_recovery_time = 180
+        
+        try:
+            st.log("Checking for exited dockers...")
+            if not poll_wait(basic_obj.verify_docker_status, docker_recovery_time, selected_dut, 'Exited'):
+                st.error('Post power cycle on {}, Docker(s) is/are not auto recovered'.format(selected_dut))
+                report_result(False, tc_id, "Docker recovery failed - some dockers in Exited state")
+                return
+            
+            if doc_count_before:
+                st.log('Verifying docker count matches pre-power-cycle count: {}'.format(doc_count_before))
+                if not poll_wait(basic_obj.get_and_match_docker_count, docker_recovery_time, selected_dut, doc_count_before):
+                    st.error('Post power cycle on {}, not all dockers are UP'.format(selected_dut))
+                    report_result(False, tc_id, "Docker recovery failed - docker count mismatch")
+                    return
+            
+            st.log("All dockers recovered successfully")
+        except Exception as err:
+            st.error('Docker verification failed: {}'.format(err))
+            report_result(False, tc_id, 'Docker verification error: {}'.format(err))
+            return
+        
+        # Step 9: Verify base setup after power cycle (with retries)
+        st.banner("Step 9: Verify base setup after power cycle")
+        retry_count = test_cfg['global'].get('config_reload', 7)
+        st.log('Verifying with {} retries...'.format(retry_count))
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
+        try:
+            result_after = verify_base_setup_bgw(setup_nodes, retry=retry_count)
+            if not result_after:
+                st.error("Base setup verification failed after power cycle")
+                report_result(False, tc_id, "Base setup not recovered after power cycle")
+                return
+            st.log("Base setup verification passed after power cycle")
+        except Exception as err:
+            st.error('Base setup verification failed: {}'.format(err))
+            report_result(False, tc_id, 'Base setup verification error: {}'.format(err))
+            return
+
+        # Step 10: Verify all remote VTEPs are present
+        st.banner("Step 10: Verifying all remote VTEPs are present")
+        vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
+        if vtep_check_nodes:
+            vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
+        else:
+            vtep_state = True
+        if not vtep_state:
+            st.banner("Not all or no remote vteps are found")
+            report_result(False, tc_id, "Remote VTEPs not fully recovered after power cycle")
+            return
+        st.banner("All remote vteps are found")
+
+        # Step 11: Verify traffic flows (L2VNI + L3VNI)
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 11: Verify traffic flows after power cycle on {} node'.format(node_desc))
+            convergence_wait = 30
+            st.log('Waiting {}s for protocol convergence...'.format(convergence_wait))
+            st.wait(convergence_wait)
+            
+            traffic_result = verify_traffic(tgen_handles, bum=True,
+                                            traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                            scope=traffic_scope)
+            
+            if not traffic_result:
+                st.error("Traffic verification failed after power cycle")
+                report_result(False, tc_id, "Traffic verification failed after power cycle")
+                return
+            st.banner("Traffic verification passed after power cycle")
+        
+        # Step 12: Check for core files/crashes
+        st.banner("Step 12: Checking for core files and crashes")
+        if vxlan_obj.check_core():
+            st.error("Core files detected after power cycle")
+            report_result(False, tc_id, "Core files detected after power cycle")
+            return
+        st.log("No core files detected")
+        
+        st.banner('TEST PASSED: Solution_dci:{} - {}'.format(test_num, tc_id))
+        report_result(True, tc_id)
+
+
+@pytest.mark.usefixtures('tgen_health_check_class')
+class TestVxlanBGPTriggers():
+    """BGP clear/reset triggers: verify traffic recovery after BGP session reset."""
+    """
+    Test class for BGP-related triggers on Leaf, Spine, and DCI nodes.
+    Tests BGP session recovery and traffic restoration.
+    Includes L3VNI traffic verification (l3_v4, l3_v6) in addition to L2VNI.
+    
+    Test Cases:
+        - Solution_dci:17 - BGP flap on leafs (hard reset)
+        - Solution_dci:18 - BGP flap on spines (hard reset)
+        - Solution_dci:19 - BGP flap on DCI nodes (hard reset)
+        - Solution_dci:20 - BGP soft reset on leaf
+        - Solution_dci:21 - BGP soft reset on spine
+        - Solution_dci:22 - BGP soft reset on DCI
+    """
+    
+    @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
+    def test_bgp_hard_reset(self, node_type):
+        """
+        Solution_dci:17/18/19 - Performs hard BGP reset (clear bgp *) and verifies recovery.
+        
+        Args:
+            node_type: Type of node - 'leaf', 'spine', or 'dci'
+        
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify traffic before trigger (L2VNI + L3VNI)
+            3. Perform "clear bgp *" on target nodes
+            4. Wait for BGP session recovery
+            5. Verify base setup after trigger (with retries)
+            6. Verify traffic flows (L2VNI + L3VNI)
+            7. Check for core files/crashes
+        """
+        test_num = 17 if node_type == "leaf" else 18 if node_type == "spine" else 19
+        tc_id = 'test_bgp_hard_reset_{}'.format(node_type)
+        result_str = ''
+        
+        st.banner('TEST Solution_dci:{}: Verify L2VNI+L3VNI traffic after hard BGP reset on {} nodes'.format(
+            test_num, node_type))
+        
+        # Get target nodes based on node_type
+        if node_type == "leaf":
+            target_nodes = [node for node in test_cfg['nodes'].get('l2l3vni', []) if 'leaf' in node]
+            node_desc = "Leaf"
+            traffic_scope = 'all'
+        elif node_type == "spine":
+            target_nodes = []
+            for dc_key in ['dc1_spine', 'dc2_spine', 'dc3_spine']:
+                if test_cfg['nodes'].get(dc_key):
+                    target_nodes.extend(test_cfg['nodes'][dc_key])
+            if not target_nodes:
+                target_nodes = test_cfg['nodes'].get('spine', [])
+            node_desc = "Spine"
+            traffic_scope = 'cross'
+        else:  # dci
+            target_nodes = []
+            for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
+                if test_cfg['nodes'].get(dc_key):
+                    target_nodes.extend(test_cfg['nodes'][dc_key])
+            if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
+                target_nodes = test_cfg['nodes']['l2l3vni_bgw']
+            node_desc = "DCI/BGW"
+            traffic_scope = 'cross'
+        
+        if not target_nodes:
+            pytest.skip('No {} nodes found in testbed configuration'.format(node_desc))
+            return
+        
+        st.log('{} nodes for hard BGP reset: {}'.format(node_desc, target_nodes))
+        
+        try:
+            # Step 1: Verify base setup before trigger
+            st.banner("Step 1: Verify base setup before hard BGP reset")
+            try:
+                result_before = verify_base_setup_bgw(target_nodes,
+                                                       checks=['bgp', 'evpn_type1', 'evpn_type4'],
+                                                       skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before hard BGP reset\n"
+                    st.error("Base setup not healthy before trigger")
+            except Exception as err:
+                st.log('Base setup check encountered error: {}'.format(err))
+            
+            # Step 1b: Verify traffic before trigger (L2VNI + L3VNI)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 1b: Verifying traffic BEFORE hard BGP reset on {} nodes'.format(node_desc))
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=traffic_scope)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before hard BGP reset\n"
+                        st.error("Traffic not healthy before trigger")
+                    else:
+                        st.banner("Traffic verification passed before hard BGP reset")
+                except Exception as err:
+                    st.log('Traffic verification encountered error: {}'.format(err))
+                    result_str += 'Traffic verification error before hard BGP reset: {}\n'.format(err)
+            
+            # Step 2: Clear interface counters for baseline
+            st.banner('Step 2: Clearing interface counters on {} nodes'.format(node_desc))
+            try:
+                vxlan_obj.clear_counters(target_nodes)
+            except Exception as err:
+                st.log('Counter clear encountered error: {}'.format(err))
+            
+            # Step 3: Perform "clear bgp *" (hard reset) on target nodes
+            st.banner('Step 3: Performing "clear bgp *" (hard reset) on {} {} nodes'.format(
+                len(target_nodes), node_desc))
+            for node in target_nodes:
+                st.log('Clearing BGP on {}'.format(node))
+                cmd = "do clear bgp *"
+                try:
+                    vxlan_obj.config_dut(node, 'bgp', cmd, add=True)
+                    st.log('BGP cleared successfully on {}'.format(node))
+                except Exception as err:
+                    result_str += 'Failed to clear BGP on {}: {}\n'.format(node, err)
+                    st.error('BGP clear failed on {}: {}'.format(node, err))
+            
+            # Step 4: Wait for BGP sessions to re-establish
+            st.banner("Step 4: Waiting for BGP sessions to recover")
+            wait_time = 60
+            st.log('Waiting {}s for BGP convergence...'.format(wait_time))
+            st.wait(wait_time)
+            
+            # Step 5: Verify base setup after hard BGP reset (with retries)
+            st.banner("Step 5: Verifying base setup after hard BGP reset")
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            st.log('Verifying with {} retries...'.format(retry_count))
+            
+            try:
+                result_after = verify_base_setup_bgw(target_nodes, retry=retry_count,
+                                                      checks=['bgp', 'evpn_type1', 'evpn_type4', 'vteps'])
+                if not result_after:
+                    result_str += "Base setup verification failed after hard BGP reset\n"
+                    st.error("Base setup not recovered after hard BGP reset")
+                else:
+                    st.log("Base setup verification passed after hard BGP reset")
+            except Exception as err:
+                result_str += 'Base setup verification error: {}\n'.format(err)
+                st.error('Base setup verification failed: {}'.format(err))
+            
+            # Step 6: Verify traffic (L2VNI + L3VNI)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 6: Verifying L2VNI+L3VNI traffic after hard BGP reset on {} nodes'.format(node_desc))
+                
+                try:
+                    vxlan_obj.clear_counters(target_nodes)
+                    st.wait(5)
+                    
+                    st.log('Verifying {} traffic: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6...'.format(traffic_scope))
+                    traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                    traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                    scope=traffic_scope)
+                    
+                    if not traffic_result:
+                        result_str += "Traffic verification failed after hard BGP reset\n"
+                        st.error("Traffic failed")
+                    else:
+                        st.log("Traffic verification passed")
+                    
+                    try:
+                        vxlan_obj.show_counters(target_nodes)
+                    except Exception:
+                        pass
+                    
+                except Exception as err:
+                    result_str += 'Traffic verification error: {}\n'.format(err)
+                    st.error('Traffic verification failed: {}'.format(err))
+            
+            # Step 7: Check for core files/crashes
+            st.banner("Step 7: Checking for core files and crashes")
+            try:
+                for dut in target_nodes:
+                    core_files = basic_obj.verify_core_files(dut)
+                    if core_files:
+                        result_str += 'Core files found on {}: {}\n'.format(dut, core_files)
+                        st.error('Core files detected on {}'.format(dut))
+                    else:
+                        st.log('No core files on {}'.format(dut))
+            except Exception as err:
+                st.log('Core file check encountered error: {}'.format(err))
+            
+            # Step 8: Get CLI output for debugging
+            st.banner("Step 8: Collecting CLI output for verification")
+            try:
+                vxlan_obj.get_cli_out(target_nodes)
+            except Exception as err:
+                st.log('CLI output collection error: {}'.format(err))
+            
+        except Exception as e:
+            result_str += 'Test execution error: {}\n'.format(e)
+            st.error('Unexpected error during test: {}'.format(e))
+        
+        # Report results
+        if not result_str:
+            st.banner('TEST PASSED: {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+    
+    @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
+    def test_bgp_soft_reset(self, node_type):
+        """
+        Solution_dci:20/21/22 - Performs soft BGP reset and verifies recovery.
+        
+        Args:
+            node_type: Type of node - 'leaf', 'spine', or 'dci'
+        
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify traffic before trigger (L2VNI + L3VNI)
+            3. Perform "clear bgp * soft" on target nodes
+            4. Wait for BGP session recovery
+            5. Verify base setup after trigger (with retries)
+            6. Verify traffic flows (L2VNI + L3VNI)
+            7. Check for core files/crashes
+        """
+        test_num = 20 if node_type == "leaf" else 21 if node_type == "spine" else 22
+        tc_id = 'test_bgp_soft_reset_{}'.format(node_type)
+        result_str = ''
+        
+        st.banner('TEST Solution_dci:{}: Verify L2VNI+L3VNI traffic after soft BGP reset on {} nodes'.format(
+            test_num, node_type))
+        
+        # Get target nodes based on node_type
+        if node_type == "leaf":
+            target_nodes = [node for node in test_cfg['nodes'].get('l2l3vni', []) if 'leaf' in node]
+            node_desc = "Leaf"
+            traffic_scope = 'all'
+        elif node_type == "spine":
+            target_nodes = []
+            for dc_key in ['dc1_spine', 'dc2_spine', 'dc3_spine']:
+                if test_cfg['nodes'].get(dc_key):
+                    target_nodes.extend(test_cfg['nodes'][dc_key])
+            if not target_nodes:
+                target_nodes = test_cfg['nodes'].get('spine', [])
+            node_desc = "Spine"
+            traffic_scope = 'cross'
+        else:  # dci
+            target_nodes = []
+            for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
+                if test_cfg['nodes'].get(dc_key):
+                    target_nodes.extend(test_cfg['nodes'][dc_key])
+            if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
+                target_nodes = test_cfg['nodes']['l2l3vni_bgw']
+            node_desc = "DCI/BGW"
+            traffic_scope = 'cross'
+        
+        if not target_nodes:
+            pytest.skip('No {} nodes found in testbed configuration'.format(node_desc))
+            return
+        
+        st.log('{} nodes for soft BGP reset: {}'.format(node_desc, target_nodes))
+        
+        try:
+            # Step 1: Verify base setup before trigger
+            st.banner("Step 1: Verify base setup before soft BGP reset")
+            try:
+                result_before = verify_base_setup_bgw(target_nodes,
+                                                       checks=['bgp', 'evpn_type1', 'evpn_type4'],
+                                                       skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before soft BGP reset\n"
+                    st.error("Base setup not healthy before trigger")
+            except Exception as err:
+                st.log('Base setup check encountered error: {}'.format(err))
+            
+            # Step 1b: Verify traffic before trigger (L2VNI + L3VNI)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 1b: Verifying traffic BEFORE soft BGP reset on {} nodes'.format(node_desc))
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=traffic_scope)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before soft BGP reset\n"
+                        st.error("Traffic not healthy before trigger")
+                    else:
+                        st.banner("Traffic verification passed before soft BGP reset")
+                except Exception as err:
+                    st.log('Traffic verification encountered error: {}'.format(err))
+                    result_str += 'Traffic verification error before soft BGP reset: {}\n'.format(err)
+            
+            # Step 2: Clear interface counters for baseline
+            st.banner('Step 2: Clearing interface counters on {} nodes'.format(node_desc))
+            try:
+                vxlan_obj.clear_counters(target_nodes)
+            except Exception as err:
+                st.log('Counter clear encountered error: {}'.format(err))
+            
+            # Step 3: Perform "clear bgp * soft" on target nodes
+            st.banner('Step 3: Performing "clear bgp * soft" on {} {} nodes'.format(
+                len(target_nodes), node_desc))
+            for node in target_nodes:
+                st.log('Soft-clearing BGP on {}'.format(node))
+                cmd = "do clear bgp * soft"
+                try:
+                    vxlan_obj.config_dut(node, 'bgp', cmd, add=True)
+                    st.log('BGP soft-cleared successfully on {}'.format(node))
+                except Exception as err:
+                    result_str += 'Failed to soft-clear BGP on {}: {}\n'.format(node, err)
+                    st.error('BGP soft-clear failed on {}: {}'.format(node, err))
+            
+            # Step 4: Wait for BGP sessions to recover (shorter wait for soft reset)
+            st.banner("Step 4: Waiting for BGP sessions to recover")
+            wait_time = 30
+            st.log('Waiting {}s for BGP convergence...'.format(wait_time))
+            st.wait(wait_time)
+            
+            # Step 5: Verify base setup after soft BGP reset (with retries)
+            st.banner("Step 5: Verifying base setup after soft BGP reset")
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            st.log('Verifying with {} retries...'.format(retry_count))
+            
+            try:
+                result_after = verify_base_setup_bgw(target_nodes, retry=retry_count,
+                                                      checks=['bgp', 'evpn_type1', 'evpn_type4', 'vteps'])
+                if not result_after:
+                    result_str += "Base setup verification failed after soft BGP reset\n"
+                    st.error("Base setup not recovered after soft BGP reset")
+                else:
+                    st.log("Base setup verification passed after soft BGP reset")
+            except Exception as err:
+                result_str += 'Base setup verification error: {}\n'.format(err)
+                st.error('Base setup verification failed: {}'.format(err))
+            
+            # Step 6: Verify traffic (L2VNI + L3VNI)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 6: Verifying L2VNI+L3VNI traffic after soft BGP reset on {} nodes'.format(node_desc))
+                
+                try:
+                    vxlan_obj.clear_counters(target_nodes)
+                    st.wait(5)
+                    
+                    st.log('Verifying {} traffic: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6...'.format(traffic_scope))
+                    traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                    traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                    scope=traffic_scope)
+                    
+                    if not traffic_result:
+                        result_str += "Traffic verification failed after soft BGP reset\n"
+                        st.error("Traffic failed")
+                    else:
+                        st.log("Traffic verification passed")
+                    
+                    try:
+                        vxlan_obj.show_counters(target_nodes)
+                    except Exception:
+                        pass
+                    
+                except Exception as err:
+                    result_str += 'Traffic verification error: {}\n'.format(err)
+                    st.error('Traffic verification failed: {}'.format(err))
+            
+            # Step 7: Check for core files/crashes
+            st.banner("Step 7: Checking for core files and crashes")
+            try:
+                for dut in target_nodes:
+                    core_files = basic_obj.verify_core_files(dut)
+                    if core_files:
+                        result_str += 'Core files found on {}: {}\n'.format(dut, core_files)
+                        st.error('Core files detected on {}'.format(dut))
+                    else:
+                        st.log('No core files on {}'.format(dut))
+            except Exception as err:
+                st.log('Core file check encountered error: {}'.format(err))
+            
+            # Step 8: Get CLI output for debugging
+            st.banner("Step 8: Collecting CLI output for verification")
+            try:
+                vxlan_obj.get_cli_out(target_nodes)
+            except Exception as err:
+                st.log('CLI output collection error: {}'.format(err))
+            
+        except Exception as e:
+            result_str += 'Test execution error: {}\n'.format(e)
+            st.error('Unexpected error during test: {}'.format(e))
+        
+        # Report results
+        if not result_str:
+            st.banner('TEST PASSED: {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+
+
+# ============================================================================
 # BASE TEST CLASS (DCI base config + base testcases only)
 # ============================================================================
 

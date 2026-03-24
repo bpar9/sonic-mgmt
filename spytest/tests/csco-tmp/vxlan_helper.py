@@ -6869,7 +6869,11 @@ def get_expected_type5_routes(dut):
                 remote_bgw_count += 1
                 remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
 
-    expected_path_count = local_leaf_count + remote_bgw_count
+    # Leaf nodes also see their own self-originated path (weight=32768)
+    # which appears in 'show bgp l2vpn evpn route type prefix' output.
+    # BGW nodes do NOT show self-originated Type-5 paths in their output.
+    self_path = 1 if is_leaf else 0
+    expected_path_count = local_leaf_count + remote_bgw_count + self_path
 
     # For leaf nodes with no other same-DC leafs (e.g. DC3),
     # there are no local leaf paths and best-path cannot be local leaf
@@ -6883,14 +6887,15 @@ def get_expected_type5_routes(dut):
     label = 'leaf' if is_leaf else 'BGW'
     local_label = 'other same-DC leafs' if is_leaf else 'local leaves'
     remote_label = 'same-DC BGWs' if is_leaf else 'remote BGWs'
-    st.log('Type-5 path count for {} ({}, {}): {} {} + {} {} = {}'.format(
+    self_label = ' + 1 self' if self_path else ''
+    st.log('Type-5 path count for {} ({}, {}): {} {} + {} {}{} = {}'.format(
         dut, dut_dc, label, local_leaf_count, local_label,
-        remote_bgw_count, remote_label, expected_path_count))
+        remote_bgw_count, remote_label, self_label, expected_path_count))
     st.log('Local leaf ASNs: {}, Remote BGW ASNs: {}'.format(
         local_leaf_asns, remote_bgw_asns))
     if is_leaf:
-        st.log('Leaf node: expect_local_leaf={}, expect_ipv6_nexthop={}'.format(
-            expect_local_leaf, expect_ipv6_nexthop))
+        st.log('Leaf node: expect_local_leaf={}, expect_ipv6_nexthop={}, self_path={}'.format(
+            expect_local_leaf, expect_ipv6_nexthop, self_path))
 
     # Build expected Type-5 route prefixes
     # Per SAG addressing:
@@ -7668,16 +7673,132 @@ def verify_rt_rewrite_dci(dut):
     return result
 
 
+def _get_expected_local_arp_entries(dut):
+    """
+    Build expected local ARP entries for a leaf node from SAG host addressing.
+
+    Uses generate_sag_hosts() logic to derive per-VLAN host IPs and MACs that
+    should appear in the local ARP table on a leaf node.  Only locally-connected
+    IPv4 hosts (on Ethernet / PortChannel interfaces) are expected in ARP.
+
+    The SAG addressing scheme (DCI_NORMAL_SAG_ADDRESSING.md):
+      - MAC: 00:<vlan_hex>:00:00:04:<counter_hex>  (IPv4 version octet = 04)
+      - IP:  80.<vlan>.0.<counter>
+      - counter increments by 10 per interface, across all nodes sorted by DC
+        then leaf number
+
+    Returns:
+        list of dicts: [{'ip': '80.11.0.10', 'mac': '00:0b:00:00:04:0a',
+                         'vlan': '11'}, ...]
+    """
+    cfg_dict = get_cfg_dict()
+
+    # Collect VLANs from the node's l2vni config
+    node_cfg = cfg_dict.get(dut, {})
+    vlan_list = []
+    if isinstance(node_cfg, dict) and node_cfg.get('l2vni'):
+        l2vni = node_cfg['l2vni']
+        if isinstance(l2vni, list):
+            for item in l2vni:
+                vlan_list.append(item['vlan_id'])
+        else:
+            vlan_list = list(range(l2vni['vlan_start_range'],
+                                   l2vni['vlan_start_range'] + l2vni['count']))
+
+    if not vlan_list:
+        st.log('No VLANs found for {} in YAML config'.format(dut))
+        return []
+
+    # Count interfaces per node in sorted SAG order to derive counter offsets
+    # The global counter starts at 10 and increments by 10 per interface
+    # across all nodes sorted by (dc_num, node_type, leaf_num)
+    def _sort_key(name):
+        dc_match = re.search(r'_dc(\d+)', name)
+        leaf_match = re.search(r'(leaf|spine)(\d+)', name)
+        dc_num = int(dc_match.group(1)) if dc_match else 0
+        node_type = leaf_match.group(1) if leaf_match else name
+        leaf_num = int(leaf_match.group(2)) if leaf_match else 0
+        return (dc_num, node_type, leaf_num)
+
+    # Determine how many interfaces each node has and where dut's interfaces start
+    # We need to replicate the same ordering as generate_sag_hosts
+    svi_nodes = []
+    for node_name, ncfg in sorted(cfg_dict.items(), key=lambda x: _sort_key(x[0])):
+        if not isinstance(ncfg, dict):
+            continue
+        if 'leaf' not in node_name:
+            continue
+        if not ncfg.get('l2vni'):
+            continue
+        svi_nodes.append(node_name)
+
+    # Count interfaces per node from l2vni config members
+    # Each unique non-PortChannel member or PortChannel group = 1 interface
+    counter = 10  # global counter starts at 10
+    dut_counters = []  # list of counter values for dut's interfaces
+
+    for node_name in svi_nodes:
+        ncfg = cfg_dict[node_name]
+        l2vni = ncfg['l2vni']
+        # Count interfaces: unique orphan ports + unique port-channels
+        seen_ports = set()
+        seen_pcs = set()
+        if isinstance(l2vni, list):
+            for item in l2vni:
+                for member in item.get('members', []):
+                    if member.startswith('PortChannel'):
+                        pc_num = re.search(r'PortChannel(\d+)', member)
+                        if pc_num and pc_num.group(1) not in seen_pcs:
+                            seen_pcs.add(pc_num.group(1))
+                    else:
+                        # Extract port suffix (e.g., 'T1P1' -> 'P1')
+                        if member not in seen_ports:
+                            seen_ports.add(member)
+
+        num_interfaces = len(seen_ports) + len(seen_pcs)
+        if num_interfaces == 0:
+            num_interfaces = 1  # At least 1 interface
+
+        if node_name == dut:
+            for i in range(num_interfaces):
+                dut_counters.append(counter + i * 10)
+
+        counter += num_interfaces * 10
+
+    if not dut_counters:
+        st.log('Could not determine interface counters for {}'.format(dut))
+        return []
+
+    # Build expected ARP entries: one per (vlan, interface_counter)
+    expected = []
+    for vlan_id in sorted(vlan_list):
+        vlan_hex = format(vlan_id, '02x')
+        for ctr in dut_counters:
+            ctr_hex = format(ctr, '02x')
+            ip = '80.{}.0.{}'.format(vlan_id, ctr)
+            mac = '00:{}:00:00:04:{}'.format(vlan_hex, ctr_hex)
+            expected.append({
+                'ip': ip,
+                'mac': mac,
+                'vlan': str(vlan_id),
+            })
+
+    return expected
+
+
 def verify_mac_arp_entries_dci(dut):
     """
     Verify MAC and ARP table entries on a node for L3VNI DCI traffic.
 
-    For inter-VLAN routing (L3VNI), the node should have:
-      1. MAC entries for local and remote hosts
-      2. ARP/NDP entries for hosts in VRF-bound VLANs
+    Compares expected vs actual ARP entries using SAG host addressing data
+    from DCI_NORMAL_SAG_ADDRESSING.md.  Expected local ARP entries are derived
+    from generate_sag_hosts() addressing scheme:
+      - IP:  80.<vlan>.0.<counter>
+      - MAC: 00:<vlan_hex>:00:00:04:<counter_hex>
 
-    This is a basic presence check to confirm that L3VNI forwarding
-    has populated the MAC and ARP tables.
+    Also verifies MAC table has entries (count check).
+
+    Uses compare_exp_actual_data() for structured expected-vs-actual comparison.
 
     Args:
         dut: Node hostname to verify
@@ -7687,6 +7808,7 @@ def verify_mac_arp_entries_dci(dut):
             'result': True/False,
             'mac_count': int,
             'arp_count': int,
+            'arp_missing': int,
             'details': str summary
         }
     """
@@ -7694,16 +7816,16 @@ def verify_mac_arp_entries_dci(dut):
         'result': False,
         'mac_count': 0,
         'arp_count': 0,
+        'arp_missing': 0,
         'details': ''
     }
 
     st.banner('Checking MAC and ARP entries on {}'.format(dut))
 
-    # Step 1: Check MAC table
+    # Step 1: Check MAC table (count check)
     try:
         mac_output = st.show(dut, "show mac", skip_tmpl=True)
         if mac_output:
-            # Count non-header lines with MAC addresses
             mac_lines = [l for l in mac_output.splitlines()
                          if ':' in l and ('dynamic' in l.lower() or 'static' in l.lower()
                                           or 'Vlan' in l)]
@@ -7712,28 +7834,85 @@ def verify_mac_arp_entries_dci(dut):
     except Exception as err:
         st.log('Failed to get MAC table on {}: {}'.format(dut, err))
 
-    # Step 2: Check ARP table
+    # Step 2: Get actual ARP entries
+    actual_arp = {}  # keyed by IP -> {mac, vlan}
     try:
         arp_output = st.show(dut, "show arp", skip_tmpl=True)
         if arp_output:
-            # Count lines with IP addresses (ARP entries)
-            arp_lines = [l for l in arp_output.splitlines()
-                         if '.' in l and ':' in l]
-            result['arp_count'] = len(arp_lines)
+            for line in arp_output.splitlines():
+                # Match ARP lines: IP  MAC  Iface  Vlan
+                # e.g. "80.11.0.10    00:0b:00:00:04:0a  Ethernet1_1   11"
+                m = re.search(
+                    r'(80\.\d+\.\d+\.\d+)\s+([\da-f:]+)\s+\S+\s+(\d+)', line)
+                if m:
+                    actual_arp[m.group(1)] = {
+                        'mac': m.group(2),
+                        'vlan': m.group(3),
+                    }
+        result['arp_count'] = len(actual_arp)
         st.log('ARP entries on {}: {}'.format(dut, result['arp_count']))
     except Exception as err:
         st.log('Failed to get ARP table on {}: {}'.format(dut, err))
 
+    # Step 3: Build expected ARP entries from SAG host addressing
+    expected_arp = _get_expected_local_arp_entries(dut)
+    st.log('Expected local ARP entries on {}: {}'.format(dut, len(expected_arp)))
+
+    # Step 4: Compare expected vs actual ARP using structured comparison
+    exp_data = []
+    act_data = []
+    missing_count = 0
+
+    for exp_entry in expected_arp:
+        ip = exp_entry['ip']
+        exp_row = {
+            'ip': ip,
+            'mac': exp_entry['mac'],
+            'vlan': exp_entry['vlan'],
+            'present': 'yes',
+        }
+        exp_data.append(exp_row)
+
+        if ip in actual_arp:
+            act_row = {
+                'ip': ip,
+                'mac': actual_arp[ip]['mac'],
+                'vlan': actual_arp[ip]['vlan'],
+                'present': 'yes',
+            }
+        else:
+            act_row = {
+                'ip': ip,
+                'mac': '-',
+                'vlan': '-',
+                'present': 'no',
+            }
+            missing_count += 1
+        act_data.append(act_row)
+
+    result['arp_missing'] = missing_count
+
     # Build summary
     details_parts = []
     details_parts.append('{} MAC entries'.format(result['mac_count']))
-    details_parts.append('{} ARP entries'.format(result['arp_count']))
+    details_parts.append('{}/{} expected ARP entries found'.format(
+        len(expected_arp) - missing_count, len(expected_arp)))
+    if missing_count > 0:
+        details_parts.append('{} ARP entries missing'.format(missing_count))
 
     result['details'] = '; '.join(details_parts)
     st.log(result['details'])
 
-    # Pass if at least some MAC and ARP entries exist
-    result['result'] = (result['mac_count'] > 0 and result['arp_count'] > 0)
+    # Pass if MAC entries exist and all expected ARP entries are present
+    result['result'] = (result['mac_count'] > 0 and missing_count == 0)
+
+    # Use compare_exp_actual_data for structured tabular output if mismatch
+    if not result['result'] and exp_data:
+        try:
+            compare_exp_actual_data(exp_data, act_data, ['ip'])
+        except (CompareFailed, CompareEmptyData):
+            pass  # Already captured in result
+
     return result
 
 

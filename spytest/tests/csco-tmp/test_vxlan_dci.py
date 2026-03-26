@@ -2085,7 +2085,7 @@ ALL_CHECKS = [
     'rt_rewrite',        # RT-REWRITE route-map verification (BGW nodes only)
     'mac_arp',           # MAC and ARP table entries for L3VNI hosts
     'portchannel',       # PortChannel operational status
-    'evpn_type5_comprehensive',  # Comprehensive Type-5: path-count, best-path, RT/ET/RMAC (BGW only)
+    'evpn_type5_comprehensive',  # Comprehensive Type-5: path-count, best-path, RT/ET/RMAC (BGW); prefix-presence (leaf)
     'rib_fib',           # RIB/FIB install check: show ip route vrf on BGWs
 ]
 
@@ -4313,15 +4313,22 @@ class TestVxlanDCIBase():
         
         bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
         
-        # Step 1: Verify eBGP multihop, VRF-VNI, Type-5 routes and EVPN VNI on BGW nodes
-        st.banner('Step 1: Verify eBGP multihop, VRF-VNI, Type-5 routes and EVPN VNI on BGW nodes')
+        # Step 1: Verify eBGP multihop, VRF-VNI, and EVPN VNI on BGW nodes
+        st.banner('Step 1: Verify eBGP multihop, VRF-VNI, and EVPN VNI on BGW nodes')
         st.log('Each BGW has OVERLAY_WAN peer-group with ebgp-multihop 255 to remote DC BGWs')
         st.log('BGW ASNs: DC1 BGW1=65102, DC1 BGW2=65103, DC2 BGW1=65104, DC2 BGW2=65105, DC3 BGW1=65106')
         st.log('BGW cross-DC L3VNI from l3vni_config_diff.txt: Vrf101->10101, Vrf102->10102')
         st.log('Type-5 routes carry L3VNI (10101/10102) and RT (<ASN>:<L3VNI>) in ext-community')
         if not verify_base_setup_bgw(bgw_nodes,
-                                     checks=['ebgp_multihop', 'vrf_vni', 'evpn_type5_comprehensive', 'evpn_vni']):
-            summ += 'eBGP multihop, VRF-VNI, Type-5 or EVPN VNI verification failed on BGW nodes\n'
+                                     checks=['ebgp_multihop', 'vrf_vni', 'evpn_vni']):
+            summ += 'eBGP multihop, VRF-VNI or EVPN VNI verification failed on BGW nodes\n'
+            result = False
+        
+        # Step 2: Verify Type-5 routes on all nodes (leaf + BGW)
+        st.banner('Step 2: Verify Type-5 routes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['evpn_type5_comprehensive']):
+            summ += 'Type-5 route verification failed on leaf or BGW nodes\n'
             result = False
         
         report_result(result, tc_id, summ)
@@ -4408,12 +4415,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify Type-5 routes on BGW nodes
-        st.banner('Step 1: Verify Type-5 routes for IPv6 prefixes on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
-            summ += 'Type-5 route verification failed on BGW nodes\n'
+        # Step 1: Verify Type-5 routes on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify Type-5 routes for IPv6 prefixes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['evpn_type5_comprehensive']):
+            summ += 'Type-5 route verification failed on leaf or BGW nodes\n'
             result = False
         
         # Step 2: Verify L3VNI IPv6 traffic across DCI
@@ -4448,12 +4454,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify Type-5 routes on BGW nodes
-        st.banner('Step 1: Verify Type-5 routes for IPv4 prefixes on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
-            summ += 'Type-5 route verification failed on BGW nodes\n'
+        # Step 1: Verify Type-5 routes on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify Type-5 routes for IPv4 prefixes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['evpn_type5_comprehensive']):
+            summ += 'Type-5 route verification failed on leaf or BGW nodes\n'
             result = False
         
         # Step 2: Verify L3VNI IPv4 traffic across DCI
@@ -4795,12 +4800,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup on BGW nodes
-        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive']):
-            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+        # Step 1: Verify base setup on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
             result = False
         
         # Step 2: Send L3VNI IPv4 traffic across DCI
@@ -4844,12 +4848,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup on BGW nodes
-        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive']):
-            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+        # Step 1: Verify base setup on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
             result = False
         
         # Step 2: Send L3VNI IPv6 traffic across DCI
@@ -4949,12 +4952,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup on BGW nodes
-        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive']):
-            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+        # Step 1: Verify base setup on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
             result = False
         
         # Step 2: Send L3VNI IPv4 traffic across DCI (SH hosts)
@@ -5054,12 +5056,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup on BGW nodes
-        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive']):
-            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+        # Step 1: Verify base setup on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
             result = False
         
         # Step 2: Send L3VNI IPv6 traffic across DCI (SH hosts)
@@ -5161,12 +5162,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup including EVPN ES for MH
-        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive', 'evpn_es']):
-            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed on BGW nodes\n'
+        # Step 1: Verify base setup including EVPN ES for MH on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed\n'
             result = False
         
         # Step 2: Send L3VNI IPv4 traffic across DCI (MH hosts)
@@ -5268,12 +5268,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup including EVPN ES for MH
-        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive', 'evpn_es']):
-            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed on BGW nodes\n'
+        # Step 1: Verify base setup including EVPN ES for MH on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed\n'
             result = False
         
         # Step 2: Send L3VNI IPv6 traffic across DCI (MH hosts)
@@ -5380,12 +5379,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup on BGW nodes
-        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive']):
-            summ += 'VRF-VNI or Type-5 route verification failed on BGW nodes\n'
+        # Step 1: Verify base setup on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI mappings and Type-5 routes on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive']):
+            summ += 'VRF-VNI or Type-5 route verification failed\n'
             result = False
         
         # Step 2: Send simultaneous IPv4 and IPv6 traffic across DCI (SH hosts)
@@ -5499,12 +5497,11 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        
-        # Step 1: Verify base setup including EVPN ES for MH
-        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on BGW nodes')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive', 'evpn_es']):
-            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed on BGW nodes\n'
+        # Step 1: Verify base setup including EVPN ES for MH on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify VRF-VNI, Type-5 routes and EVPN ES on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive', 'evpn_es']):
+            summ += 'VRF-VNI, Type-5 or EVPN ES verification failed\n'
             result = False
         
         # Step 2: Send simultaneous IPv4 and IPv6 traffic across DCI (MH hosts)
@@ -5563,7 +5560,6 @@ class TestVxlanDCIBase():
         # Use first DC1 leaf as the target node, first DC1 BGW to verify routes
         leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         dc1_leafs = [n for n in leaf_nodes if 'dc1' in n.lower()]
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
         dc1_bgws = test_cfg['nodes']['dc1_bgw']
         
         if not dc1_leafs:
@@ -5580,9 +5576,10 @@ class TestVxlanDCIBase():
         target_vlan = 'Vlan11'
         target_vlan_id = 11
         
-        # Step 1: Verify base setup and Type-5 routes present
-        st.banner('Step 1: Verify base setup and Type-5 routes present')
-        if not verify_base_setup_bgw(bgw_nodes, checks=['vrf_vni', 'evpn_type5_comprehensive']):
+        # Step 1: Verify base setup and Type-5 routes present on all nodes (leaf + BGW)
+        st.banner('Step 1: Verify base setup and Type-5 routes present on all nodes (leaf + BGW)')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
+                                     checks=['vrf_vni', 'evpn_type5_comprehensive']):
             summ += 'Base setup or Type-5 route verification failed\n'
             result = False
         

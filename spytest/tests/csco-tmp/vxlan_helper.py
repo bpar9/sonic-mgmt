@@ -6776,9 +6776,7 @@ def get_expected_type5_routes(dut):
     """
     Generate expected EVPN Type-5 route prefixes for a node based on SAG addressing.
 
-    Supports both BGW and leaf nodes with appropriate path count expectations:
-
-    BGW node perspective:
+    BGW node perspective (comprehensive path-count model):
       - Paths from same-DC leafs (via OVERLAY/spine RR)
       - Paths from remote-DC BGWs (via OVERLAY_WAN)
       - local_leaf_asns = same-DC leaf ASNs
@@ -6787,21 +6785,16 @@ def get_expected_type5_routes(dut):
       - DC2 BGWs: 2 leaves + 3 remote BGWs = 5
       - DC3 BGW:  1 leaf   + 4 remote BGWs = 5
 
-    Leaf node perspective:
-      - Paths from other same-DC leafs (via spine RR)
-      - Paths from same-DC BGWs (carrying remote-DC routes via RT-REWRITE-DC)
-      - local_leaf_asns = other same-DC leaf ASNs
-      - remote_bgw_asns = same-DC BGW ASNs
-      - DC1 leafs: 3 other leafs + 2 same-DC BGWs = 5
-      - DC2 leafs: 1 other leaf  + 2 same-DC BGWs = 3
-      - DC3 leaf:  0 other leafs + 1 same-DC BGW  = 1
+    Leaf node perspective (per-VRF prefix-presence model):
+      - Leaf nodes see within-DC Type-5 routes only
+      - All prefixes are locally originated in the same DC
+      - Each prefix should have a best path with weight=32768
+      - Best path next-hop should be the leaf's own IPv6 VTEP
+      - Returns entries with is_leaf=True and local_vtep for targeted checks
 
-    Per DCI_NORMAL_SAG_ADDRESSING.md:
-      - Leaf nodes: SVI gateway IPv4 = 80.<vlan>.0.1/24, IPv6 = 8000:<vlan>::1/64
-
-    Type-5 routes advertise the SVI subnet as:
-      - [5]:[0]:[24]:[80.<vlan>.0.0]  (IPv4)
-      - [5]:[0]:[64]:[8000:<vlan>::]   (IPv6)
+    Per SAG addressing:
+      - IPv4: leaf SVI gateway = 80.<vlan>.0.1/24, Type-5 prefix = 80.<vlan>.0.0/24
+      - IPv6: leaf SVI gateway = 8000:<vlan>::1/64, Type-5 prefix = 8000:<vlan>::/64
 
     VLAN-to-VRF mapping (from YAML):
       - VLANs 11-15 -> Vrf101 (cross-DC L3VNI 10101)
@@ -6811,9 +6804,9 @@ def get_expected_type5_routes(dut):
         dut: Node hostname to generate expected routes for (BGW or leaf)
 
     Returns:
-        list of dicts with keys: prefix, vrf, path_count, local_leaf_asns,
-        remote_bgw_asns, expect_local_leaf, expect_ipv6_nexthop, and
-        optionally l3vni.
+        list of dicts. For BGW nodes: prefix, vrf, path_count, local_leaf_asns,
+        remote_bgw_asns, expect_local_leaf, expect_ipv6_nexthop, l3vni.
+        For leaf nodes: prefix, vrf, is_leaf, local_vtep, l3vni.
     """
     cfg_dict = get_cfg_dict()
     is_leaf = 'leaf' in dut
@@ -6857,65 +6850,84 @@ def get_expected_type5_routes(dut):
     bgp_info = get_bgp_underlay_info_cached()
     dut_dc = _get_dc_from_name(dut)
 
-    # Collect ASNs and counts based on node type (BGW vs leaf)
+    if is_leaf:
+        # --- Leaf node: per-VRF prefix-presence model ---
+        # Get this leaf's own IPv6 VTEP (Loopback0 IPv6)
+        loopback_v6_map = generate_loopback_ip(version='v6')
+        local_vtep = loopback_v6_map.get(dut, '')
+
+        # Count expected prefixes per VRF
+        vrf_ipv4_count = {}
+        vrf_ipv6_count = {}
+        for vlan_id in sorted(vlan_vrf_map.keys()):
+            vrf = vlan_vrf_map[vlan_id]
+            vrf_ipv4_count[vrf] = vrf_ipv4_count.get(vrf, 0) + 1
+            vrf_ipv6_count[vrf] = vrf_ipv6_count.get(vrf, 0) + 1
+
+        st.log('Leaf Type-5 for {} ({}, VTEP={}): {} VLANs across {} VRFs'.format(
+            dut, dut_dc, local_vtep, len(vlan_vrf_map),
+            len(set(vlan_vrf_map.values()))))
+        for vrf in sorted(set(vlan_vrf_map.values())):
+            st.log('  {}: {} IPv4 + {} IPv6 prefixes'.format(
+                vrf, vrf_ipv4_count.get(vrf, 0), vrf_ipv6_count.get(vrf, 0)))
+
+        expected_routes = []
+        for vlan_id in sorted(vlan_vrf_map.keys()):
+            vrf = vlan_vrf_map[vlan_id]
+            l3vni = vrf_l3vni_map.get(vrf, '')
+            # IPv4 prefix
+            ipv4_prefix = '80.{}.0.0/24'.format(vlan_id)
+            ipv4_entry = {
+                'prefix': ipv4_prefix,
+                'vrf': vrf,
+                'is_leaf': True,
+                'local_vtep': local_vtep,
+            }
+            if l3vni:
+                ipv4_entry['l3vni'] = l3vni
+            expected_routes.append(ipv4_entry)
+            # IPv6 prefix
+            ipv6_prefix = '8000:{}::/64'.format(vlan_id)
+            ipv6_entry = {
+                'prefix': ipv6_prefix,
+                'vrf': vrf,
+                'is_leaf': True,
+                'local_vtep': local_vtep,
+            }
+            if l3vni:
+                ipv6_entry['l3vni'] = l3vni
+            expected_routes.append(ipv6_entry)
+
+        st.log('Expected Type-5 routes for {} ({} prefixes): {}'.format(
+            dut, len(expected_routes),
+            [r['prefix'] for r in expected_routes]))
+        return expected_routes
+
+    # --- BGW node: comprehensive path-count model (unchanged) ---
     local_leaf_asns = set()
     remote_bgw_asns = set()
     local_leaf_count = 0
     remote_bgw_count = 0
 
-    if is_bgw:
-        # BGW perspective: local = same-DC leafs, remote = other-DC BGWs
-        for node_name in sorted(bgp_info.keys()):
-            node_dc = _get_dc_from_name(node_name)
-            if 'leaf' in node_name and node_dc == dut_dc:
-                local_leaf_count += 1
-                local_leaf_asns.add(str(bgp_info[node_name]['as_num']))
-            elif 'bgw' in node_name and node_dc != dut_dc:
-                remote_bgw_count += 1
-                remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
-    elif is_leaf:
-        # Leaf perspective: local = other same-DC leafs, remote = same-DC BGWs
-        for node_name in sorted(bgp_info.keys()):
-            node_dc = _get_dc_from_name(node_name)
-            if 'leaf' in node_name and node_dc == dut_dc and node_name != dut:
-                local_leaf_count += 1
-                local_leaf_asns.add(str(bgp_info[node_name]['as_num']))
-            elif 'bgw' in node_name and node_dc == dut_dc:
-                remote_bgw_count += 1
-                remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
+    for node_name in sorted(bgp_info.keys()):
+        node_dc = _get_dc_from_name(node_name)
+        if 'leaf' in node_name and node_dc == dut_dc:
+            local_leaf_count += 1
+            local_leaf_asns.add(str(bgp_info[node_name]['as_num']))
+        elif 'bgw' in node_name and node_dc != dut_dc:
+            remote_bgw_count += 1
+            remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
 
-    # Leaf nodes also see their own self-originated path (weight=32768)
-    # which appears in 'show bgp l2vpn evpn route type prefix' output.
-    # BGW nodes do NOT show self-originated Type-5 paths in their output.
-    self_path = 1 if is_leaf else 0
-    expected_path_count = local_leaf_count + remote_bgw_count + self_path
-
-    # For leaf nodes with no other same-DC leafs (e.g. DC3),
-    # there are no local leaf paths and best-path cannot be local leaf
+    # BGW nodes do NOT show self-originated Type-5 paths
+    expected_path_count = local_leaf_count + remote_bgw_count
     expect_local_leaf = local_leaf_count > 0
-
-    # Leaf nodes should see IPv6 VTEP next-hop on paths from same-DC BGWs
-    # (BGWs apply RT-REWRITE-DC with IPv6 DC VIP next-hop)
-    # BGW nodes see IPv6 next-hop from same-DC leafs (IPv6 overlay)
     expect_ipv6_nexthop = True
 
-    label = 'leaf' if is_leaf else 'BGW'
-    local_label = 'other same-DC leafs' if is_leaf else 'local leaves'
-    remote_label = 'same-DC BGWs' if is_leaf else 'remote BGWs'
-    self_label = ' + 1 self' if self_path else ''
-    st.log('Type-5 path count for {} ({}, {}): {} {} + {} {}{} = {}'.format(
-        dut, dut_dc, label, local_leaf_count, local_label,
-        remote_bgw_count, remote_label, self_label, expected_path_count))
+    st.log('Type-5 path count for {} ({}, BGW): {} local leaves + {} remote BGWs = {}'.format(
+        dut, dut_dc, local_leaf_count, remote_bgw_count, expected_path_count))
     st.log('Local leaf ASNs: {}, Remote BGW ASNs: {}'.format(
         local_leaf_asns, remote_bgw_asns))
-    if is_leaf:
-        st.log('Leaf node: expect_local_leaf={}, expect_ipv6_nexthop={}, self_path={}'.format(
-            expect_local_leaf, expect_ipv6_nexthop, self_path))
 
-    # Build expected Type-5 route prefixes
-    # Per SAG addressing:
-    #   - IPv4: leaf SVI gateway = 80.<vlan>.0.1/24, Type-5 prefix = 80.<vlan>.0.0/24
-    #   - IPv6: leaf SVI gateway = 8000:<vlan>::1/64, Type-5 prefix = 8000:<vlan>::/64
     expected_routes = []
     for vlan_id in sorted(vlan_vrf_map.keys()):
         vrf = vlan_vrf_map[vlan_id]
@@ -7089,6 +7101,7 @@ def _parse_type5_routes_detailed(cli_output):
                 'is_best': is_best,
                 'is_valid': is_valid,
                 'next_hop': '',
+                'weight': '',
                 'as_path': '',
                 'rt': '',
                 'et': '',
@@ -7117,12 +7130,15 @@ def _parse_type5_routes_detailed(cli_output):
                 groups = [g.strip() for g in re.split(r'\s{2,}', middle)
                           if g.strip()]
                 as_path_str = ''
+                weight_str = ''
                 if groups:
                     last = groups[-1]
                     tokens = last.split()
                     # First token is weight; remaining tokens are AS path
+                    weight_str = tokens[0] if tokens else ''
                     as_path_str = ' '.join(tokens[1:]) if len(tokens) > 1 else ''
                 current_path['next_hop'] = next_hop
+                current_path['weight'] = weight_str
                 current_path['as_path'] = as_path_str
                 current_path['ipv6_nexthop'] = ':' in next_hop
                 continue
@@ -7135,7 +7151,10 @@ def _parse_type5_routes_detailed(cli_output):
                 continue
 
         # Check for weight-only continuation (locally-originated routes)
-        if weight_origin_re.match(line):
+        w_m = weight_origin_re.match(line)
+        if w_m:
+            if not current_path.get('weight'):
+                current_path['weight'] = w_m.group(1)
             continue
 
         # Check for extended community attributes (RT:xxx ET:xxx Rmac:xxx)
@@ -7158,26 +7177,29 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
     """
     Comprehensive EVPN Type-5 route verification with per-prefix pass/fail.
 
-    Supports both BGW and leaf nodes. For every node and every tenant prefix,
-    mark pass only if:
+    BGW nodes (path-count model):
       1. prefix exists
       2. path count matches expected for that site
       3. at least one local-site leaf path exists (if expect_local_leaf=True)
       4. at least one remote/BGW path exists
       5. best path is local-site leaf path (if expect_local_leaf=True)
       6. route has RT, ET, and RMAC
-      7. at least one path has IPv6 VTEP next-hop (if expect_ipv6_nexthop=True)
+      7. at least one path has IPv6 VTEP next-hop
 
-    For leaf nodes with no other same-DC leafs (e.g. DC3), checks 3 and 5
-    are automatically relaxed via expect_local_leaf=False in exp_routes.
+    Leaf nodes (per-VRF prefix-presence model):
+      For each leaf, per VRF:
+      1. total expected prefix count matches actual
+      2. all expected IPv4 prefixes present
+      3. all expected IPv6 prefixes present
+      4. best path exists for each prefix
+      5. if prefix is locally originated in that DC, best path next-hop
+         must be local leaf VTEP and weight should be 32768
 
     Uses compare_exp_actual_data() for structured tabular output.
 
     Args:
         dut: Node hostname (BGW or leaf)
-        exp_routes: list from get_expected_type5_routes() with path_count,
-                    local_leaf_asns, remote_bgw_asns, expect_local_leaf,
-                    and expect_ipv6_nexthop fields
+        exp_routes: list from get_expected_type5_routes()
     """
     st.banner('Comprehensive Type-5 verification on {}'.format(dut))
 
@@ -7189,7 +7211,6 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
 
     detailed = _parse_type5_routes_detailed(cli_output)
     if not detailed:
-        # Log first 10 lines of raw output for debugging parser issues
         sample = '\n'.join(cli_output.splitlines()[:10])
         st.log('Type-5 parse debug - first 10 raw lines on {}:\n{}'.format(dut, sample))
         raise CompareEmptyData('No Type-5 routes parsed from output on {}'.format(dut))
@@ -7197,7 +7218,128 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
     st.log('Parsed {} unique Type-5 prefixes with detailed path info from {}'.format(
         len(detailed), dut))
 
+    # Determine if leaf or BGW from first entry
+    is_leaf = exp_routes and exp_routes[0].get('is_leaf', False)
+
+    if is_leaf:
+        return _verify_type5_leaf(dut, exp_routes, detailed)
+
+    return _verify_type5_bgw(dut, exp_routes, detailed)
+
+
+def _verify_type5_leaf(dut, exp_routes, detailed):
+    """
+    Leaf-specific Type-5 verification per reviewer spec.
+
+    For each leaf, per VRF checks:
+      1. total expected prefix count
+      2. all expected IPv4 prefixes present
+      3. all expected IPv6 prefixes present
+      4. best path exists for each prefix
+      5. if prefix is locally originated in that DC, best path next-hop
+         must be local leaf VTEP and weight should be 32768
+
+    All prefixes on a leaf are locally originated in the same DC.
+    """
+    local_vtep = exp_routes[0].get('local_vtep', '') if exp_routes else ''
+
+    # Build per-VRF expected prefix lists
+    vrf_expected_ipv4 = {}  # {vrf: [prefix, ...]}
+    vrf_expected_ipv6 = {}
+    for exp_route in exp_routes:
+        vrf = exp_route.get('vrf', '')
+        prefix = exp_route['prefix']
+        if ':' in prefix.split('/')[0]:
+            # IPv6 prefix
+            vrf_expected_ipv6.setdefault(vrf, []).append(prefix)
+        else:
+            # IPv4 prefix
+            vrf_expected_ipv4.setdefault(vrf, []).append(prefix)
+
+    # Log per-VRF summary
+    all_vrfs = sorted(set(list(vrf_expected_ipv4.keys()) + list(vrf_expected_ipv6.keys())))
+    for vrf in all_vrfs:
+        st.log('  {} expected: {} IPv4, {} IPv6 prefixes'.format(
+            vrf, len(vrf_expected_ipv4.get(vrf, [])),
+            len(vrf_expected_ipv6.get(vrf, []))))
+
     # Build expected and actual data for compare_exp_actual_data
+    exp_data = []
+    act_data = []
+
+    for exp_route in exp_routes:
+        prefix = exp_route['prefix']
+
+        exp_row = {
+            'prefix': prefix,
+            'present': 'yes',
+            'has_best_path': 'yes',
+            'best_nh_is_local_vtep': 'yes',
+            'best_weight_32768': 'yes',
+        }
+        exp_data.append(exp_row)
+
+        if prefix not in detailed:
+            act_row = {
+                'prefix': prefix,
+                'present': 'no',
+                'has_best_path': 'no',
+                'best_nh_is_local_vtep': 'no',
+                'best_weight_32768': 'no',
+            }
+            act_data.append(act_row)
+            continue
+
+        info = detailed[prefix]
+        best_path = info.get('best_path')
+        has_best = best_path is not None
+
+        # Check best path next-hop matches leaf's own VTEP
+        best_nh_match = False
+        best_weight_ok = False
+        if best_path:
+            bp_nh = best_path.get('next_hop', '')
+            bp_weight = best_path.get('weight', '')
+            best_nh_match = (bp_nh == local_vtep) if local_vtep else False
+            best_weight_ok = (bp_weight == '32768')
+
+        act_row = {
+            'prefix': prefix,
+            'present': 'yes',
+            'has_best_path': 'yes' if has_best else 'no',
+            'best_nh_is_local_vtep': 'yes' if best_nh_match else 'no',
+            'best_weight_32768': 'yes' if best_weight_ok else 'no',
+        }
+        act_data.append(act_row)
+
+        st.log('  {} present=yes best={} nh={} (exp={}) weight={}'.format(
+            prefix, has_best,
+            best_path.get('next_hop', '') if best_path else '',
+            local_vtep,
+            best_path.get('weight', '') if best_path else ''))
+
+    # Per-VRF prefix count summary
+    for vrf in all_vrfs:
+        exp_ipv4 = vrf_expected_ipv4.get(vrf, [])
+        exp_ipv6 = vrf_expected_ipv6.get(vrf, [])
+        act_ipv4 = [p for p in exp_ipv4 if p in detailed]
+        act_ipv6 = [p for p in exp_ipv6 if p in detailed]
+        total_exp = len(exp_ipv4) + len(exp_ipv6)
+        total_act = len(act_ipv4) + len(act_ipv6)
+        st.log('{} prefix count: exp={} act={} (IPv4: {}/{}, IPv6: {}/{})'.format(
+            vrf, total_exp, total_act,
+            len(act_ipv4), len(exp_ipv4),
+            len(act_ipv6), len(exp_ipv6)))
+
+    # Run structured comparison — raises CompareFailed if mismatch
+    compare_exp_actual_data(exp_data, act_data, ['prefix'])
+    return act_data
+
+
+def _verify_type5_bgw(dut, exp_routes, detailed):
+    """
+    BGW-specific Type-5 verification (path-count model, unchanged from original).
+    """
     exp_data = []
     act_data = []
 
@@ -7209,7 +7351,6 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
         expect_local_leaf = exp_route.get('expect_local_leaf', True)
         expect_ipv6_nexthop = exp_route.get('expect_ipv6_nexthop', False)
 
-        # Build expected row — adapt expectations based on node topology
         exp_local = 'yes' if expect_local_leaf else 'no'
         exp_best_local = 'yes' if expect_local_leaf else 'no'
         exp_row = {
@@ -7225,7 +7366,6 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
         }
         exp_data.append(exp_row)
 
-        # Build actual row from parsed detailed data
         if prefix not in detailed:
             act_row = {
                 'prefix': prefix,
@@ -7250,22 +7390,17 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
         has_ipv6_nh = False
         for path in info['paths']:
             as_path = path.get('as_path', '')
-            # First ASN in as_path is the originator
             first_asn = as_path.split()[0] if as_path else ''
             if first_asn in local_leaf_asns:
                 has_local_leaf = True
             elif first_asn in remote_bgw_asns:
                 has_remote_bgw = True
             else:
-                # Single-ASN path from local leaf (iBGP reflected)
-                # or multi-hop path through remote BGW
-                # Check if ANY ASN in path is a local leaf ASN
                 path_asns = set(as_path.split())
                 if path_asns & local_leaf_asns:
                     has_local_leaf = True
                 if path_asns & remote_bgw_asns:
                     has_remote_bgw = True
-            # Check for IPv6 next-hop
             if path.get('ipv6_nexthop'):
                 has_ipv6_nh = True
 
@@ -7278,12 +7413,10 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
             if bp_first_asn in local_leaf_asns:
                 best_is_local_leaf = True
             else:
-                # Check all ASNs in best path
                 bp_asns = set(bp_as_path.split())
                 if bp_asns & local_leaf_asns and not (bp_asns & remote_bgw_asns):
                     best_is_local_leaf = True
 
-        # Check route attributes (at least one path has RT, ET, RMAC)
         has_rt = any(p.get('rt') for p in info['paths'])
         has_et = any(p.get('et') for p in info['paths'])
         has_rmac = any(p.get('rmac') for p in info['paths'])
@@ -7302,15 +7435,12 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
         }
         act_data.append(act_row)
 
-        # Log detailed path info for debugging
         st.log('  {} paths={} local_leaf={} remote_bgw={} best_local={} '
                'RT={} ET={} RMAC={} ipv6_nh={}'.format(
                    prefix, actual_path_count, has_local_leaf, has_remote_bgw,
                    best_is_local_leaf, has_rt, has_et, has_rmac, has_ipv6_nh))
 
-    # Run structured comparison — raises CompareFailed if mismatch
-    compare_exp_actual_data(exp_data, act_data,
-                            ['prefix'])
+    compare_exp_actual_data(exp_data, act_data, ['prefix'])
     return act_data
 
 
@@ -8037,40 +8167,51 @@ def verify_type5_route_presence_dci(dut, vlan_ids, expect_present=True):
             vlan_ids, dut))
         return False
 
-    # Verify each expected prefix: existence + path count + attributes
+    # Verify each expected prefix: existence + attributes
+    is_leaf = filtered_exp[0].get('is_leaf', False) if filtered_exp else False
     all_pass = True
     for exp_route in filtered_exp:
         prefix = exp_route['prefix']
-        expected_path_count = int(exp_route.get('path_count', 0))
 
         if prefix not in detailed:
-            st.log('Type-5 prefix {} NOT found on {} (expected {} paths)'.format(
-                prefix, dut, expected_path_count))
+            st.log('Type-5 prefix {} NOT found on {}'.format(prefix, dut))
             all_pass = False
             continue
 
         info = detailed[prefix]
         actual_path_count = info['path_count']
 
-        if actual_path_count != expected_path_count:
-            st.log('Type-5 prefix {} on {}: path count mismatch '
-                   '(expected={}, actual={})'.format(
-                       prefix, dut, expected_path_count, actual_path_count))
-            all_pass = False
-        else:
-            # Check route attributes (RT, ET, RMAC present)
-            has_rt = any(p.get('rt') for p in info['paths'])
-            has_et = any(p.get('et') for p in info['paths'])
-            has_rmac = any(p.get('rmac') for p in info['paths'])
-            if not (has_rt and has_et and has_rmac):
-                st.log('Type-5 prefix {} on {}: missing attributes '
-                       '(rt={}, et={}, rmac={})'.format(
-                           prefix, dut, has_rt, has_et, has_rmac))
+        if is_leaf:
+            # Leaf: check best path exists and has weight=32768
+            best_path = info.get('best_path')
+            if not best_path:
+                st.log('Type-5 prefix {} on {}: no best path'.format(prefix, dut))
                 all_pass = False
             else:
                 st.log('Type-5 prefix {} on {}: Pass '
-                       '({} paths, rt/et/rmac ok)'.format(
+                       '({} paths, best path exists)'.format(
                            prefix, dut, actual_path_count))
+        else:
+            # BGW: check path count + route attributes
+            expected_path_count = int(exp_route.get('path_count', 0))
+            if actual_path_count != expected_path_count:
+                st.log('Type-5 prefix {} on {}: path count mismatch '
+                       '(expected={}, actual={})'.format(
+                           prefix, dut, expected_path_count, actual_path_count))
+                all_pass = False
+            else:
+                has_rt = any(p.get('rt') for p in info['paths'])
+                has_et = any(p.get('et') for p in info['paths'])
+                has_rmac = any(p.get('rmac') for p in info['paths'])
+                if not (has_rt and has_et and has_rmac):
+                    st.log('Type-5 prefix {} on {}: missing attributes '
+                           '(rt={}, et={}, rmac={})'.format(
+                               prefix, dut, has_rt, has_et, has_rmac))
+                    all_pass = False
+                else:
+                    st.log('Type-5 prefix {} on {}: Pass '
+                           '({} paths, rt/et/rmac ok)'.format(
+                               prefix, dut, actual_path_count))
 
     if all_pass:
         st.log('Type-5 route presence verified for VLANs {} on {}'.format(

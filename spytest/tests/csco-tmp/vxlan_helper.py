@@ -574,15 +574,26 @@ def delete_vxlan_config(**kwargs):
     output += 'sudo config vxlan del {} \n'.format(vxlan_name)
     return output 
 
-def generate_bgp_underlay_config(leaf_data,int_list):
+def generate_bgp_underlay_config(leaf_data, int_list, node_name=''):
     '''
     Author: Jigar Sanghrajka (jsanghra@cisco.com)
-    
+
+    Generate BGP underlay config for TRANSIT peer-group.
+
+    Per reference config (dci_l3vni_config.txt):
+    - Leaf nodes: 'neighbor TRANSIT activate' only under IPv6 unicast AF
+    - Spine/BGW nodes: 'neighbor TRANSIT activate' under both IPv4 and IPv6 unicast AF
+
+    Args:
+        leaf_data: Dict with router_id, as_num
+        int_list: List of underlay interface names
+        node_name: Node name string used to determine if spine (activates TRANSIT in IPv4 AF)
     '''
     output = ''
     # BGP underlay configuration
     router_id = leaf_data['router_id']
     as_num = leaf_data['as_num']
+    is_spine = 'spine' in node_name
 
     output += 'router bgp {}\n'.format(as_num)
     output += 'bgp router-id {}\n'.format(router_id)
@@ -596,7 +607,8 @@ def generate_bgp_underlay_config(leaf_data,int_list):
         output += 'neighbor {} interface peer-group TRANSIT\n'.format(intf)
     output += 'address-family ipv4 unicast\n'
     output += 'redistribute connected\n'
-    output += 'neighbor TRANSIT activate\n'
+    if is_spine:
+        output += 'neighbor TRANSIT activate\n'
     output += 'exit-address-family\n'
     output += 'address-family ipv6 unicast\n'
     output += 'redistribute connected\n'
@@ -3801,7 +3813,7 @@ def config_feature(nodes, feature, vars=None):
                 config_out = generate_bgp_l3vni_config(config,bgp_info[node])
             elif feature == 'bgp_underlay':
                 int_config_dict = get_config_interfaces_list(vars)
-                config_out = generate_bgp_underlay_config(bgp_info[node],int_config_dict[node]['underlay'])
+                config_out = generate_bgp_underlay_config(bgp_info[node],int_config_dict[node]['underlay'], node_name=node)
             elif feature == 'bgp_overlay':
                 config_out = generate_bgp_overlay_config(overlay_info[node])
             elif feature == 'bgp_bfd_underlay':
@@ -3956,7 +3968,7 @@ def config_feature_dci(nodes, feature, **kwargs):
             config_out += generate_vxlan_config(loopback_ipv4_wan_vip[node], dci_enabled=True, vxlan_name='vxlan-wan', nvo_name='NVO-WAN')
         elif feature == 'bgp_underlay_dci':
             int_config_dict = get_config_interfaces_list(vars)
-            config_out = generate_bgp_underlay_config(bgp_info[node], int_config_dict[node]['underlay'])
+            config_out = generate_bgp_underlay_config(bgp_info[node], int_config_dict[node]['underlay'], node_name=node)
         elif feature == 'bgp_overlay_dci':
             config_out = generate_bgp_overlay_config(overlay_info[node], dci_enabled=True, node_name=node)
         elif feature == 'bgp_l3vni_config_dci':

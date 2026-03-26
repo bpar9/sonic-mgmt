@@ -3439,8 +3439,9 @@ def generate_dci_vip_maps():
         dc = _get_dc_from_name(node)
         dc_num = int(dc.replace('dc', '')) if dc else 1
         loopback_ipv6_dc_vip[node] = "{}:1::1".format(dc_vip_base + (dc_num - 1) * dc_vip_step)
+        wan_octet = wan_vip_base + dc_num - 1
         loopback_ipv4_wan_vip[node] = "{}.{}.{}.{}".format(
-            wan_vip_base + dc_num, wan_vip_base + dc_num, wan_vip_base + dc_num, wan_vip_base + dc_num)
+            wan_octet, wan_octet, wan_octet, wan_octet)
         loopback_ipv4_wan_overlay[node] = "{}.{}.{}.{}".format(
             overlay_base + i * 10, overlay_base + i * 10, overlay_base + i * 10, overlay_base + i * 10)
         if dc and dc != 'dc1':

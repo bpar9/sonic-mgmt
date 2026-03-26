@@ -828,7 +828,7 @@ global:
     dci_wan_underlay_base: "51.51"  # Base for DCI WAN underlay IPs (e.g. 51.51.51.1/24)
     dci_dc_vip_base: 4000           # DC VIP IPv6 first hextet (DC1=4000:1::1, DC2=6000:1::1, DC3=8000:1::1)
     dci_dc_vip_step: 2000           # Increment per DC (4000 + (dc_num-1)*step)
-    dci_wan_vip_base: 101           # WAN VIP base octet (DC1=101.101.101.101, DC2=102.102.102.102)
+    dci_wan_vip_base: 101           # WAN VIP base octet (DC1=101.x, DC2=102.x, DC3=103.x via base+dc_num-1)
     dci_overlay_base: 10            # Loopback1 overlay base (first BGW=10.10.10.10, second=20.20.20.20)
     evpn_mh:
         redirect_off: true

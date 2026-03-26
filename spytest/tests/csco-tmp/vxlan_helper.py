@@ -3418,7 +3418,8 @@ def generate_dci_vip_maps():
     """
     vars = st.get_testbed_vars()
     config_dict = get_cfg_dict()
-    bgw_nodes = sorted([n for n in config_dict['nodes']['all'] if 'bgw' in n])
+    bgw_nodes = sorted([n for n in config_dict['nodes']['all'] if 'bgw' in n],
+                       key=get_node_sort_key)
     if not bgw_nodes:
         return ({}, {}, {}, {})
 

@@ -580,24 +580,23 @@ def generate_bgp_underlay_config(leaf_data, int_list, node_name='', dci_enabled=
 
     Generate BGP underlay config for TRANSIT peer-group.
 
-    'neighbor TRANSIT activate' is only added when dci_enabled=True:
-    - Leaf nodes: activate TRANSIT only under IPv6 unicast AF
-    - Spine/BGW nodes: activate TRANSIT under both IPv4 and IPv6 unicast AF
+    When dci_enabled=False (default/base config):
+    - 'neighbor TRANSIT activate' under both IPv4 and IPv6 unicast AF (original behavior)
 
-    When dci_enabled=False (default/base config): no 'neighbor TRANSIT activate'
-    under any address-family for any node type.
+    When dci_enabled=True (DCI config):
+    - No 'neighbor TRANSIT activate' under IPv4 unicast AF for any node
+    - 'neighbor TRANSIT activate' only under IPv6 unicast AF
 
     Args:
         leaf_data: Dict with router_id, as_num
         int_list: List of underlay interface names
-        node_name: Node name string used to determine if spine (activates TRANSIT in IPv4 AF)
-        dci_enabled: If True, add 'neighbor TRANSIT activate' per node type
+        node_name: Node name string (unused currently, retained for future use)
+        dci_enabled: If True, skip TRANSIT activate under IPv4 AF
     '''
     output = ''
     # BGP underlay configuration
     router_id = leaf_data['router_id']
     as_num = leaf_data['as_num']
-    is_spine = 'spine' in node_name
 
     output += 'router bgp {}\n'.format(as_num)
     output += 'bgp router-id {}\n'.format(router_id)
@@ -611,13 +610,12 @@ def generate_bgp_underlay_config(leaf_data, int_list, node_name='', dci_enabled=
         output += 'neighbor {} interface peer-group TRANSIT\n'.format(intf)
     output += 'address-family ipv4 unicast\n'
     output += 'redistribute connected\n'
-    if dci_enabled and is_spine:
+    if not dci_enabled:
         output += 'neighbor TRANSIT activate\n'
     output += 'exit-address-family\n'
     output += 'address-family ipv6 unicast\n'
     output += 'redistribute connected\n'
-    if dci_enabled:
-        output += 'neighbor TRANSIT activate\n'
+    output += 'neighbor TRANSIT activate\n'
     output += 'exit-address-family\n'
     output += 'end\n'
     output += 'exit\n'

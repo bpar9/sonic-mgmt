@@ -7343,12 +7343,17 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
     Args:
         dut: Node hostname (BGW or leaf)
         exp_routes: list from get_expected_type5_routes()
+        cli_output (str, optional): Pre-fetched 'show bgp l2vpn evpn route type prefix'
+            output. If provided, skips CLI fetch to avoid duplicate dumps when multiple
+            checks need the same output.
     """
     st.banner('Comprehensive Type-5 verification on {}'.format(dut))
 
-    # Get detailed actual routes (all paths per prefix)
-    cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
-                         type='vtysh', skip_tmpl=True)
+    # Use pre-fetched output if provided, otherwise fetch from device
+    cli_output = kwargs.get('cli_output', None)
+    if cli_output is None:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
     if not cli_output or not cli_output.strip():
         raise CompareEmptyData('No Type-5 route output on {}'.format(dut))
 
@@ -7778,7 +7783,7 @@ def verify_bgp_evpn_multihop_sessions_dci(dut):
     return result
 
 
-def verify_rt_rewrite_dci(dut):
+def verify_rt_rewrite_dci(dut, **kwargs):
     """
     Verify Route-Target translation across domains on a BGW node for L3VNI DCI.
 
@@ -7799,6 +7804,9 @@ def verify_rt_rewrite_dci(dut):
 
     Args:
         dut: BGW node hostname to verify
+        cli_output (str, optional): Pre-fetched 'show bgp l2vpn evpn route type prefix'
+            output. If provided, skips CLI fetch to avoid duplicate dumps when multiple
+            checks need the same output.
 
     Returns:
         dict: {
@@ -7881,13 +7889,16 @@ def verify_rt_rewrite_dci(dut):
     st.log('Expected local leaf RTs on {}: {}'.format(dut, expected_local_leaf_rts))
 
     # Step 3: Parse actual RTs from Type-5 route output
-    try:
-        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
-                             type='vtysh', skip_tmpl=True)
-    except Exception as err:
-        result['details'] = 'Failed to get Type-5 routes on {}: {}'.format(dut, err)
-        st.log(result['details'])
-        return result
+    # Use pre-fetched output if provided, otherwise fetch from device
+    cli_output = kwargs.get('cli_output', None)
+    if cli_output is None:
+        try:
+            cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                                 type='vtysh', skip_tmpl=True)
+        except Exception as err:
+            result['details'] = 'Failed to get Type-5 routes on {}: {}'.format(dut, err)
+            st.log(result['details'])
+            return result
 
     if not cli_output or not cli_output.strip():
         result['details'] = 'No Type-5 route output on {} (route-maps present but no routes)'.format(dut)

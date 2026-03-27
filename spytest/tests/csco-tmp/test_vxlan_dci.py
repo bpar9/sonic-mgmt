@@ -2522,6 +2522,25 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                     results['overall'] = False
         
         # ============================================================
+        # Fetch Type-5 route output ONCE for reuse by rt_rewrite and
+        # evpn_type5_comprehensive checks (avoid duplicate CLI dumps)
+        # ============================================================
+        type5_cli_output = None
+        need_type5 = ('rt_rewrite' in checks_to_run and 'bgw' in dut) or \
+                      'evpn_type5_comprehensive' in checks_to_run
+        if need_type5:
+            try:
+                type5_cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                                           type='vtysh', skip_tmpl=True)
+                if type5_cli_output and type5_cli_output.strip():
+                    st.log(f'Type-5 route output fetched once on {dut} '
+                           f'({len(type5_cli_output.splitlines())} lines)')
+                else:
+                    st.log(f'Type-5 route output on {dut}: empty')
+            except Exception as err:
+                st.log(f'Failed to fetch Type-5 route output on {dut}: {err}')
+
+        # ============================================================
         # RT-REWRITE Route-Map Verification (BGW nodes only)
         # ============================================================
         if 'rt_rewrite' in checks_to_run:
@@ -2531,7 +2550,8 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                 results[dut]['rt_rewrite'] = True
             else:
                 try:
-                    rt_result = vxlan_obj.verify_rt_rewrite_dci(dut)
+                    rt_result = vxlan_obj.verify_rt_rewrite_dci(
+                        dut, cli_output=type5_cli_output)
                     if rt_result['result']:
                         st.log(f'RT-REWRITE on {dut}: Pass - {rt_result["details"]}')
                         results[dut]['rt_rewrite'] = True
@@ -2610,7 +2630,8 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
             try:
                 exp_routes = vxlan_obj.get_expected_type5_routes(dut)
                 vxlan_obj.verify_evpn_type5_comprehensive(
-                    dut, exp_routes, vl_retries=retry)
+                    dut, exp_routes, vl_retries=retry,
+                    cli_output=type5_cli_output)
                 node_type = 'BGW' if 'bgw' in dut else 'leaf'
                 st.log(f'Type-5 comprehensive on {dut} ({node_type}): Pass '
                        f'({len(exp_routes)} prefixes, path-count/best-path/attrs verified)')

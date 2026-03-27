@@ -1275,23 +1275,43 @@ def tgen_preconfig(**kwargs):
                 if pc_cross_handles:
                     stream_handles['l2_v4'].extend(pc_cross_handles if isinstance(pc_cross_handles, list) else [pc_cross_handles])
     
+    # Split L3 within-DC endpoints into SH (orphan) and MH (PortChannel) sources
+    l3_within_sh = {k: v for k, v in l3_within_dc_endpoints.items()
+                    if not v.get('src_int', '').startswith('PortChannel')}
+    l3_within_mh = {k: v for k, v in l3_within_dc_endpoints.items()
+                    if v.get('src_int', '').startswith('PortChannel')}
+
     st.banner(f"Creating L3 IPv4 traffic items: {len(l3_traffic_endpoints)} endpoints "
-              f"({len(l3_within_dc_endpoints)} within-DC + {len(l3_cross_dc_endpoints)} cross-DC)")
+              f"({len(l3_within_dc_endpoints)} within-DC [{len(l3_within_sh)} SH + {len(l3_within_mh)} MH] "
+              f"+ {len(l3_cross_dc_endpoints)} cross-DC)")
 
     stream_handles['l3_v4'] = []
 
-    # L3 IPv4 within-DC streams
-    if l3_within_dc_endpoints:
-        l3_within_combos = set((ep.get('src_vrf'), ep.get('src_vlan')) for ep in l3_within_dc_endpoints.values())
-        st.log(f"  L3 within-DC: {len(l3_within_dc_endpoints)} endpoints, {len(l3_within_combos)} VRF-VLAN combos")
-        l3_within_v4 = vxlan_obj.create_traffic_item(device_handles=v4_device_handles,
-                                                     endpoints=l3_within_dc_endpoints,
-                                                     topo_handles=topo_handles,
-                                                     multi_dst='vrf', name_prfx='L3-WITHIN',
-                                                     rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
-                                                     pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
-        if l3_within_v4:
-            stream_handles['l3_v4'].extend(l3_within_v4 if isinstance(l3_within_v4, list) else [l3_within_v4])
+    # L3 IPv4 within-DC SH (orphan) streams
+    if l3_within_sh:
+        l3_within_sh_combos = set((ep.get('src_vrf'), ep.get('src_vlan')) for ep in l3_within_sh.values())
+        st.log(f"  L3 within-DC SH: {len(l3_within_sh)} endpoints, {len(l3_within_sh_combos)} VRF-VLAN combos")
+        l3_within_sh_v4 = vxlan_obj.create_traffic_item(device_handles=v4_device_handles,
+                                                        endpoints=l3_within_sh,
+                                                        topo_handles=topo_handles,
+                                                        multi_dst='vrf', name_prfx='L3-SH-WITHIN',
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_within_sh_v4:
+            stream_handles['l3_v4'].extend(l3_within_sh_v4 if isinstance(l3_within_sh_v4, list) else [l3_within_sh_v4])
+
+    # L3 IPv4 within-DC MH (PortChannel) streams
+    if l3_within_mh:
+        l3_within_mh_combos = set((ep.get('src_vrf'), ep.get('src_vlan')) for ep in l3_within_mh.values())
+        st.log(f"  L3 within-DC MH: {len(l3_within_mh)} endpoints, {len(l3_within_mh_combos)} VRF-VLAN combos")
+        l3_within_mh_v4 = vxlan_obj.create_traffic_item(device_handles=v4_device_handles,
+                                                        endpoints=l3_within_mh,
+                                                        topo_handles=topo_handles,
+                                                        multi_dst='vrf', name_prfx='L3-MH-WITHIN',
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_within_mh_v4:
+            stream_handles['l3_v4'].extend(l3_within_mh_v4 if isinstance(l3_within_mh_v4, list) else [l3_within_mh_v4])
 
     # L3 IPv4 cross-DC streams (DCI-specific 23 flows)
     if l3_cross_dc_endpoints:
@@ -1371,20 +1391,32 @@ def tgen_preconfig(**kwargs):
                     stream_handles['l2_v6'].extend(pc_cross_handles_v6 if isinstance(pc_cross_handles_v6, list) else [pc_cross_handles_v6])
     
     st.banner(f"Creating L3 IPv6 traffic items: {len(l3_traffic_endpoints)} endpoints "
-              f"({len(l3_within_dc_endpoints)} within-DC + {len(l3_cross_dc_endpoints)} cross-DC)")
+              f"({len(l3_within_dc_endpoints)} within-DC [{len(l3_within_sh)} SH + {len(l3_within_mh)} MH] "
+              f"+ {len(l3_cross_dc_endpoints)} cross-DC)")
 
     stream_handles['l3_v6'] = []
 
-    # L3 IPv6 within-DC streams
-    if l3_within_dc_endpoints:
-        l3_within_v6 = vxlan_obj.create_traffic_item(device_handles=v6_device_handles,
-                                                     endpoints=l3_within_dc_endpoints,
-                                                     topo_handles=topo_handles,
-                                                     version="ipv6", multi_dst='vrf', name_prfx='L3-WITHIN',
-                                                     rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
-                                                     pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
-        if l3_within_v6:
-            stream_handles['l3_v6'].extend(l3_within_v6 if isinstance(l3_within_v6, list) else [l3_within_v6])
+    # L3 IPv6 within-DC SH (orphan) streams
+    if l3_within_sh:
+        l3_within_sh_v6 = vxlan_obj.create_traffic_item(device_handles=v6_device_handles,
+                                                        endpoints=l3_within_sh,
+                                                        topo_handles=topo_handles,
+                                                        version="ipv6", multi_dst='vrf', name_prfx='L3-SH-WITHIN',
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_within_sh_v6:
+            stream_handles['l3_v6'].extend(l3_within_sh_v6 if isinstance(l3_within_sh_v6, list) else [l3_within_sh_v6])
+
+    # L3 IPv6 within-DC MH (PortChannel) streams
+    if l3_within_mh:
+        l3_within_mh_v6 = vxlan_obj.create_traffic_item(device_handles=v6_device_handles,
+                                                        endpoints=l3_within_mh,
+                                                        topo_handles=topo_handles,
+                                                        version="ipv6", multi_dst='vrf', name_prfx='L3-MH-WITHIN',
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_within_mh_v6:
+            stream_handles['l3_v6'].extend(l3_within_mh_v6 if isinstance(l3_within_mh_v6, list) else [l3_within_mh_v6])
 
     # L3 IPv6 cross-DC streams (DCI-specific 23 flows)
     if l3_cross_dc_endpoints:

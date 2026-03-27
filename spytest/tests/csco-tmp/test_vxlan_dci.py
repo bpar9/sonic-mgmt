@@ -1406,7 +1406,91 @@ def tgen_preconfig(**kwargs):
                                                                     pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
                 if pc_cross_handles_v6:
                     stream_handles['l2_v6'].extend(pc_cross_handles_v6 if isinstance(pc_cross_handles_v6, list) else [pc_cross_handles_v6])
-    
+
+    # ============================================================
+    # Continuous cross-DC L2 (IPv4/IPv6) for DCI link flap/shut tests
+    # Same pattern as MH DF/NDF: create_traffic_item(..., transmit_mode='continuous')
+    # Used by TestVxlanInterfaceTriggers.test_dci_link_trigger via
+    # check_traffic(action='start' / 'check' / 'stop')
+    # ============================================================
+    stream_handles['dci_flap_continuous'] = {}
+    _dci_fc_key = 1
+    _fc_rate = test_cfg['global'].get('bum', {}).get('rate_percent', 0.8)
+    _fc_ppb = test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000)
+
+    def _dci_merge_flap_continuous(dest, created, start_key):
+        k = start_key
+        if not created:
+            return k
+        for _idx, sinfo in created.items():
+            if isinstance(sinfo, dict) and sinfo.get('stream_id'):
+                dest[k] = sinfo
+                k += 1
+        return k
+
+    if l2_orphan_cross or l2_pc_cross:
+        st.banner("DCI: continuous L2 cross-DC streams for link flap tests (parallel to burst L2-CROSS)")
+    if l2_orphan_cross:
+        _h_fc = vxlan_obj.create_traffic_item(
+            device_handles=v4_device_handles,
+            endpoints=l2_orphan_cross,
+            topo_handles=topo_handles,
+            multi_dst='vlan',
+            name_prfx='DCI-FC-L2-SH-X',
+            transmit_mode='continuous',
+            rate_percent=_fc_rate,
+            pkts_per_burst=_fc_ppb,
+        )
+        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
+    if l2_pc_cross:
+        for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
+            _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
+            if not _eps_fc:
+                continue
+            _h_fc = vxlan_obj.create_traffic_item(
+                device_handles=v4_device_handles,
+                endpoints=_eps_fc,
+                topo_handles=topo_handles,
+                multi_dst='vlan',
+                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
+                transmit_mode='continuous',
+                rate_percent=_fc_rate,
+                pkts_per_burst=_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
+    if l2_orphan_cross:
+        _h_fc = vxlan_obj.create_traffic_item(
+            device_handles=v6_device_handles,
+            endpoints=l2_orphan_cross,
+            topo_handles=topo_handles,
+            version='ipv6',
+            multi_dst='vlan',
+            name_prfx='DCI-FC-L2-SH-X',
+            transmit_mode='continuous',
+            rate_percent=_fc_rate,
+            pkts_per_burst=_fc_ppb,
+        )
+        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
+    if l2_pc_cross:
+        for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
+            _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
+            if not _eps_fc:
+                continue
+            _h_fc = vxlan_obj.create_traffic_item(
+                device_handles=v6_device_handles,
+                endpoints=_eps_fc,
+                topo_handles=topo_handles,
+                version='ipv6',
+                multi_dst='vlan',
+                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
+                transmit_mode='continuous',
+                rate_percent=_fc_rate,
+                pkts_per_burst=_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
+    if stream_handles['dci_flap_continuous']:
+        st.log("DCI flap continuous: {} stream(s) created".format(len(stream_handles['dci_flap_continuous'])))
+
     st.banner(f"Creating L3 IPv6 traffic items: {len(l3_traffic_endpoints)} endpoints "
               f"({len(l3_within_dc_endpoints)} within-DC [{len(l3_within_sh)} SH + {len(l3_within_mh)} MH] "
               f"+ {len(l3_cross_dc_endpoints)} cross-DC)")
@@ -1733,7 +1817,7 @@ def tgen_preconfig(**kwargs):
         return ids
     
     total_streams = 0
-    for traffic_type in ['l2_v4', 'l3_v4', 'l2_v6', 'l3_v6', 'bum_SH', 'bum_MH']:
+    for traffic_type in ['l2_v4', 'l3_v4', 'l2_v6', 'l3_v6', 'bum_SH', 'bum_MH', 'dci_flap_continuous']:
         if traffic_type in stream_handles:
             # Handle both dict (L3 traffic) and list (L2 traffic with SH+MH) formats
             if isinstance(stream_handles[traffic_type], dict):
@@ -3957,749 +4041,476 @@ class TestVxlanBGPTriggers():
 
 
 # ============================================================================
-# INTERFACE TRIGGER TEST CLASS (DCI link flap/shut)
+# INTERFACE TRIGGER TEST CLASS (DCI link flap/shut + leaf interface shut/noshut)
 # ============================================================================
 
 @pytest.mark.usefixtures('tgen_health_check_class')
 class TestVxlanInterfaceTriggers():
-    """DCI link flap/shut triggers: verify traffic recovery after interface operations."""
+    """Interface shut/no-shut triggers: verify EVPN state and traffic recovery."""
     """
-    Test class for DCI link interface triggers.
-    Verifies traffic recovery after DCI link flap and shut operations.
-    Includes L3VNI traffic verification (l3_v4, l3_v6) in addition to L2VNI.
-    
-    Test cases:
-        - Solution_dci:26 / L3VNI_dci:39 - DCI link flap (1 link)
-        - Solution_dci:27 / L3VNI_dci:40 - DCI link shut (1 link)
-        - Solution_dci:28 / L3VNI_dci:41 - DCI link flap (all interfaces)
-        - Solution_dci:29 / L3VNI_dci:42 - DCI link shut (all towards 1 DCI node)
-        - Solution_dci:30 / L3VNI_dci:43 - DCI link shut (all DCI nodes unreachable)
+    Test class for interface-related triggers: PortChannel and DCI link flap/shut tests.
+    Tests resilience of VXLAN DCI fabric under interface failures.
+
+    Test Cases:
+        Leaf L2 host link (parametrized orphan | portchannel):
+        - Solution_dci:23 - Host orphan interfaces shut/no shut (DC1 leafs, verify all DCs)
+        - Solution_dci:24 - PortChannel shut/no shut (DC1 leafs, verify all DCs)
+
+        DCI Link Triggers:
+        - Solution_dci:26 / L3VNI_dci:39 - DCI link flap - 1 link
+        - Solution_dci:27 / L3VNI_dci:40 - DCI link shut - 1 link
+        - Solution_dci:28 / L3VNI_dci:41 - DCI link flap - all interface flap (one BGW)
+        - Solution_dci:29 / L3VNI_dci:42 - DCI link shut - all interface shut towards 1 DCI node
+        - Solution_dci:30 / L3VNI_dci:43 - DCI link shut - all interface shut (all DCI nodes unreachable)
     """
-    
-    def test_dci_link_flap_single(self):
+
+    def _get_bgw_dci_interfaces(self):
         """
-        Solution_dci:26 / L3VNI_dci:39 - DCI link flap (1 link).
-        Shut/unshut 1 link between DCI nodes and verify L2VNI + L3VNI traffic recovery.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Shut/unshut 1 link between the DCI nodes. Traffic should recover after the flap.
-            3) Verify L3VNI traffic between the hosts across DC1, DC2 and DC3
-            4) Verify traffic recovers
-            5) Verify no crash/core seen
-        
-        Steps:
-            1. Verify base setup before trigger
-            2. Verify traffic before trigger (L2VNI + L3VNI)
-            3. Get DCI link interfaces
-            4. Shut 1 DCI link
-            5. Verify traffic redirects to alternate path
-            6. Unshut the DCI link
-            7. Verify base setup after trigger (with retries)
-            8. Verify traffic flows (L2VNI + L3VNI)
-            9. Check for core files/crashes
+        Returns mapping of BGW node -> list of DCI-facing physical interfaces.
+        Uses vxlan_helper.get_config_interfaces_list(vars) which derives DCI links from testbed wiring.
         """
-        tc_id = 'test_dci_link_flap_single'
-        result_str = ''
-        traffic_scope = 'cross'
-        
-        # Get BGW/DCI nodes
-        target_nodes = []
-        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
-            if test_cfg['nodes'].get(dc_key):
-                target_nodes.extend(test_cfg['nodes'][dc_key])
-        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
-            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
-        
-        if not target_nodes:
-            pytest.skip('No DCI/BGW nodes found in testbed configuration')
-            return
-        
-        st.banner('TEST: Solution_dci:26 / L3VNI_dci:39 - DCI link flap (1 link)')
-        st.log('DCI/BGW nodes: {}'.format(target_nodes))
-        
-        # Select first BGW node and find a DCI-facing interface
-        selected_dut = target_nodes[0]
-        
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                     test_cfg['nodes'].get('dc2_bgw', []) +
+                     test_cfg['nodes'].get('dc3_bgw', []))
+        int_cfg = vxlan_obj.get_config_interfaces_list(vars)
+        dci_map = {}
+        for dut in bgw_nodes:
+            dci_map[dut] = list(int_cfg.get(dut, {}).get('dci_int', []) or [])
+        return dci_map
+
+    def _get_leaf_portchannels_by_dc(self, dc):
+        """
+        Return mapping of leaf -> list of PortChannel interface names for the given DC.
+        dc: 'dc1', 'dc2', or 'dc3'. Uses config file (deterministic) vs parsing show commands.
+        """
+        dc_suffix = '_' + dc
+        leaf_nodes = [n for n in test_cfg['nodes'].get('l2l3vni', []) if dc_suffix in n and 'leaf' in n]
+        pc_map = {}
+        for dut in leaf_nodes:
+            pcs = []
+            for pc in (test_cfg.get(dut, {}).get('port_channels', []) or []):
+                pc_num = pc.get('port_channel_num')
+                if pc_num is None:
+                    continue
+                pcs.append("PortChannel{}".format(pc_num))
+            pc_map[dut] = pcs
+        return pc_map
+
+    def _get_leaf_orphan_host_interfaces_by_dc(self, dc):
+        """
+        Return mapping of leaf -> list of orphan (host-facing) DUT interface names for the given DC.
+        Orphan = L2VNI interfaces that are not PortChannels (physical host ports). Host route
+        should be withdrawn across DCs when these are shut.
+        """
+        dc_suffix = '_' + dc
+        leaf_nodes = [n for n in test_cfg['nodes'].get('l2l3vni', []) if dc_suffix in n and 'leaf' in n]
         try:
-            # Step 1: Verify base setup before trigger
-            st.banner("Step 1: Verify base setup before DCI link flap")
-            try:
-                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
-                if not result_before:
-                    result_str += "Base setup verification failed before DCI link flap\n"
-                    st.error("Base setup not healthy before trigger")
-            except Exception as err:
-                st.log('Base setup check encountered error: {}'.format(err))
-            
-            # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 2: Verifying traffic BEFORE DCI link flap')
-                try:
-                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                           scope=traffic_scope)
-                    if not traffic_result_before:
-                        result_str += "Traffic verification failed before DCI link flap\n"
-                        st.error("Traffic not healthy before trigger")
-                    else:
-                        st.banner("Traffic verification passed before DCI link flap")
-                except Exception as err:
-                    st.log('Traffic verification encountered error: {}'.format(err))
-                    result_str += 'Traffic verification error before DCI link flap: {}\n'.format(err)
-            
-            # Step 3: Get DCI link interfaces on selected BGW
-            st.banner('Step 3: Getting DCI link interfaces on {}'.format(selected_dut))
-            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
-            if not dci_interfaces:
-                st.error("No DCI link interfaces found on {}".format(selected_dut))
-                result_str += "No DCI link interfaces found\n"
-                report_result(False, tc_id, result_str)
-                return
-            
-            # Select 1 interface for single link flap
-            flap_intf = dci_interfaces[0]
-            st.log('Selected DCI interface for flap: {} on {}'.format(flap_intf, selected_dut))
-            
-            # Step 4: Shut the DCI link
-            st.banner('Step 4: Shutting DCI link {} on {}'.format(flap_intf, selected_dut))
-            intf_obj.interface_shutdown(selected_dut, [flap_intf])
-            st.wait(5, 'Waiting for convergence after DCI link shut')
-            
-            # Step 5: Verify traffic redirects (cross-DC traffic should still flow via alternate path)
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 5: Verifying traffic redirects after single DCI link shut')
-                try:
-                    traffic_during = verify_traffic(tgen_handles, bum=True,
-                                                     traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                     scope=traffic_scope)
-                    if not traffic_during:
-                        result_str += "Traffic verification failed during single DCI link shut\n"
-                        st.error("Traffic not flowing during single DCI link shut")
-                    else:
-                        st.banner("Traffic still flowing via alternate path during single DCI link shut")
-                except Exception as err:
-                    st.log('Traffic check during shut error: {}'.format(err))
-            
-            # Step 6: Unshut the DCI link
-            st.banner('Step 6: Unshutting DCI link {} on {}'.format(flap_intf, selected_dut))
-            intf_obj.interface_noshutdown(selected_dut, [flap_intf])
-            st.wait(10, 'Waiting for convergence after DCI link unshut')
-            
-            # Step 7: Verify base setup after trigger with retries
-            st.banner('Step 7: Verifying base setup after DCI link flap')
-            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
-            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
-            if not result_after:
-                result_str += "Base setup verification failed after DCI link flap\n"
-                st.error("Base setup verification failed after DCI link flap")
-            else:
-                st.banner("Base setup verification passed after DCI link flap")
-            
-            # Step 8: Verify traffic after trigger (L2VNI + L3VNI)
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 8: Verifying traffic after DCI link flap')
-                traffic_result = verify_traffic(tgen_handles, bum=True,
-                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                scope=traffic_scope)
-                if not traffic_result:
-                    result_str += "Traffic verification failed after DCI link flap\n"
-                    st.error("Traffic verification failed after DCI link flap")
-                else:
-                    st.banner("Traffic verification passed after DCI link flap")
-            
-            # Step 9: Check for core files/crashes
-            st.banner("Step 9: Checking for core files and crashes")
-            if vxlan_obj.check_core():
-                result_str += "Core files detected after DCI link flap\n"
-                st.error("Core files detected after DCI link flap")
-            else:
-                st.log("No core files detected")
-        
+            int_config = vxlan_obj.get_config_interfaces_list(vars)
         except Exception as e:
-            result_str += 'Exception: {}\n'.format(e)
-            st.error('Test encountered exception: {}'.format(e))
-            # Ensure interface is restored
+            st.log("get_config_interfaces_list failed: {}".format(e))
+            return {}
+        orphan_map = {}
+        for dut in leaf_nodes:
+            if dut not in int_config or 'l2vni_int' not in int_config[dut]:
+                continue
+            # Orphan = physical host ports only (exclude PortChannel interfaces)
+            orphan_list = [intf for intf in int_config[dut]['l2vni_int']
+                          if not (intf.startswith('PortChannel') or isinstance(intf, dict))]
+            if orphan_list:
+                orphan_map[dut] = orphan_list
+        return orphan_map
+
+    def _shutdown_interfaces(self, dut, intf_list):
+        """
+        Multi-homing style: shut interfaces and verify state transitions.
+        """
+        for intf in intf_list:
+            st.log("Shutting interface {} on {}".format(intf, dut))
+            intf_obj.interface_shutdown(dut=dut, interfaces=intf)
+            # Verify admin down; oper down may take a bit depending on platform
+            if not poll_wait(intf_obj.verify_interface_status, 30, dut, intf, 'admin', 'down'):
+                st.report_fail("Shutdown failed: {} on {} did not go admin down".format(intf, dut))
+            # Best-effort oper down check (do not hard-fail for PortChannel if it stays up due to members)
+            if not intf.startswith('PortChannel'):
+                if not poll_wait(intf_obj.verify_interface_status, 30, dut, intf, 'oper', 'down'):
+                    st.report_fail("Shutdown failed: {} on {} did not go oper down".format(intf, dut))
+        st.wait(2)
+
+    def _noshutdown_interfaces(self, dut, intf_list):
+        """
+        Multi-homing style: no-shut interfaces and verify state transitions.
+        """
+        for intf in intf_list:
+            st.log("No-shutting interface {} on {}".format(intf, dut))
+            intf_obj.interface_noshutdown(dut=dut, interfaces=intf)
+            if not poll_wait(intf_obj.verify_interface_status, 60, dut, intf, 'admin', 'up'):
+                st.report_fail("No-shut failed: {} on {} did not go admin up".format(intf, dut))
+            # Oper up can take time (especially after flap); validate for physical and PortChannels
+            if not poll_wait(intf_obj.verify_interface_status, 120, dut, intf, 'oper', 'up'):
+                st.report_fail("No-shut failed: {} on {} did not go oper up".format(intf, dut))
+        st.wait(2)
+
+    def _flap_interfaces(self, dut, intf_list, down_wait=5, up_wait=10):
+        self._shutdown_interfaces(dut, intf_list)
+        st.wait(down_wait)
+        self._noshutdown_interfaces(dut, intf_list)
+        st.wait(up_wait)
+
+    @pytest.mark.parametrize("leaf_port_kind", ["orphan", "portchannel"])
+    def test_leaf_interface_shut_noshut(self, leaf_port_kind):
+        """
+        Solution_dci:23 (orphan) / 24 (portchannel) - Leaf host link shut/no shut on DC1; verify across all DCs.
+
+        Parametrized by leaf_port_kind:
+          - orphan: physical host-facing L2VNI ports (not PortChannels)
+          - portchannel: PortChannel(s) from config on DC1 leafs
+
+        Steps (common): baseline setup + cross-DC traffic, shut, restore, verify traffic;
+        orphan also checks cores; portchannel uses try/finally restore and post base-setup retry.
+        """
+        dc = "dc1"
+        is_pc = leaf_port_kind == "portchannel"
+        if is_pc:
+            tc_id = "test_portchannel_shut_noshut"
+            solution_num = 24
+            desc = "PortChannel"
+        else:
+            tc_id = "test_host_interface_shut_noshut_orphan"
+            solution_num = 23
+            desc = "host orphan"
+
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = get_tc_params(tc_id)
+        st.banner("TEST Solution_dci:{}: {} shut/no shut on {} leafs ({})".format(
+            solution_num, desc, dc.upper(), tc_id))
+
+        result = True
+        summ = ''
+        shut_time = tc_cfg.get('shut_time', 20)
+
+        if is_pc:
+            intf_map = self._get_leaf_portchannels_by_dc(dc)
+        else:
+            intf_map = self._get_leaf_orphan_host_interfaces_by_dc(dc)
+        targets = [(dut, intfs) for dut, intfs in intf_map.items() if intfs]
+        if not targets:
+            pytest.skip("No {} leaf {} interfaces found in config".format(dc.upper(), desc))
+
+        dc_leafs = [dut for dut, _ in targets]
+        pre_checks = ['bgp', 'portchannel'] if is_pc else ['bgp']
+
+        # Step 1a: Verify base setup before trigger
+        st.banner("Step 1a: Verify base setup before {} flap".format(desc))
+        if not verify_base_setup_bgw(dc_leafs, checks=pre_checks, skip_checks=['vteps']):
+            summ += "Base setup verification failed before {} flap\n".format(desc)
+            result = False
+
+        # Step 1b: Pre-check cross-DC traffic
+        st.banner("Step 1b: Verify baseline cross-DC L2VNI traffic")
+        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
+            summ += "Traffic verification failed before {} flap\n".format(desc)
+            result = False
+        if not result:
+            report_result(False, tc_id, summ)
+            return
+
+        if is_pc:
             try:
-                intf_obj.interface_noshutdown(selected_dut, [flap_intf])
-            except Exception:
-                pass
-        
-        if not result_str:
-            st.banner('TEST PASSED: Solution_dci:26 / L3VNI_dci:39 - {}'.format(tc_id))
+                st.banner("Step 2: Shutting PortChannels on {} leaf nodes".format(dc.upper()))
+                for dut, intfs in targets:
+                    st.log("Shutting PortChannels on {}: {}".format(dut, intfs))
+                    self._shutdown_interfaces(dut, intfs)
+                st.wait(shut_time)
+            finally:
+                st.banner("Step 3: Restoring PortChannels")
+                for dut, intfs in targets:
+                    st.log("Restoring PortChannels on {}: {}".format(dut, intfs))
+                    self._noshutdown_interfaces(dut, intfs)
+                st.wait(20)
+
+            st.banner("Step 4a: Verify base setup after PortChannel recovery")
+            if not verify_base_setup_bgw(dc_leafs, retry=5, checks=['bgp', 'portchannel', 'vteps'], skip_checks=['vteps']):
+                summ += "Base setup verification failed after PortChannel flap\n"
+                result = False
+
+            st.banner("Step 4b: Verify cross-DC traffic recovery")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after PortChannel shut/no-shut (BUM/L2v4/L2v6)\n"
+                result = False
+            else:
+                st.log("Cross-DC traffic recovered successfully")
+        else:
+            st.banner("Step 2: Shutting host (orphan) interfaces on {} leaf nodes".format(dc.upper()))
+            for dut, intfs in targets:
+                self._shutdown_interfaces(dut, intfs)
+            st.wait(shut_time)
+
+            st.banner("Step 3: Unshutting host (orphan) interfaces")
+            for dut, intfs in targets:
+                self._noshutdown_interfaces(dut, intfs)
+            st.wait(10)
+
+            st.banner("Step 4: Verify L2VNI traffic across DCs after orphan shut/no-shut")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after host orphan shut/no-shut (BUM/L2v4/L2v6)\n"
+                result = False
+
+            st.banner("Step 5: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                summ += "Core files detected after host interface shut/no-shut\n"
+                result = False
+
+        if result:
+            st.banner("TEST PASSED: Solution_dci:{} - {}".format(solution_num, tc_id))
             report_result(True, tc_id)
         else:
-            st.banner('TEST FAILED: {}'.format(tc_id))
-            st.error('Failure details:\n{}'.format(result_str))
-            report_result(False, tc_id, result_str)
-    
-    def test_dci_link_shut_single(self):
+            report_result(False, tc_id, summ)
+
+    @pytest.mark.parametrize("action,scope", [
+        ("flap", "single"),      # Solution_dci:26 / L3VNI_dci:39
+        ("shut", "single"),      # Solution_dci:27 / L3VNI_dci:40
+        ("flap", "all_one_bgw"), # Solution_dci:28 / L3VNI_dci:41
+        ("shut", "all_one_bgw"), # Solution_dci:29 / L3VNI_dci:42
+        ("shut", "all_bgws"),    # Solution_dci:30 / L3VNI_dci:43
+    ])
+    def test_dci_link_trigger(self, action, scope):
         """
-        Solution_dci:27 / L3VNI_dci:40 - DCI link shut (1 link).
-        Shut 1 link between DCI nodes, verify traffic redirects to alternate path,
-        then unshut and verify L2VNI + L3VNI traffic recovery.
-        
+        Solution_dci:26/27/28/29/30 + L3VNI_dci:39-43 - DCI link flap/shut tests with different scopes.
+        Includes continuous cross-DC L2 traffic verification when dci_flap_continuous streams are available.
+
+        Args:
+            action: Type of action - 'flap' (shut then no-shut) or 'shut' (shut then restore)
+            scope: Scope of interfaces - 'single' (1 link), 'all_one_bgw' (all links on one BGW),
+                   'all_bgws' (all links on all BGWs)
+
         Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Shut 1 link between the DCI nodes. Traffic should be redirected to another link.
-            3) Verify L3VNI traffic between the hosts across DC1, DC2 and DC3
-            4) Verify traffic recovers
-            5) Verify no crash/core seen
-        
+            Tests DCI link resilience by shutting/flapping DCI-facing interfaces on BGW nodes.
+            - Single link: Traffic should continue via redundant paths
+            - All links on one BGW: Traffic should redirect to other DCI nodes
+            - All links on all BGWs: Traffic expected to FAIL while shut, recover after restore
+
+        Test Cases:
+            - Solution_dci:26 / L3VNI_dci:39 - DCI link flap - 1 link
+            - Solution_dci:27 / L3VNI_dci:40 - DCI link shut - 1 link
+            - Solution_dci:28 / L3VNI_dci:41 - DCI link flap - all interface flap (one BGW)
+            - Solution_dci:29 / L3VNI_dci:42 - DCI link shut - all interface shut towards 1 DCI node
+            - Solution_dci:30 / L3VNI_dci:43 - DCI link shut - all interface shut (all DCI nodes unreachable)
+
         Steps:
-            1. Verify base setup before trigger
-            2. Verify traffic before trigger (L2VNI + L3VNI)
-            3. Get DCI link interfaces
-            4. Shut 1 DCI link
-            5. Verify traffic redirects to alternate DCI link
-            6. Verify base setup with 1 link down
-            7. Unshut the DCI link
-            8. Verify base setup after recovery (with retries)
-            9. Verify traffic flows (L2VNI + L3VNI)
-            10. Check for core files/crashes
+            1. Verify cross-DC traffic baseline
+            1c. Start continuous cross-DC L2 traffic (if dci_flap_continuous streams available)
+            2. Select interfaces based on scope
+            3. Perform action (flap or shut); verify continuous traffic during/after trigger
+            4. Restore interfaces
+            5. Verify traffic recovery
         """
-        tc_id = 'test_dci_link_shut_single'
-        result_str = ''
-        traffic_scope = 'cross'
-        
-        # Get BGW/DCI nodes
-        target_nodes = []
-        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
-            if test_cfg['nodes'].get(dc_key):
-                target_nodes.extend(test_cfg['nodes'][dc_key])
-        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
-            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
-        
-        if not target_nodes:
-            pytest.skip('No DCI/BGW nodes found in testbed configuration')
-            return
-        
-        st.banner('TEST: Solution_dci:27 / L3VNI_dci:40 - DCI link shut (1 link)')
-        selected_dut = target_nodes[0]
-        
-        try:
-            # Step 1: Verify base setup before trigger
-            st.banner("Step 1: Verify base setup before DCI link shut")
-            try:
-                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
-                if not result_before:
-                    result_str += "Base setup verification failed before DCI link shut\n"
-            except Exception as err:
-                st.log('Base setup check encountered error: {}'.format(err))
-            
-            # Step 2: Verify traffic before trigger
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 2: Verifying traffic BEFORE DCI link shut')
-                try:
-                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                           scope=traffic_scope)
-                    if not traffic_result_before:
-                        result_str += "Traffic verification failed before DCI link shut\n"
-                    else:
-                        st.banner("Traffic verification passed before DCI link shut")
-                except Exception as err:
-                    result_str += 'Traffic verification error: {}\n'.format(err)
-            
-            # Step 3: Get DCI link interfaces
-            st.banner('Step 3: Getting DCI link interfaces on {}'.format(selected_dut))
-            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
-            if not dci_interfaces:
-                st.error("No DCI link interfaces found on {}".format(selected_dut))
-                result_str += "No DCI link interfaces found\n"
-                report_result(False, tc_id, result_str)
+        # Determine test case number and ID
+        test_map = {
+            ("flap", "single"): (26, "test_dci_link_flap_1_link"),
+            ("shut", "single"): (27, "test_dci_link_shut_1_link"),
+            ("flap", "all_one_bgw"): (28, "test_dci_link_flap_all_interfaces"),
+            ("shut", "all_one_bgw"): (29, "test_dci_link_shut_all_interfaces_one_bgw"),
+            ("shut", "all_bgws"): (30, "test_dci_link_shut_all_interfaces_all_bgw"),
+        }
+        test_num, tc_id = test_map[(action, scope)]
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = get_tc_params(tc_id)
+
+        st.banner("TEST Solution_dci:{} / L3VNI_dci:{}: DCI link {} - scope:{} ({})".format(
+            test_num, test_num + 13, action, scope, tc_id))
+
+        result = True
+        summ = ''
+        shut_time = tc_cfg.get('shut_time', 20 if scope == "single" else 30)
+        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
+        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
+        fc_streams = tgen_handles.get('dci_flap_continuous')
+        use_fc = isinstance(fc_streams, dict) and len(fc_streams) > 0
+
+        # Get DCI interface mapping
+        dci_map = self._get_bgw_dci_interfaces()
+
+        # Select target interfaces based on scope
+        if scope == "single":
+            # Select first BGW with at least one DCI interface
+            target_dut = None
+            target_intfs = []
+            for dut, intfs in dci_map.items():
+                if intfs:
+                    target_dut = dut
+                    target_intfs = [intfs[0]]  # Just first interface
+                    break
+
+            if not target_dut or not target_intfs:
+                pytest.skip("No DCI interfaces found on BGW nodes")
                 return
-            
-            flap_intf = dci_interfaces[0]
-            st.log('Selected DCI interface for shut: {} on {}'.format(flap_intf, selected_dut))
-            
-            # Step 4: Shut the DCI link
-            st.banner('Step 4: Shutting DCI link {} on {}'.format(flap_intf, selected_dut))
-            intf_obj.interface_shutdown(selected_dut, [flap_intf])
-            st.wait(10, 'Waiting for convergence after DCI link shut')
-            
-            # Step 5: Verify traffic redirects to alternate DCI link
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 5: Verifying traffic redirects after DCI link shut')
-                try:
-                    traffic_during = verify_traffic(tgen_handles, bum=True,
-                                                     traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                     scope=traffic_scope)
-                    if not traffic_during:
-                        result_str += "Traffic not redirected during single DCI link shut\n"
-                    else:
-                        st.banner("Traffic redirected via alternate path")
-                except Exception as err:
-                    result_str += 'Traffic check error: {}\n'.format(err)
-            
-            # Step 6: Verify base setup with 1 link down
-            st.banner('Step 6: Verifying base setup with 1 DCI link down')
-            try:
-                result_during = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
-                if not result_during:
-                    st.log("Base setup shows changes with 1 link down (expected)")
-            except Exception as err:
-                st.log('Base setup check with link down: {}'.format(err))
-            
-            # Step 7: Unshut the DCI link
-            st.banner('Step 7: Unshutting DCI link {} on {}'.format(flap_intf, selected_dut))
-            intf_obj.interface_noshutdown(selected_dut, [flap_intf])
-            st.wait(10, 'Waiting for convergence after DCI link unshut')
-            
-            # Step 8: Verify base setup after recovery
-            st.banner('Step 8: Verifying base setup after DCI link recovery')
-            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
-            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
-            if not result_after:
-                result_str += "Base setup verification failed after DCI link recovery\n"
-            else:
-                st.banner("Base setup verification passed after DCI link recovery")
-            
-            # Step 9: Verify traffic after recovery
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 9: Verifying traffic after DCI link recovery')
-                traffic_result = verify_traffic(tgen_handles, bum=True,
-                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                scope=traffic_scope)
-                if not traffic_result:
-                    result_str += "Traffic verification failed after DCI link recovery\n"
-                else:
-                    st.banner("Traffic verification passed after DCI link recovery")
-            
-            # Step 10: Check for core files/crashes
-            st.banner("Step 10: Checking for core files and crashes")
-            if vxlan_obj.check_core():
-                result_str += "Core files detected after DCI link shut test\n"
-            else:
-                st.log("No core files detected")
-        
-        except Exception as e:
-            result_str += 'Exception: {}\n'.format(e)
-            try:
-                intf_obj.interface_noshutdown(selected_dut, [flap_intf])
-            except Exception:
-                pass
-        
-        if not result_str:
-            st.banner('TEST PASSED: Solution_dci:27 / L3VNI_dci:40 - {}'.format(tc_id))
-            report_result(True, tc_id)
-        else:
-            st.banner('TEST FAILED: {}'.format(tc_id))
-            st.error('Failure details:\n{}'.format(result_str))
-            report_result(False, tc_id, result_str)
-    
-    def test_dci_link_flap_all(self):
-        """
-        Solution_dci:28 / L3VNI_dci:41 - DCI link flap (all interfaces).
-        Shut/unshut all links between DCI nodes and verify L2VNI + L3VNI traffic recovery.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Shut/unshut all links between DCI nodes. Traffic should redirect to another DCI node.
-            3) Verify L3VNI traffic between hosts across DC1, DC2 and DC3
-            4) Verify traffic recovers
-            5) Verify no crash/core seen
-        
-        Steps:
-            1. Verify base setup and traffic before trigger
-            2. Get all DCI link interfaces on selected BGW
-            3. Shut all DCI links on selected BGW
-            4. Wait for convergence
-            5. Unshut all DCI links
-            6. Verify base setup and traffic after recovery
-            7. Check for core files/crashes
-        """
-        tc_id = 'test_dci_link_flap_all'
-        result_str = ''
-        traffic_scope = 'cross'
-        
-        # Get BGW/DCI nodes
-        target_nodes = []
-        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
-            if test_cfg['nodes'].get(dc_key):
-                target_nodes.extend(test_cfg['nodes'][dc_key])
-        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
-            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
-        
-        if not target_nodes:
-            pytest.skip('No DCI/BGW nodes found in testbed configuration')
-            return
-        
-        st.banner('TEST: Solution_dci:28 / L3VNI_dci:41 - DCI link flap (all interfaces)')
-        selected_dut = target_nodes[0]
-        flap_intfs = []
-        
-        try:
-            # Step 1: Verify base setup and traffic before trigger
-            st.banner("Step 1: Verify base setup before all DCI link flap")
-            try:
-                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
-                if not result_before:
-                    result_str += "Base setup verification failed before trigger\n"
-            except Exception as err:
-                st.log('Base setup check error: {}'.format(err))
-            
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 1b: Verifying traffic BEFORE all DCI link flap')
-                try:
-                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                           scope=traffic_scope)
-                    if not traffic_result_before:
-                        result_str += "Traffic verification failed before trigger\n"
-                    else:
-                        st.banner("Traffic verification passed before trigger")
-                except Exception as err:
-                    result_str += 'Traffic error: {}\n'.format(err)
-            
-            # Step 2: Get all DCI link interfaces
-            st.banner('Step 2: Getting all DCI link interfaces on {}'.format(selected_dut))
-            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
-            if not dci_interfaces:
-                st.error("No DCI link interfaces found on {}".format(selected_dut))
-                result_str += "No DCI link interfaces found\n"
-                report_result(False, tc_id, result_str)
+
+            targets = [(target_dut, target_intfs)]
+            expect_traffic_during_trigger = True  # Single link down should not break traffic
+
+        elif scope == "all_one_bgw":
+            # Select one BGW and all its DCI interfaces
+            # Prefer DC1 BGW so DC2/DC3 remain reachable via alternate BGWs
+            target_dut = None
+            target_intfs = []
+            for cand in test_cfg['nodes'].get('dc1_bgw', []):
+                if dci_map.get(cand):
+                    target_dut = cand
+                    target_intfs = dci_map[cand]
+                    break
+            if not target_dut:
+                for dut, intfs in dci_map.items():
+                    if intfs and len(intfs) >= 1:
+                        target_dut = dut
+                        target_intfs = intfs
+                        break
+
+            if not target_dut or not target_intfs:
+                pytest.skip("No DCI interfaces found on BGW nodes")
                 return
-            
-            flap_intfs = dci_interfaces
-            st.log('All DCI interfaces for flap: {} on {}'.format(flap_intfs, selected_dut))
-            
-            # Step 3: Shut all DCI links
-            st.banner('Step 3: Shutting all DCI links on {}'.format(selected_dut))
-            intf_obj.interface_shutdown(selected_dut, flap_intfs)
-            st.wait(10, 'Waiting for convergence after all DCI links shut')
-            
-            # Step 4: Unshut all DCI links
-            st.banner('Step 4: Unshutting all DCI links on {}'.format(selected_dut))
-            intf_obj.interface_noshutdown(selected_dut, flap_intfs)
-            st.wait(15, 'Waiting for convergence after all DCI links unshut')
-            
-            # Step 5: Verify base setup after recovery
-            st.banner('Step 5: Verifying base setup after all DCI link flap')
-            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
-            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
-            if not result_after:
-                result_str += "Base setup verification failed after all DCI link flap\n"
-            else:
-                st.banner("Base setup verification passed after all DCI link flap")
-            
-            # Step 6: Verify traffic after recovery
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 6: Verifying traffic after all DCI link flap')
-                traffic_result = verify_traffic(tgen_handles, bum=True,
-                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                scope=traffic_scope)
-                if not traffic_result:
-                    result_str += "Traffic verification failed after all DCI link flap\n"
-                else:
-                    st.banner("Traffic verification passed after all DCI link flap")
-            
-            # Step 7: Check for core files/crashes
-            st.banner("Step 7: Checking for core files and crashes")
-            if vxlan_obj.check_core():
-                result_str += "Core files detected after all DCI link flap\n"
-            else:
-                st.log("No core files detected")
-        
-        except Exception as e:
-            result_str += 'Exception: {}\n'.format(e)
-            try:
-                if flap_intfs:
-                    intf_obj.interface_noshutdown(selected_dut, flap_intfs)
-            except Exception:
-                pass
-        
-        if not result_str:
-            st.banner('TEST PASSED: Solution_dci:28 / L3VNI_dci:41 - {}'.format(tc_id))
-            report_result(True, tc_id)
-        else:
-            st.banner('TEST FAILED: {}'.format(tc_id))
-            st.error('Failure details:\n{}'.format(result_str))
-            report_result(False, tc_id, result_str)
-    
-    def test_dci_link_shut_one_node_unreachable(self):
-        """
-        Solution_dci:29 / L3VNI_dci:42 - DCI link shut (all towards 1 DCI node).
-        Shut all links towards 1 DCI node making it unreachable, verify traffic redirects
-        to another DCI node, then recover and verify L2VNI + L3VNI traffic.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Shut all links between 1 DCI node. Traffic should redirect to another DCI node.
-            3) Verify L3VNI traffic between hosts across DC1, DC2 and DC3
-            4) Verify traffic recovers
-            5) Verify no crash/core seen
-        
-        Steps:
-            1. Verify base setup and traffic before trigger
-            2. Get all DCI link interfaces on selected BGW
-            3. Shut all DCI links on the selected BGW (making it unreachable)
-            4. Verify traffic redirects to another DCI node
-            5. Unshut all DCI links
-            6. Verify base setup and traffic after recovery
-            7. Check for core files/crashes
-        """
-        tc_id = 'test_dci_link_shut_one_node_unreachable'
-        result_str = ''
-        traffic_scope = 'cross'
-        
-        # Get BGW/DCI nodes
-        target_nodes = []
-        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
-            if test_cfg['nodes'].get(dc_key):
-                target_nodes.extend(test_cfg['nodes'][dc_key])
-        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
-            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
-        
-        if not target_nodes:
-            pytest.skip('No DCI/BGW nodes found in testbed configuration')
-            return
-        
-        st.banner('TEST: Solution_dci:29 / L3VNI_dci:42 - DCI link shut (1 DCI node unreachable)')
-        selected_dut = target_nodes[0]
-        shut_intfs = []
-        
-        try:
-            # Step 1: Verify base setup and traffic before trigger
-            st.banner("Step 1: Verify base setup before trigger")
-            try:
-                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
-                if not result_before:
-                    result_str += "Base setup verification failed before trigger\n"
-            except Exception as err:
-                st.log('Base setup check error: {}'.format(err))
-            
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 1b: Verifying traffic BEFORE trigger')
-                try:
-                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                           scope=traffic_scope)
-                    if not traffic_result_before:
-                        result_str += "Traffic verification failed before trigger\n"
-                    else:
-                        st.banner("Traffic verification passed before trigger")
-                except Exception as err:
-                    result_str += 'Traffic error: {}\n'.format(err)
-            
-            # Step 2: Get all DCI link interfaces on selected BGW
-            st.banner('Step 2: Getting all DCI link interfaces on {}'.format(selected_dut))
-            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
-            if not dci_interfaces:
-                st.error("No DCI link interfaces found on {}".format(selected_dut))
-                result_str += "No DCI link interfaces found\n"
-                report_result(False, tc_id, result_str)
+
+            targets = [(target_dut, target_intfs)]
+            expect_traffic_during_trigger = True  # Traffic should redirect to other BGWs
+
+        else:  # all_bgws
+            # Select all BGWs and all their DCI interfaces
+            targets = [(dut, intfs) for dut, intfs in dci_map.items() if intfs]
+
+            if not targets:
+                pytest.skip("No DCI interfaces found on BGW nodes")
                 return
-            
-            shut_intfs = dci_interfaces
-            st.log('Shutting all DCI interfaces on {}: {}'.format(selected_dut, shut_intfs))
-            
-            # Step 3: Shut all DCI links on the selected BGW
-            st.banner('Step 3: Shutting all DCI links on {} (making it unreachable)'.format(selected_dut))
-            intf_obj.interface_shutdown(selected_dut, shut_intfs)
-            st.wait(15, 'Waiting for convergence after all DCI links shut on {}'.format(selected_dut))
-            
-            # Step 4: Verify traffic redirects to another DCI node
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 4: Verifying traffic redirects via alternate DCI node')
-                try:
-                    traffic_during = verify_traffic(tgen_handles, bum=True,
-                                                     traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                     scope=traffic_scope)
-                    if not traffic_during:
-                        result_str += "Traffic not redirected when 1 DCI node unreachable\n"
-                    else:
-                        st.banner("Traffic redirected via alternate DCI node")
-                except Exception as err:
-                    result_str += 'Traffic check error: {}\n'.format(err)
-            
-            # Step 5: Unshut all DCI links
-            st.banner('Step 5: Unshutting all DCI links on {}'.format(selected_dut))
-            intf_obj.interface_noshutdown(selected_dut, shut_intfs)
-            st.wait(15, 'Waiting for convergence after DCI links restored')
-            
-            # Step 6: Verify base setup and traffic after recovery
-            st.banner('Step 6: Verifying base setup after DCI node recovery')
-            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
-            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
-            if not result_after:
-                result_str += "Base setup verification failed after recovery\n"
-            else:
-                st.banner("Base setup verification passed after recovery")
-            
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 6b: Verifying traffic after DCI node recovery')
-                traffic_result = verify_traffic(tgen_handles, bum=True,
-                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                scope=traffic_scope)
-                if not traffic_result:
-                    result_str += "Traffic verification failed after recovery\n"
-                else:
-                    st.banner("Traffic verification passed after recovery")
-            
-            # Step 7: Check for core files/crashes
-            st.banner("Step 7: Checking for core files and crashes")
-            if vxlan_obj.check_core():
-                result_str += "Core files detected\n"
-            else:
-                st.log("No core files detected")
-        
-        except Exception as e:
-            result_str += 'Exception: {}\n'.format(e)
+
+            expect_traffic_during_trigger = False  # All DCI links down = traffic should FAIL
+
+        st.log("Selected targets for {} {}: {}".format(
+            action, scope, [(dut, len(intfs)) for dut, intfs in targets]))
+
+        # Step 1a: Verify base setup before trigger
+        st.banner("Step 1a: Verify base setup before DCI link trigger")
+        bgw_nodes = [dut for dut, _ in targets]
+        if not verify_base_setup_bgw(bgw_nodes, checks=['bgp', 'vteps'], skip_checks=['vteps']):
+            summ += "Base setup verification failed before DCI link trigger\n"
+            result = False
+
+        # Step 1b: Verify baseline cross-DC traffic
+        st.banner("Step 1b: Verify baseline cross-DC traffic")
+        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+            summ += "Baseline cross-DC traffic failed (BUM/L2v4/L2v6/L3v4/L3v6)\n"
+            result = False
+
+        if use_fc and result:
+            st.banner("Step 1c: Start continuous cross-DC L2 traffic (DCI flap streams)")
             try:
-                if shut_intfs:
-                    intf_obj.interface_noshutdown(selected_dut, shut_intfs)
-            except Exception:
-                pass
-        
-        if not result_str:
-            st.banner('TEST PASSED: Solution_dci:29 / L3VNI_dci:42 - {}'.format(tc_id))
-            report_result(True, tc_id)
-        else:
-            st.banner('TEST FAILED: {}'.format(tc_id))
-            st.error('Failure details:\n{}'.format(result_str))
-            report_result(False, tc_id, result_str)
-    
-    def test_dci_link_shut_all_unreachable(self):
-        """
-        Solution_dci:30 / L3VNI_dci:43 - DCI link shut (all DCI nodes unreachable).
-        Shut all links on all DCI nodes, verify cross-DC traffic drops, then recover
-        and verify L2VNI + L3VNI traffic.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Shut/unshut all links between all DCI nodes
-            3) Verify L3VNI traffic between hosts across DC1, DC2 and DC3
-            4) Verify traffic recovers
-            5) Verify no crash/core seen
-        
-        Steps:
-            1. Verify base setup and traffic before trigger
-            2. Get all DCI link interfaces on all BGW nodes
-            3. Shut all DCI links on all BGW nodes
-            4. Verify cross-DC traffic drops (expected)
-            5. Unshut all DCI links on all BGW nodes
-            6. Verify base setup and traffic after recovery
-            7. Check for core files/crashes
-        """
-        tc_id = 'test_dci_link_shut_all_unreachable'
-        result_str = ''
-        traffic_scope = 'cross'
-        
-        # Get all BGW/DCI nodes
-        target_nodes = []
-        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
-            if test_cfg['nodes'].get(dc_key):
-                target_nodes.extend(test_cfg['nodes'][dc_key])
-        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
-            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
-        
-        if not target_nodes:
-            pytest.skip('No DCI/BGW nodes found in testbed configuration')
-            return
-        
-        st.banner('TEST: Solution_dci:30 / L3VNI_dci:43 - DCI link shut (all nodes unreachable)')
-        shut_map = {}
-        
-        try:
-            # Step 1: Verify base setup and traffic before trigger
-            st.banner("Step 1: Verify base setup before trigger")
-            try:
-                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
-                if not result_before:
-                    result_str += "Base setup verification failed before trigger\n"
+                vxlan_obj.check_traffic(
+                    fc_streams,
+                    regenerate_traffic_items=True,
+                    action='start',
+                    stop_proto_wait=stop_pw,
+                    start_proto_wait=start_pw,
+                )
             except Exception as err:
-                st.log('Base setup check error: {}'.format(err))
-            
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 1b: Verifying traffic BEFORE trigger')
-                try:
-                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                           scope=traffic_scope)
-                    if not traffic_result_before:
-                        result_str += "Traffic verification failed before trigger\n"
+                st.error('DCI continuous traffic start failed: {}'.format(err))
+                summ += 'DCI continuous traffic start failed\n'
+                result = False
+
+        # Step 2: Perform trigger action
+        try:
+            if action == "flap":
+                st.banner("Step 2: Flapping DCI interfaces ({})".format(scope))
+                for dut, intfs in targets:
+                    st.log("Flapping interfaces on {}: {}".format(dut, intfs))
+                    self._flap_interfaces(dut, intfs, down_wait=5, up_wait=20)
+                st.wait(10)
+                if use_fc and result:
+                    st.banner("Step 3: Verify continuous cross-DC L2 after DCI flap")
+                    if not vxlan_obj.check_traffic(
+                            fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
+                        summ += "Continuous cross-DC L2 check failed after DCI flap\n"
+                        result = False
                     else:
-                        st.banner("Traffic verification passed before trigger")
-                except Exception as err:
-                    result_str += 'Traffic error: {}\n'.format(err)
-            
-            # Step 2: Get all DCI link interfaces on all BGW nodes
-            st.banner('Step 2: Getting all DCI link interfaces on all BGW nodes')
-            for dut in target_nodes:
-                dci_interfaces = vxlan_obj.get_dci_link_interfaces(dut, test_cfg)
-                if dci_interfaces:
-                    shut_map[dut] = dci_interfaces
-                    st.log('DCI interfaces on {}: {}'.format(dut, dci_interfaces))
+                        st.log("Continuous cross-DC L2 check passed after flap")
+
+            else:  # shut
+                st.banner("Step 2: Shutting DCI interfaces ({})".format(scope))
+                for dut, intfs in targets:
+                    st.log("Shutting interfaces on {}: {}".format(dut, intfs))
+                    self._shutdown_interfaces(dut, intfs)
+                st.wait(shut_time)
+
+                # Step 3: Verify traffic during trigger
+                if use_fc and result:
+                    st.banner("Step 3: Verify continuous cross-DC L2 while DCI link(s) shut")
+                    c_ok = vxlan_obj.check_traffic(
+                        fc_streams, action='check', stop_start_protocols=False, min_perc=99.6)
+                    if scope == "all_bgws":
+                        if c_ok:
+                            summ += "Continuous cross-DC L2 unexpectedly passed while ALL DCI links were shut\n"
+                            result = False
+                        else:
+                            st.log("Continuous cross-DC L2 failed as expected while ALL DCI links were shut")
+                    else:
+                        if not c_ok:
+                            summ += "Continuous cross-DC L2 failed while {} link(s) were shut\n".format(scope)
+                            result = False
+                        else:
+                            st.log("Continuous cross-DC L2 continued during partial DCI shut")
+                elif scope == "all_bgws":
+                    st.banner("Step 3: Verify traffic FAILS while ALL DCI links are shut (expected)")
+                    if verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
+                        summ += "Cross-DC traffic unexpectedly passed while ALL DCI links were shut\n"
+                        result = False
+                    else:
+                        st.log("Cross-DC traffic failed as expected while ALL DCI links were shut")
                 else:
-                    st.log('No DCI interfaces found on {}'.format(dut))
-            
-            if not shut_map:
-                st.error("No DCI link interfaces found on any BGW node")
-                result_str += "No DCI link interfaces found\n"
-                report_result(False, tc_id, result_str)
-                return
-            
-            # Step 3: Shut all DCI links on all BGW nodes
-            st.banner('Step 3: Shutting all DCI links on all BGW nodes')
-            for dut, intfs in shut_map.items():
-                st.log('Shutting DCI interfaces on {}: {}'.format(dut, intfs))
-                intf_obj.interface_shutdown(dut, intfs)
-            st.wait(15, 'Waiting for convergence after all DCI links shut')
-            
-            # Step 4: Cross-DC traffic should drop (all DCI nodes unreachable)
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 4: Verifying cross-DC traffic drops (all DCI unreachable)')
-                st.log("Cross-DC traffic expected to drop with all DCI links shut")
-            
-            # Step 5: Unshut all DCI links on all BGW nodes
-            st.banner('Step 5: Unshutting all DCI links on all BGW nodes')
-            for dut, intfs in shut_map.items():
-                st.log('Unshutting DCI interfaces on {}: {}'.format(dut, intfs))
-                intf_obj.interface_noshutdown(dut, intfs)
-            st.wait(20, 'Waiting for convergence after all DCI links restored')
-            
-            # Step 6: Verify base setup and traffic after recovery
-            st.banner('Step 6: Verifying base setup after all DCI links restored')
-            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
-            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
-            if not result_after:
-                result_str += "Base setup verification failed after recovery\n"
-            else:
-                st.banner("Base setup verification passed after recovery")
-            
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 6b: Verifying traffic after all DCI links restored')
-                traffic_result = verify_traffic(tgen_handles, bum=True,
-                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                scope=traffic_scope)
-                if not traffic_result:
-                    result_str += "Traffic verification failed after recovery\n"
-                else:
-                    st.banner("Traffic verification passed after recovery")
-            
-            # Step 7: Check for core files/crashes
-            st.banner("Step 7: Checking for core files and crashes")
-            if vxlan_obj.check_core():
-                result_str += "Core files detected\n"
-            else:
-                st.log("No core files detected")
-        
-        except Exception as e:
-            result_str += 'Exception: {}\n'.format(e)
-            for dut, intfs in shut_map.items():
+                    st.banner("Step 3: Verify traffic continues/redirects while {} link(s) shut".format(scope))
+                    if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                        summ += "Cross-DC traffic failed while {} link(s) were shut (BUM/L2v4/L2v6/L3v4/L3v6)\n".format(scope)
+                        result = False
+                    else:
+                        st.log("Traffic continues via redundant path")
+
+                # Step 4: Restore interfaces
+                st.banner("Step 4: Restoring DCI interfaces ({})".format(scope))
+                for dut, intfs in targets:
+                    st.log("Restoring interfaces on {}: {}".format(dut, intfs))
+                    self._noshutdown_interfaces(dut, intfs)
+                st.wait(20 if scope == "all_bgws" else 15)
+
+        finally:
+            if use_fc and fc_streams:
                 try:
-                    intf_obj.interface_noshutdown(dut, intfs)
+                    vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
                 except Exception:
                     pass
-        
-        if not result_str:
-            st.banner('TEST PASSED: Solution_dci:30 / L3VNI_dci:43 - {}'.format(tc_id))
-            report_result(True, tc_id)
+            # Always ensure interfaces are restored
+            for dut, intfs in targets:
+                try:
+                    self._noshutdown_interfaces(dut, intfs)
+                except Exception:
+                    pass
+            st.wait(5)
+
+        # Step 5a: Verify base setup after trigger
+        st.banner("Step 5a: Verify base setup after {} recovery".format(action))
+        if not verify_base_setup_bgw(bgw_nodes, retry=5, checks=['bgp', 'vteps']):
+            summ += "Base setup verification failed after {} {}\n".format(action, scope)
+            result = False
+
+        # Step 5b: Verify traffic recovery
+        st.banner("Step 5b: Verify cross-DC traffic recovery after {}".format(action))
+        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+            summ += "Cross-DC traffic did not recover after {} {} (BUM/L2v4/L2v6/L3v4/L3v6)\n".format(action, scope)
+            result = False
         else:
-            st.banner('TEST FAILED: {}'.format(tc_id))
-            st.error('Failure details:\n{}'.format(result_str))
-            report_result(False, tc_id, result_str)
+            st.log("Cross-DC traffic recovered successfully")
+
+        # Report results
+        if result:
+            st.banner("TEST PASSED: Solution_dci:{} - {}".format(test_num, tc_id))
+            st.log("DCI link {} ({}) completed successfully".format(action, scope))
+            st.log("Traffic recovery verified")
+
+        report_result(result, tc_id, summ)
 
 
 # ============================================================================

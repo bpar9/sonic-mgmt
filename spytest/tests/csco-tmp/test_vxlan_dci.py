@@ -2610,23 +2610,28 @@ class TestVxlanRestartTriggers():
     """
     Test class for restart triggers on both Leaf and BGW/DCI nodes.
     Verifies node recovery after process restarts (bgp, swss, syncd).
+    Includes L3VNI traffic verification (l3_v4, l3_v6) in addition to L2VNI.
     
     Test cases:
         Leaf nodes:
-        - Solution_dci:32 - Restart bgp on leaf
+        - Solution_dci:32 / L3VNI_dci:45(swss) - Restart bgp/swss/syncd on leaf
         - Solution_dci:33 - Restart swss on leaf
         - Solution_dci:34 - Restart syncd on leaf
         
         DCI/BGW nodes:
-        - Solution_dci:35 - Restart bgp on DCI node
-        - Solution_dci:36 - Restart swss on DCI node
-        - Solution_dci:37 - Restart syncd on DCI node
+        - Solution_dci:35 / L3VNI_dci:44(bgp) - Restart bgp on DCI node
+        - Solution_dci:36 / L3VNI_dci:68(swss) - Restart swss on DCI node
+        - Solution_dci:37 / L3VNI_dci:69(syncd) - Restart syncd on DCI node
     """
     
     @pytest.mark.parametrize("restart_type", ["bgp", "swss", "syncd"])
     def test_leaf_restart_process(self, restart_type):
         """
-        Solution_dci:32/33/34 - Restarts a system service (bgp, swss, syncd) on Leaf nodes and verifies recovery.
+        Solution_dci:32/33/34 + L3VNI_dci:45(swss) - Restarts a system service (bgp, swss, syncd)
+        on Leaf nodes and verifies L2VNI + L3VNI traffic recovery.
+        
+        L3VNI testplan mapping:
+            - L3VNI_dci:45 (swss restart on leaf) is covered by restart_type='swss'
         
         Args:
             restart_type: Type of restart - 'bgp', 'swss', or 'syncd'
@@ -2760,7 +2765,13 @@ class TestVxlanRestartTriggers():
     @pytest.mark.parametrize("restart_type", ["bgp", "swss", "syncd"])
     def test_dci_restart_process(self, restart_type):
         """
-        Solution_dci:35/36/37 - Restarts a system service (bgp, swss, syncd) on DCI/BGW nodes and verifies recovery.
+        Solution_dci:35/36/37 + L3VNI_dci:44(bgp)/68(swss)/69(syncd) - Restarts a system service
+        (bgp, swss, syncd) on DCI/BGW nodes and verifies L2VNI + L3VNI traffic recovery.
+        
+        L3VNI testplan mapping:
+            - L3VNI_dci:44 (bgp restart on DCI node) is covered by restart_type='bgp'
+            - L3VNI_dci:68 (swss restart on BGW) is covered by restart_type='swss'
+            - L3VNI_dci:69 (syncd restart on BGW) is covered by restart_type='syncd'
         
         Args:
             restart_type: Type of restart - 'bgp', 'swss', or 'syncd'
@@ -2903,25 +2914,31 @@ class TestVxlanReloadTriggers():
     
     Test cases:
         Config Reload:
-        - Solution_dci:38 - Config reload on Leaf
-        - Solution_dci:39 - Config reload on Spine
-        - Solution_dci:40 - Config reload on DCI node
+        - Solution_dci:38 / L3VNI_dci:35(leaf) - Config reload on Leaf
+        - Solution_dci:39 / L3VNI_dci:73(spine) - Config reload on Spine
+        - Solution_dci:40 / L3VNI_dci:83(dci) - Config reload on DCI node
         
         Reboot:
         - Solution_dci:41 - Reboot on Leaf
         - Solution_dci:42 - Reboot on Spine
-        - Solution_dci:43 - Reboot on DCI node
+        - Solution_dci:43 / L3VNI_dci:33(dci) - Reboot on DCI node
         
         Power Cycle:
-        - Solution_dci:44 - Power Cycle on Leaf
+        - Solution_dci:44 / L3VNI_dci:81(leaf) - Power Cycle on Leaf
         - Solution_dci:45 - Power Cycle on Spine
-        - Solution_dci:46 - Power Cycle on DCI node
+        - Solution_dci:46 / L3VNI_dci:82(dci) - Power Cycle on DCI node
     """
     
     @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
     def test_config_reload(self, node_type):
         """
-        Solution_dci:38/39/40 - Config reload on Leaf/Spine/DCI nodes and verify recovery.
+        Solution_dci:38/39/40 + L3VNI_dci:35(leaf)/73(spine)/83(dci) - Config reload on
+        Leaf/Spine/DCI nodes and verify L2VNI + L3VNI traffic recovery.
+        
+        L3VNI testplan mapping:
+            - L3VNI_dci:35 (config reload on leaf) is covered by node_type='leaf'
+            - L3VNI_dci:73 (config reload on spine) is covered by node_type='spine'
+            - L3VNI_dci:83 (config reload on BGW/DCI) is covered by node_type='dci'
         
         Args:
             node_type: Type of node - 'leaf', 'spine', or 'dci'
@@ -3078,7 +3095,11 @@ class TestVxlanReloadTriggers():
     @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
     def test_reboot(self, node_type):
         """
-        Solution_dci:41/42/43 - Reboot Leaf/Spine/DCI node and verify recovery.
+        Solution_dci:41/42/43 + L3VNI_dci:33(dci) - Reboot Leaf/Spine/DCI node and verify
+        L2VNI + L3VNI traffic recovery.
+        
+        L3VNI testplan mapping:
+            - L3VNI_dci:33 (DCI node reboot) is covered by node_type='dci'
         
         Args:
             node_type: Type of node - 'leaf', 'spine', or 'dci'
@@ -3230,7 +3251,12 @@ class TestVxlanReloadTriggers():
     @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
     def test_power_cycle(self, node_type):
         """
-        Solution_dci:44/45/46 - Power Cycle Leaf/Spine/DCI node and verify recovery.
+        Solution_dci:44/45/46 + L3VNI_dci:81(leaf)/82(dci) - Power Cycle Leaf/Spine/DCI node
+        and verify L2VNI + L3VNI traffic recovery.
+        
+        L3VNI testplan mapping:
+            - L3VNI_dci:81 (power cycle on leaf) is covered by node_type='leaf'
+            - L3VNI_dci:82 (power cycle on BGW/DCI) is covered by node_type='dci'
         
         Args:
             node_type: Type of node - 'leaf', 'spine', or 'dci'
@@ -3462,7 +3488,7 @@ class TestVxlanBGPTriggers():
     Test Cases:
         - Solution_dci:17 - BGP flap on leafs (hard reset)
         - Solution_dci:18 - BGP flap on spines (hard reset)
-        - Solution_dci:19 - BGP flap on DCI nodes (hard reset)
+        - Solution_dci:19 / L3VNI_dci:34(dci) - BGP flap on DCI nodes (hard reset)
         - Solution_dci:20 - BGP soft reset on leaf
         - Solution_dci:21 - BGP soft reset on spine
         - Solution_dci:22 - BGP soft reset on DCI
@@ -3471,7 +3497,11 @@ class TestVxlanBGPTriggers():
     @pytest.mark.parametrize("node_type", ["leaf", "spine", "dci"])
     def test_bgp_hard_reset(self, node_type):
         """
-        Solution_dci:17/18/19 - Performs hard BGP reset (clear bgp *) and verifies recovery.
+        Solution_dci:17/18/19 + L3VNI_dci:34(dci) - Performs hard BGP reset (clear bgp *) and
+        verifies L2VNI + L3VNI traffic recovery.
+        
+        L3VNI testplan mapping:
+            - L3VNI_dci:34 (BGP flap on DCI node) is covered by node_type='dci'
         
         Args:
             node_type: Type of node - 'leaf', 'spine', or 'dci'

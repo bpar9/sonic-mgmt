@@ -5813,10 +5813,10 @@ class TestVxlanDCIBase():
         summ = ''
         
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Send IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (single-homed hosts)')
+        # Send SH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
+        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (SH hosts only)')
         if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within',
-                          simultaneous=True):
+                          traffic_names=['L3-SH'], simultaneous=True):
             st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Pass')
         else:
             summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
@@ -5840,7 +5840,7 @@ class TestVxlanDCIBase():
             into a single dual-stack test with L3VNI translation at BGW nodes.
             
         Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 traffic across DCI (SH hosts)
+            1. Send simultaneous L3VNI IPv4 and IPv6 SH traffic across DCI
         """
         tc_id = "test_base_dci_l3vni_dualstack_sh_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -5851,10 +5851,10 @@ class TestVxlanDCIBase():
         summ = ''
         
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Send IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (single-homed hosts)')
+        # Send SH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
+        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (SH hosts only)')
         if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross',
-                          simultaneous=True):
+                          traffic_names=['L3-SH'], simultaneous=True):
             st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Pass')
         else:
             summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'
@@ -5878,7 +5878,7 @@ class TestVxlanDCIBase():
             into a single dual-stack test. Additionally verifies EVPN ES status for MH hosts.
             
         Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 traffic within DC (MH hosts)
+            1. Send simultaneous L3VNI IPv4 and IPv6 MH traffic within DC
         """
         tc_id = "test_base_dci_l3vni_dualstack_mh_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -5889,10 +5889,10 @@ class TestVxlanDCIBase():
         summ = ''
         
         # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        # Send IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (multi-homed hosts)')
+        # Send MH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
+        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (MH hosts only)')
         if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within',
-                          simultaneous=True):
+                          traffic_names=['L3-MH'], simultaneous=True):
             st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Pass')
         else:
             summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
@@ -5916,7 +5916,7 @@ class TestVxlanDCIBase():
             into a single dual-stack test with L3VNI translation and EVPN-MH.
             
         Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 traffic across DCI (MH hosts)
+            1. Send simultaneous L3VNI IPv4 and IPv6 MH traffic across DCI
         """
         tc_id = "test_base_dci_l3vni_dualstack_mh_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -5927,10 +5927,10 @@ class TestVxlanDCIBase():
         summ = ''
         
         # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        # Send IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (multi-homed hosts)')
+        # Send MH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
+        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (MH hosts only)')
         if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross',
-                          simultaneous=True):
+                          traffic_names=['L3-MH'], simultaneous=True):
             st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Pass')
         else:
             summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'

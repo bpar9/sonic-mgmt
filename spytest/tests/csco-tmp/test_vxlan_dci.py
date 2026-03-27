@@ -5872,18 +5872,11 @@ class TestVxlanDCIBase():
             result = False
         
         # Step 2: Send simultaneous IPv4 and IPv6 traffic within DC (SH hosts)
-        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic within DC (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
-            st.log('L3VNI dual-stack SH IPv4 within-DC traffic: Pass')
+        st.banner('Step 2: Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within'):
+            st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Pass')
         else:
-            summ += 'L3VNI dual-stack SH IPv4 within-DC traffic: Fail\n'
-            result = False
-        
-        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic within DC (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
-            st.log('L3VNI dual-stack SH IPv6 within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI dual-stack SH IPv6 within-DC traffic: Fail\n'
+            summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
             result = False
         
         
@@ -5923,18 +5916,11 @@ class TestVxlanDCIBase():
             result = False
         
         # Step 2: Send simultaneous IPv4 and IPv6 traffic across DCI (SH hosts)
-        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic across DCI (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
-            st.log('L3VNI dual-stack SH IPv4 traffic across DCI: Pass')
+        st.banner('Step 2: Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (single-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Pass')
         else:
-            summ += 'L3VNI dual-stack SH IPv4 traffic across DCI: Fail\n'
-            result = False
-        
-        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic across DCI (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
-            st.log('L3VNI dual-stack SH IPv6 traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI dual-stack SH IPv6 traffic across DCI: Fail\n'
+            summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'
             result = False
         
         
@@ -5974,18 +5960,11 @@ class TestVxlanDCIBase():
             result = False
         
         # Step 2: Send simultaneous IPv4 and IPv6 traffic within DC (MH hosts)
-        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic within DC (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
-            st.log('L3VNI dual-stack MH IPv4 within-DC traffic: Pass')
+        st.banner('Step 2: Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within'):
+            st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Pass')
         else:
-            summ += 'L3VNI dual-stack MH IPv4 within-DC traffic: Fail\n'
-            result = False
-        
-        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic within DC (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
-            st.log('L3VNI dual-stack MH IPv6 within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI dual-stack MH IPv6 within-DC traffic: Fail\n'
+            summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
             result = False
         
         
@@ -6025,18 +6004,11 @@ class TestVxlanDCIBase():
             result = False
         
         # Step 2: Send simultaneous IPv4 and IPv6 traffic across DCI (MH hosts)
-        st.banner('Step 2: Verify dual-stack L3VNI IPv4 traffic across DCI (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
-            st.log('L3VNI dual-stack MH IPv4 traffic across DCI: Pass')
+        st.banner('Step 2: Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (multi-homed hosts)')
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Pass')
         else:
-            summ += 'L3VNI dual-stack MH IPv4 traffic across DCI: Fail\n'
-            result = False
-        
-        st.banner('Step 2b: Verify dual-stack L3VNI IPv6 traffic across DCI (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
-            st.log('L3VNI dual-stack MH IPv6 traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI dual-stack MH IPv6 traffic across DCI: Fail\n'
+            summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'
             result = False
         
         

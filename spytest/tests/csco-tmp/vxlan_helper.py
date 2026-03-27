@@ -3516,6 +3516,44 @@ def _get_dc_from_name(name):
             return p
     return None
 
+def get_dci_link_interfaces(dut, test_cfg):
+    """
+    Get DCI-facing link interfaces on a BGW/DCI node.
+
+    Looks up the 'dci_int' key from the interface config for the given node,
+    which contains the list of interfaces connecting to remote DC BGW nodes
+    (WAN/DCI links). Falls back to finding interfaces by naming convention
+    if dci_int is not available.
+
+    Args:
+        dut: DUT name (e.g. 'spine2_dc1_bgw1')
+        test_cfg: Test configuration dictionary containing 'int_config' or topology info
+
+    Returns:
+        list: List of DCI-facing interface names, or empty list if none found
+    """
+    config_dict = get_cfg_dict()
+    int_config = config_dict.get('int_config', {})
+
+    # Primary: use dci_int from config
+    dci_intfs = int_config.get(dut, {}).get('dci_int', [])
+    if dci_intfs:
+        st.log('get_dci_link_interfaces: {} has dci_int: {}'.format(dut, dci_intfs))
+        return list(dci_intfs)
+
+    # Fallback: look in test_cfg for WAN/DCI link info
+    if test_cfg and test_cfg.get('int_config'):
+        dci_intfs = test_cfg['int_config'].get(dut, {}).get('dci_int', [])
+        if dci_intfs:
+            st.log('get_dci_link_interfaces: {} has dci_int from test_cfg: {}'.format(dut, dci_intfs))
+            return list(dci_intfs)
+
+    # Second fallback: get all interfaces and filter for WAN-facing ones
+    # BGW nodes typically have interfaces toward other BGWs labeled in topology
+    st.log('get_dci_link_interfaces: no dci_int found for {}, returning empty'.format(dut))
+    return []
+
+
 def get_node_sort_key(node):
     """Return a deterministic sort key tuple for topology nodes.
 

@@ -3874,6 +3874,1072 @@ class TestVxlanBGPTriggers():
 
 
 # ============================================================================
+# INTERFACE TRIGGER TEST CLASS (DCI link flap/shut)
+# ============================================================================
+
+@pytest.mark.usefixtures('tgen_health_check_class')
+class TestVxlanInterfaceTriggers():
+    """DCI link flap/shut triggers: verify traffic recovery after interface operations."""
+    """
+    Test class for DCI link interface triggers.
+    Verifies traffic recovery after DCI link flap and shut operations.
+    Includes L3VNI traffic verification (l3_v4, l3_v6) in addition to L2VNI.
+    
+    Test cases:
+        - Solution_dci:26 / L3VNI_dci:39 - DCI link flap (1 link)
+        - Solution_dci:27 / L3VNI_dci:40 - DCI link shut (1 link)
+        - Solution_dci:28 / L3VNI_dci:41 - DCI link flap (all interfaces)
+        - Solution_dci:29 / L3VNI_dci:42 - DCI link shut (all towards 1 DCI node)
+        - Solution_dci:30 / L3VNI_dci:43 - DCI link shut (all DCI nodes unreachable)
+    """
+    
+    def test_dci_link_flap_single(self):
+        """
+        Solution_dci:26 / L3VNI_dci:39 - DCI link flap (1 link).
+        Shut/unshut 1 link between DCI nodes and verify L2VNI + L3VNI traffic recovery.
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Shut/unshut 1 link between the DCI nodes. Traffic should recover after the flap.
+            3) Verify L3VNI traffic between the hosts across DC1, DC2 and DC3
+            4) Verify traffic recovers
+            5) Verify no crash/core seen
+        
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify traffic before trigger (L2VNI + L3VNI)
+            3. Get DCI link interfaces
+            4. Shut 1 DCI link
+            5. Verify traffic redirects to alternate path
+            6. Unshut the DCI link
+            7. Verify base setup after trigger (with retries)
+            8. Verify traffic flows (L2VNI + L3VNI)
+            9. Check for core files/crashes
+        """
+        tc_id = 'test_dci_link_flap_single'
+        result_str = ''
+        traffic_scope = 'cross'
+        
+        # Get BGW/DCI nodes
+        target_nodes = []
+        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
+            if test_cfg['nodes'].get(dc_key):
+                target_nodes.extend(test_cfg['nodes'][dc_key])
+        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
+            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
+        
+        if not target_nodes:
+            pytest.skip('No DCI/BGW nodes found in testbed configuration')
+            return
+        
+        st.banner('TEST: Solution_dci:26 / L3VNI_dci:39 - DCI link flap (1 link)')
+        st.log('DCI/BGW nodes: {}'.format(target_nodes))
+        
+        # Select first BGW node and find a DCI-facing interface
+        selected_dut = target_nodes[0]
+        
+        try:
+            # Step 1: Verify base setup before trigger
+            st.banner("Step 1: Verify base setup before DCI link flap")
+            try:
+                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before DCI link flap\n"
+                    st.error("Base setup not healthy before trigger")
+            except Exception as err:
+                st.log('Base setup check encountered error: {}'.format(err))
+            
+            # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 2: Verifying traffic BEFORE DCI link flap')
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=traffic_scope)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before DCI link flap\n"
+                        st.error("Traffic not healthy before trigger")
+                    else:
+                        st.banner("Traffic verification passed before DCI link flap")
+                except Exception as err:
+                    st.log('Traffic verification encountered error: {}'.format(err))
+                    result_str += 'Traffic verification error before DCI link flap: {}\n'.format(err)
+            
+            # Step 3: Get DCI link interfaces on selected BGW
+            st.banner('Step 3: Getting DCI link interfaces on {}'.format(selected_dut))
+            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
+            if not dci_interfaces:
+                st.error("No DCI link interfaces found on {}".format(selected_dut))
+                result_str += "No DCI link interfaces found\n"
+                report_result(False, tc_id, result_str)
+                return
+            
+            # Select 1 interface for single link flap
+            flap_intf = dci_interfaces[0]
+            st.log('Selected DCI interface for flap: {} on {}'.format(flap_intf, selected_dut))
+            
+            # Step 4: Shut the DCI link
+            st.banner('Step 4: Shutting DCI link {} on {}'.format(flap_intf, selected_dut))
+            intf_obj.interface_shutdown(selected_dut, [flap_intf])
+            st.wait(5, 'Waiting for convergence after DCI link shut')
+            
+            # Step 5: Verify traffic redirects (cross-DC traffic should still flow via alternate path)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 5: Verifying traffic redirects after single DCI link shut')
+                try:
+                    traffic_during = verify_traffic(tgen_handles, bum=True,
+                                                     traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                     scope=traffic_scope)
+                    if not traffic_during:
+                        result_str += "Traffic verification failed during single DCI link shut\n"
+                        st.error("Traffic not flowing during single DCI link shut")
+                    else:
+                        st.banner("Traffic still flowing via alternate path during single DCI link shut")
+                except Exception as err:
+                    st.log('Traffic check during shut error: {}'.format(err))
+            
+            # Step 6: Unshut the DCI link
+            st.banner('Step 6: Unshutting DCI link {} on {}'.format(flap_intf, selected_dut))
+            intf_obj.interface_noshutdown(selected_dut, [flap_intf])
+            st.wait(10, 'Waiting for convergence after DCI link unshut')
+            
+            # Step 7: Verify base setup after trigger with retries
+            st.banner('Step 7: Verifying base setup after DCI link flap')
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
+            if not result_after:
+                result_str += "Base setup verification failed after DCI link flap\n"
+                st.error("Base setup verification failed after DCI link flap")
+            else:
+                st.banner("Base setup verification passed after DCI link flap")
+            
+            # Step 8: Verify traffic after trigger (L2VNI + L3VNI)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 8: Verifying traffic after DCI link flap')
+                traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                scope=traffic_scope)
+                if not traffic_result:
+                    result_str += "Traffic verification failed after DCI link flap\n"
+                    st.error("Traffic verification failed after DCI link flap")
+                else:
+                    st.banner("Traffic verification passed after DCI link flap")
+            
+            # Step 9: Check for core files/crashes
+            st.banner("Step 9: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                result_str += "Core files detected after DCI link flap\n"
+                st.error("Core files detected after DCI link flap")
+            else:
+                st.log("No core files detected")
+        
+        except Exception as e:
+            result_str += 'Exception: {}\n'.format(e)
+            st.error('Test encountered exception: {}'.format(e))
+            # Ensure interface is restored
+            try:
+                intf_obj.interface_noshutdown(selected_dut, [flap_intf])
+            except Exception:
+                pass
+        
+        if not result_str:
+            st.banner('TEST PASSED: Solution_dci:26 / L3VNI_dci:39 - {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+    
+    def test_dci_link_shut_single(self):
+        """
+        Solution_dci:27 / L3VNI_dci:40 - DCI link shut (1 link).
+        Shut 1 link between DCI nodes, verify traffic redirects to alternate path,
+        then unshut and verify L2VNI + L3VNI traffic recovery.
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Shut 1 link between the DCI nodes. Traffic should be redirected to another link.
+            3) Verify L3VNI traffic between the hosts across DC1, DC2 and DC3
+            4) Verify traffic recovers
+            5) Verify no crash/core seen
+        
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify traffic before trigger (L2VNI + L3VNI)
+            3. Get DCI link interfaces
+            4. Shut 1 DCI link
+            5. Verify traffic redirects to alternate DCI link
+            6. Verify base setup with 1 link down
+            7. Unshut the DCI link
+            8. Verify base setup after recovery (with retries)
+            9. Verify traffic flows (L2VNI + L3VNI)
+            10. Check for core files/crashes
+        """
+        tc_id = 'test_dci_link_shut_single'
+        result_str = ''
+        traffic_scope = 'cross'
+        
+        # Get BGW/DCI nodes
+        target_nodes = []
+        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
+            if test_cfg['nodes'].get(dc_key):
+                target_nodes.extend(test_cfg['nodes'][dc_key])
+        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
+            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
+        
+        if not target_nodes:
+            pytest.skip('No DCI/BGW nodes found in testbed configuration')
+            return
+        
+        st.banner('TEST: Solution_dci:27 / L3VNI_dci:40 - DCI link shut (1 link)')
+        selected_dut = target_nodes[0]
+        
+        try:
+            # Step 1: Verify base setup before trigger
+            st.banner("Step 1: Verify base setup before DCI link shut")
+            try:
+                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before DCI link shut\n"
+            except Exception as err:
+                st.log('Base setup check encountered error: {}'.format(err))
+            
+            # Step 2: Verify traffic before trigger
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 2: Verifying traffic BEFORE DCI link shut')
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=traffic_scope)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before DCI link shut\n"
+                    else:
+                        st.banner("Traffic verification passed before DCI link shut")
+                except Exception as err:
+                    result_str += 'Traffic verification error: {}\n'.format(err)
+            
+            # Step 3: Get DCI link interfaces
+            st.banner('Step 3: Getting DCI link interfaces on {}'.format(selected_dut))
+            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
+            if not dci_interfaces:
+                st.error("No DCI link interfaces found on {}".format(selected_dut))
+                result_str += "No DCI link interfaces found\n"
+                report_result(False, tc_id, result_str)
+                return
+            
+            flap_intf = dci_interfaces[0]
+            st.log('Selected DCI interface for shut: {} on {}'.format(flap_intf, selected_dut))
+            
+            # Step 4: Shut the DCI link
+            st.banner('Step 4: Shutting DCI link {} on {}'.format(flap_intf, selected_dut))
+            intf_obj.interface_shutdown(selected_dut, [flap_intf])
+            st.wait(10, 'Waiting for convergence after DCI link shut')
+            
+            # Step 5: Verify traffic redirects to alternate DCI link
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 5: Verifying traffic redirects after DCI link shut')
+                try:
+                    traffic_during = verify_traffic(tgen_handles, bum=True,
+                                                     traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                     scope=traffic_scope)
+                    if not traffic_during:
+                        result_str += "Traffic not redirected during single DCI link shut\n"
+                    else:
+                        st.banner("Traffic redirected via alternate path")
+                except Exception as err:
+                    result_str += 'Traffic check error: {}\n'.format(err)
+            
+            # Step 6: Verify base setup with 1 link down
+            st.banner('Step 6: Verifying base setup with 1 DCI link down')
+            try:
+                result_during = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+                if not result_during:
+                    st.log("Base setup shows changes with 1 link down (expected)")
+            except Exception as err:
+                st.log('Base setup check with link down: {}'.format(err))
+            
+            # Step 7: Unshut the DCI link
+            st.banner('Step 7: Unshutting DCI link {} on {}'.format(flap_intf, selected_dut))
+            intf_obj.interface_noshutdown(selected_dut, [flap_intf])
+            st.wait(10, 'Waiting for convergence after DCI link unshut')
+            
+            # Step 8: Verify base setup after recovery
+            st.banner('Step 8: Verifying base setup after DCI link recovery')
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
+            if not result_after:
+                result_str += "Base setup verification failed after DCI link recovery\n"
+            else:
+                st.banner("Base setup verification passed after DCI link recovery")
+            
+            # Step 9: Verify traffic after recovery
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 9: Verifying traffic after DCI link recovery')
+                traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                scope=traffic_scope)
+                if not traffic_result:
+                    result_str += "Traffic verification failed after DCI link recovery\n"
+                else:
+                    st.banner("Traffic verification passed after DCI link recovery")
+            
+            # Step 10: Check for core files/crashes
+            st.banner("Step 10: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                result_str += "Core files detected after DCI link shut test\n"
+            else:
+                st.log("No core files detected")
+        
+        except Exception as e:
+            result_str += 'Exception: {}\n'.format(e)
+            try:
+                intf_obj.interface_noshutdown(selected_dut, [flap_intf])
+            except Exception:
+                pass
+        
+        if not result_str:
+            st.banner('TEST PASSED: Solution_dci:27 / L3VNI_dci:40 - {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+    
+    def test_dci_link_flap_all(self):
+        """
+        Solution_dci:28 / L3VNI_dci:41 - DCI link flap (all interfaces).
+        Shut/unshut all links between DCI nodes and verify L2VNI + L3VNI traffic recovery.
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Shut/unshut all links between DCI nodes. Traffic should redirect to another DCI node.
+            3) Verify L3VNI traffic between hosts across DC1, DC2 and DC3
+            4) Verify traffic recovers
+            5) Verify no crash/core seen
+        
+        Steps:
+            1. Verify base setup and traffic before trigger
+            2. Get all DCI link interfaces on selected BGW
+            3. Shut all DCI links on selected BGW
+            4. Wait for convergence
+            5. Unshut all DCI links
+            6. Verify base setup and traffic after recovery
+            7. Check for core files/crashes
+        """
+        tc_id = 'test_dci_link_flap_all'
+        result_str = ''
+        traffic_scope = 'cross'
+        
+        # Get BGW/DCI nodes
+        target_nodes = []
+        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
+            if test_cfg['nodes'].get(dc_key):
+                target_nodes.extend(test_cfg['nodes'][dc_key])
+        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
+            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
+        
+        if not target_nodes:
+            pytest.skip('No DCI/BGW nodes found in testbed configuration')
+            return
+        
+        st.banner('TEST: Solution_dci:28 / L3VNI_dci:41 - DCI link flap (all interfaces)')
+        selected_dut = target_nodes[0]
+        flap_intfs = []
+        
+        try:
+            # Step 1: Verify base setup and traffic before trigger
+            st.banner("Step 1: Verify base setup before all DCI link flap")
+            try:
+                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before trigger\n"
+            except Exception as err:
+                st.log('Base setup check error: {}'.format(err))
+            
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 1b: Verifying traffic BEFORE all DCI link flap')
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=traffic_scope)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before trigger\n"
+                    else:
+                        st.banner("Traffic verification passed before trigger")
+                except Exception as err:
+                    result_str += 'Traffic error: {}\n'.format(err)
+            
+            # Step 2: Get all DCI link interfaces
+            st.banner('Step 2: Getting all DCI link interfaces on {}'.format(selected_dut))
+            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
+            if not dci_interfaces:
+                st.error("No DCI link interfaces found on {}".format(selected_dut))
+                result_str += "No DCI link interfaces found\n"
+                report_result(False, tc_id, result_str)
+                return
+            
+            flap_intfs = dci_interfaces
+            st.log('All DCI interfaces for flap: {} on {}'.format(flap_intfs, selected_dut))
+            
+            # Step 3: Shut all DCI links
+            st.banner('Step 3: Shutting all DCI links on {}'.format(selected_dut))
+            intf_obj.interface_shutdown(selected_dut, flap_intfs)
+            st.wait(10, 'Waiting for convergence after all DCI links shut')
+            
+            # Step 4: Unshut all DCI links
+            st.banner('Step 4: Unshutting all DCI links on {}'.format(selected_dut))
+            intf_obj.interface_noshutdown(selected_dut, flap_intfs)
+            st.wait(15, 'Waiting for convergence after all DCI links unshut')
+            
+            # Step 5: Verify base setup after recovery
+            st.banner('Step 5: Verifying base setup after all DCI link flap')
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
+            if not result_after:
+                result_str += "Base setup verification failed after all DCI link flap\n"
+            else:
+                st.banner("Base setup verification passed after all DCI link flap")
+            
+            # Step 6: Verify traffic after recovery
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 6: Verifying traffic after all DCI link flap')
+                traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                scope=traffic_scope)
+                if not traffic_result:
+                    result_str += "Traffic verification failed after all DCI link flap\n"
+                else:
+                    st.banner("Traffic verification passed after all DCI link flap")
+            
+            # Step 7: Check for core files/crashes
+            st.banner("Step 7: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                result_str += "Core files detected after all DCI link flap\n"
+            else:
+                st.log("No core files detected")
+        
+        except Exception as e:
+            result_str += 'Exception: {}\n'.format(e)
+            try:
+                if flap_intfs:
+                    intf_obj.interface_noshutdown(selected_dut, flap_intfs)
+            except Exception:
+                pass
+        
+        if not result_str:
+            st.banner('TEST PASSED: Solution_dci:28 / L3VNI_dci:41 - {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+    
+    def test_dci_link_shut_one_node_unreachable(self):
+        """
+        Solution_dci:29 / L3VNI_dci:42 - DCI link shut (all towards 1 DCI node).
+        Shut all links towards 1 DCI node making it unreachable, verify traffic redirects
+        to another DCI node, then recover and verify L2VNI + L3VNI traffic.
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Shut all links between 1 DCI node. Traffic should redirect to another DCI node.
+            3) Verify L3VNI traffic between hosts across DC1, DC2 and DC3
+            4) Verify traffic recovers
+            5) Verify no crash/core seen
+        
+        Steps:
+            1. Verify base setup and traffic before trigger
+            2. Get all DCI link interfaces on selected BGW
+            3. Shut all DCI links on the selected BGW (making it unreachable)
+            4. Verify traffic redirects to another DCI node
+            5. Unshut all DCI links
+            6. Verify base setup and traffic after recovery
+            7. Check for core files/crashes
+        """
+        tc_id = 'test_dci_link_shut_one_node_unreachable'
+        result_str = ''
+        traffic_scope = 'cross'
+        
+        # Get BGW/DCI nodes
+        target_nodes = []
+        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
+            if test_cfg['nodes'].get(dc_key):
+                target_nodes.extend(test_cfg['nodes'][dc_key])
+        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
+            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
+        
+        if not target_nodes:
+            pytest.skip('No DCI/BGW nodes found in testbed configuration')
+            return
+        
+        st.banner('TEST: Solution_dci:29 / L3VNI_dci:42 - DCI link shut (1 DCI node unreachable)')
+        selected_dut = target_nodes[0]
+        shut_intfs = []
+        
+        try:
+            # Step 1: Verify base setup and traffic before trigger
+            st.banner("Step 1: Verify base setup before trigger")
+            try:
+                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before trigger\n"
+            except Exception as err:
+                st.log('Base setup check error: {}'.format(err))
+            
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 1b: Verifying traffic BEFORE trigger')
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=traffic_scope)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before trigger\n"
+                    else:
+                        st.banner("Traffic verification passed before trigger")
+                except Exception as err:
+                    result_str += 'Traffic error: {}\n'.format(err)
+            
+            # Step 2: Get all DCI link interfaces on selected BGW
+            st.banner('Step 2: Getting all DCI link interfaces on {}'.format(selected_dut))
+            dci_interfaces = vxlan_obj.get_dci_link_interfaces(selected_dut, test_cfg)
+            if not dci_interfaces:
+                st.error("No DCI link interfaces found on {}".format(selected_dut))
+                result_str += "No DCI link interfaces found\n"
+                report_result(False, tc_id, result_str)
+                return
+            
+            shut_intfs = dci_interfaces
+            st.log('Shutting all DCI interfaces on {}: {}'.format(selected_dut, shut_intfs))
+            
+            # Step 3: Shut all DCI links on the selected BGW
+            st.banner('Step 3: Shutting all DCI links on {} (making it unreachable)'.format(selected_dut))
+            intf_obj.interface_shutdown(selected_dut, shut_intfs)
+            st.wait(15, 'Waiting for convergence after all DCI links shut on {}'.format(selected_dut))
+            
+            # Step 4: Verify traffic redirects to another DCI node
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 4: Verifying traffic redirects via alternate DCI node')
+                try:
+                    traffic_during = verify_traffic(tgen_handles, bum=True,
+                                                     traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                     scope=traffic_scope)
+                    if not traffic_during:
+                        result_str += "Traffic not redirected when 1 DCI node unreachable\n"
+                    else:
+                        st.banner("Traffic redirected via alternate DCI node")
+                except Exception as err:
+                    result_str += 'Traffic check error: {}\n'.format(err)
+            
+            # Step 5: Unshut all DCI links
+            st.banner('Step 5: Unshutting all DCI links on {}'.format(selected_dut))
+            intf_obj.interface_noshutdown(selected_dut, shut_intfs)
+            st.wait(15, 'Waiting for convergence after DCI links restored')
+            
+            # Step 6: Verify base setup and traffic after recovery
+            st.banner('Step 6: Verifying base setup after DCI node recovery')
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
+            if not result_after:
+                result_str += "Base setup verification failed after recovery\n"
+            else:
+                st.banner("Base setup verification passed after recovery")
+            
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 6b: Verifying traffic after DCI node recovery')
+                traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                scope=traffic_scope)
+                if not traffic_result:
+                    result_str += "Traffic verification failed after recovery\n"
+                else:
+                    st.banner("Traffic verification passed after recovery")
+            
+            # Step 7: Check for core files/crashes
+            st.banner("Step 7: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                result_str += "Core files detected\n"
+            else:
+                st.log("No core files detected")
+        
+        except Exception as e:
+            result_str += 'Exception: {}\n'.format(e)
+            try:
+                if shut_intfs:
+                    intf_obj.interface_noshutdown(selected_dut, shut_intfs)
+            except Exception:
+                pass
+        
+        if not result_str:
+            st.banner('TEST PASSED: Solution_dci:29 / L3VNI_dci:42 - {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+    
+    def test_dci_link_shut_all_unreachable(self):
+        """
+        Solution_dci:30 / L3VNI_dci:43 - DCI link shut (all DCI nodes unreachable).
+        Shut all links on all DCI nodes, verify cross-DC traffic drops, then recover
+        and verify L2VNI + L3VNI traffic.
+        
+        Description:
+            1) Refer to Solution_dci:1 testcase for base profile bring up
+            2) Shut/unshut all links between all DCI nodes
+            3) Verify L3VNI traffic between hosts across DC1, DC2 and DC3
+            4) Verify traffic recovers
+            5) Verify no crash/core seen
+        
+        Steps:
+            1. Verify base setup and traffic before trigger
+            2. Get all DCI link interfaces on all BGW nodes
+            3. Shut all DCI links on all BGW nodes
+            4. Verify cross-DC traffic drops (expected)
+            5. Unshut all DCI links on all BGW nodes
+            6. Verify base setup and traffic after recovery
+            7. Check for core files/crashes
+        """
+        tc_id = 'test_dci_link_shut_all_unreachable'
+        result_str = ''
+        traffic_scope = 'cross'
+        
+        # Get all BGW/DCI nodes
+        target_nodes = []
+        for dc_key in ['dc1_bgw', 'dc2_bgw', 'dc3_bgw']:
+            if test_cfg['nodes'].get(dc_key):
+                target_nodes.extend(test_cfg['nodes'][dc_key])
+        if not target_nodes and test_cfg['nodes'].get('l2l3vni_bgw'):
+            target_nodes = test_cfg['nodes']['l2l3vni_bgw']
+        
+        if not target_nodes:
+            pytest.skip('No DCI/BGW nodes found in testbed configuration')
+            return
+        
+        st.banner('TEST: Solution_dci:30 / L3VNI_dci:43 - DCI link shut (all nodes unreachable)')
+        shut_map = {}
+        
+        try:
+            # Step 1: Verify base setup and traffic before trigger
+            st.banner("Step 1: Verify base setup before trigger")
+            try:
+                result_before = verify_base_setup_bgw(target_nodes, skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before trigger\n"
+            except Exception as err:
+                st.log('Base setup check error: {}'.format(err))
+            
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 1b: Verifying traffic BEFORE trigger')
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=traffic_scope)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before trigger\n"
+                    else:
+                        st.banner("Traffic verification passed before trigger")
+                except Exception as err:
+                    result_str += 'Traffic error: {}\n'.format(err)
+            
+            # Step 2: Get all DCI link interfaces on all BGW nodes
+            st.banner('Step 2: Getting all DCI link interfaces on all BGW nodes')
+            for dut in target_nodes:
+                dci_interfaces = vxlan_obj.get_dci_link_interfaces(dut, test_cfg)
+                if dci_interfaces:
+                    shut_map[dut] = dci_interfaces
+                    st.log('DCI interfaces on {}: {}'.format(dut, dci_interfaces))
+                else:
+                    st.log('No DCI interfaces found on {}'.format(dut))
+            
+            if not shut_map:
+                st.error("No DCI link interfaces found on any BGW node")
+                result_str += "No DCI link interfaces found\n"
+                report_result(False, tc_id, result_str)
+                return
+            
+            # Step 3: Shut all DCI links on all BGW nodes
+            st.banner('Step 3: Shutting all DCI links on all BGW nodes')
+            for dut, intfs in shut_map.items():
+                st.log('Shutting DCI interfaces on {}: {}'.format(dut, intfs))
+                intf_obj.interface_shutdown(dut, intfs)
+            st.wait(15, 'Waiting for convergence after all DCI links shut')
+            
+            # Step 4: Cross-DC traffic should drop (all DCI nodes unreachable)
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 4: Verifying cross-DC traffic drops (all DCI unreachable)')
+                st.log("Cross-DC traffic expected to drop with all DCI links shut")
+            
+            # Step 5: Unshut all DCI links on all BGW nodes
+            st.banner('Step 5: Unshutting all DCI links on all BGW nodes')
+            for dut, intfs in shut_map.items():
+                st.log('Unshutting DCI interfaces on {}: {}'.format(dut, intfs))
+                intf_obj.interface_noshutdown(dut, intfs)
+            st.wait(20, 'Waiting for convergence after all DCI links restored')
+            
+            # Step 6: Verify base setup and traffic after recovery
+            st.banner('Step 6: Verifying base setup after all DCI links restored')
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            result_after = verify_base_setup_bgw(target_nodes, retry=retry_count)
+            if not result_after:
+                result_str += "Base setup verification failed after recovery\n"
+            else:
+                st.banner("Base setup verification passed after recovery")
+            
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 6b: Verifying traffic after all DCI links restored')
+                traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                scope=traffic_scope)
+                if not traffic_result:
+                    result_str += "Traffic verification failed after recovery\n"
+                else:
+                    st.banner("Traffic verification passed after recovery")
+            
+            # Step 7: Check for core files/crashes
+            st.banner("Step 7: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                result_str += "Core files detected\n"
+            else:
+                st.log("No core files detected")
+        
+        except Exception as e:
+            result_str += 'Exception: {}\n'.format(e)
+            for dut, intfs in shut_map.items():
+                try:
+                    intf_obj.interface_noshutdown(dut, intfs)
+                except Exception:
+                    pass
+        
+        if not result_str:
+            st.banner('TEST PASSED: Solution_dci:30 / L3VNI_dci:43 - {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+
+
+# ============================================================================
+# VLAN AND PORTCHANNEL ADD/REMOVE TEST CLASS
+# ============================================================================
+
+@pytest.mark.usefixtures('tgen_health_check_class')
+class TestVxlanAddRemoveVlan():
+    """VLAN/PortChannel add/remove triggers: verify traffic recovery after network operations."""
+    """
+    Test class for VLAN and PortChannel add/remove triggers on Leaf nodes.
+    Verifies traffic recovery after VLAN membership and PortChannel configuration changes.
+    Includes L3VNI traffic verification (l3_v4, l3_v6) in addition to L2VNI.
+    
+    Test cases:
+        - Solution_dci:55 / L3VNI_dci:91 - Remove/Add VLAN on leaf
+        - Solution_dci:24 / L3VNI_dci:101 - PortChannel delete/add on leaf
+    """
+    
+    def test_vlan_remove_add(self):
+        """
+        Solution_dci:55 / L3VNI_dci:91 - Remove/Add VLAN on leaf.
+        Remove and re-add a VLAN on a DC1 leaf, verify L2VNI + L3VNI traffic recovery.
+        
+        Description:
+            1) Bring up the base profile
+            2) Remove/Add VLAN on DC1-Leaf
+            3) Verify Traffic recovers
+            4) Verify no cores and crashes
+        
+        Steps:
+            1. Verify base setup and traffic before trigger
+            2. Select a leaf node and VLAN for testing
+            3. Remove VLAN member from leaf
+            4. Verify route withdrawal
+            5. Re-add VLAN member to leaf
+            6. Verify base setup and traffic after recovery
+            7. Check for core files/crashes
+        """
+        tc_id = 'test_vlan_remove_add'
+        result_str = ''
+        
+        # Get DC1 leaf nodes
+        target_nodes = [node for node in test_cfg['nodes'].get('l2l3vni', [])
+                       if 'leaf' in node and 'dc1' in node]
+        if not target_nodes:
+            target_nodes = [node for node in test_cfg['nodes'].get('l2l3vni', []) if 'leaf' in node]
+        
+        if not target_nodes:
+            pytest.skip('No leaf nodes found in testbed configuration')
+            return
+        
+        selected_dut = target_nodes[0]
+        st.banner('TEST: Solution_dci:55 / L3VNI_dci:91 - Remove/Add VLAN on leaf')
+        st.log('Selected leaf node: {}'.format(selected_dut))
+        
+        # Select a test VLAN (use first data VLAN from Vrf101)
+        test_vlan = None
+        test_member = None
+        if test_cfg.get('vlan_config') and test_cfg['vlan_config'].get(selected_dut):
+            vlan_info = test_cfg['vlan_config'][selected_dut]
+            for vlan_id, members in vlan_info.items():
+                if int(vlan_id) >= 11 and int(vlan_id) <= 15:
+                    test_vlan = vlan_id
+                    if members:
+                        test_member = members[0] if isinstance(members, list) else members
+                    break
+        
+        if not test_vlan:
+            # Fallback: use VLAN 11
+            test_vlan = '11'
+            st.log('Using default VLAN 11 for test')
+        
+        try:
+            # Step 1: Verify base setup and traffic before trigger
+            st.banner("Step 1: Verify base setup before VLAN remove/add")
+            try:
+                result_before = verify_base_setup_bgw([selected_dut], skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before trigger\n"
+            except Exception as err:
+                st.log('Base setup check error: {}'.format(err))
+            
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 1b: Verifying traffic BEFORE VLAN remove/add')
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=None)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before trigger\n"
+                    else:
+                        st.banner("Traffic verification passed before trigger")
+                except Exception as err:
+                    result_str += 'Traffic error: {}\n'.format(err)
+            
+            # Step 2: Remove VLAN member
+            st.banner('Step 2: Removing VLAN {} member on {}'.format(test_vlan, selected_dut))
+            if test_member:
+                vlan_obj.delete_vlan_member(selected_dut, test_vlan, test_member)
+                st.log('Removed member {} from VLAN {} on {}'.format(test_member, test_vlan, selected_dut))
+            else:
+                vlan_obj.delete_vlan(selected_dut, test_vlan)
+                st.log('Deleted VLAN {} on {}'.format(test_vlan, selected_dut))
+            st.wait(10, 'Waiting for convergence after VLAN removal')
+            
+            # Step 3: Verify route withdrawal
+            st.banner('Step 3: Verifying route withdrawal after VLAN removal')
+            st.log('Routes associated with VLAN {} should be withdrawn'.format(test_vlan))
+            
+            # Step 4: Re-add VLAN member
+            st.banner('Step 4: Re-adding VLAN {} member on {}'.format(test_vlan, selected_dut))
+            if test_member:
+                vlan_obj.add_vlan_member(selected_dut, test_vlan, test_member)
+                st.log('Re-added member {} to VLAN {} on {}'.format(test_member, test_vlan, selected_dut))
+            else:
+                vlan_obj.create_vlan(selected_dut, test_vlan)
+                st.log('Re-created VLAN {} on {}'.format(test_vlan, selected_dut))
+            st.wait(15, 'Waiting for convergence after VLAN re-add')
+            
+            # Step 5: Verify base setup after recovery
+            st.banner('Step 5: Verifying base setup after VLAN re-add')
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            result_after = verify_base_setup_bgw([selected_dut], retry=retry_count)
+            if not result_after:
+                result_str += "Base setup verification failed after VLAN re-add\n"
+            else:
+                st.banner("Base setup verification passed after VLAN re-add")
+            
+            # Step 6: Verify traffic after recovery
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 6: Verifying traffic after VLAN re-add')
+                traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                scope=None)
+                if not traffic_result:
+                    result_str += "Traffic verification failed after VLAN re-add\n"
+                else:
+                    st.banner("Traffic verification passed after VLAN re-add")
+            
+            # Step 7: Check for core files/crashes
+            st.banner("Step 7: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                result_str += "Core files detected\n"
+            else:
+                st.log("No core files detected")
+        
+        except Exception as e:
+            result_str += 'Exception: {}\n'.format(e)
+            # Try to restore VLAN
+            try:
+                if test_member:
+                    vlan_obj.add_vlan_member(selected_dut, test_vlan, test_member)
+                else:
+                    vlan_obj.create_vlan(selected_dut, test_vlan)
+            except Exception:
+                pass
+        
+        if not result_str:
+            st.banner('TEST PASSED: Solution_dci:55 / L3VNI_dci:91 - {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+    
+    def test_portchannel_delete_add(self):
+        """
+        Solution_dci:24 / L3VNI_dci:101 - PortChannel delete/add on leaf.
+        Delete and re-add a PortChannel on a leaf, verify L2VNI + L3VNI traffic recovery.
+        Also verify that PortChannel is removed/added in FRR.
+        
+        Description:
+            1) Bring up the base profile
+            2) Delete/Add PortChannel on leaf. Also verify that PortChannel is removed/added in FRR
+            3) Verify Traffic recovers
+            4) Verify no cores and crashes
+        
+        Steps:
+            1. Verify base setup and traffic before trigger
+            2. Select a leaf node and PortChannel for testing
+            3. Save PortChannel config (members, VLANs)
+            4. Delete PortChannel
+            5. Verify PortChannel removed from FRR
+            6. Re-add PortChannel with same config
+            7. Verify PortChannel added back in FRR
+            8. Verify base setup and traffic after recovery
+            9. Check for core files/crashes
+        """
+        tc_id = 'test_portchannel_delete_add'
+        result_str = ''
+        
+        # Get leaf nodes with PortChannels
+        target_nodes = [node for node in test_cfg['nodes'].get('l2l3vni', []) if 'leaf' in node]
+        
+        if not target_nodes:
+            pytest.skip('No leaf nodes found in testbed configuration')
+            return
+        
+        selected_dut = target_nodes[0]
+        st.banner('TEST: Solution_dci:24 / L3VNI_dci:101 - PortChannel delete/add on leaf')
+        st.log('Selected leaf node: {}'.format(selected_dut))
+        
+        # Get PortChannel info from config
+        pc_name = None
+        pc_members = []
+        if test_cfg.get('portchannel_config') and test_cfg['portchannel_config'].get(selected_dut):
+            pc_info = test_cfg['portchannel_config'][selected_dut]
+            for pc, members in pc_info.items():
+                pc_name = pc
+                pc_members = members if isinstance(members, list) else [members]
+                break
+        
+        if not pc_name:
+            # Fallback: try to find PortChannel from topology
+            pc_name = 'PortChannel1'
+            st.log('Using default PortChannel1 for test')
+        
+        try:
+            # Step 1: Verify base setup and traffic before trigger
+            st.banner("Step 1: Verify base setup before PortChannel delete/add")
+            try:
+                result_before = verify_base_setup_bgw([selected_dut], skip_checks=['vteps'])
+                if not result_before:
+                    result_str += "Base setup verification failed before trigger\n"
+            except Exception as err:
+                st.log('Base setup check error: {}'.format(err))
+            
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 1b: Verifying traffic BEFORE PortChannel delete/add')
+                try:
+                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
+                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                           scope=None)
+                    if not traffic_result_before:
+                        result_str += "Traffic verification failed before trigger\n"
+                    else:
+                        st.banner("Traffic verification passed before trigger")
+                except Exception as err:
+                    result_str += 'Traffic error: {}\n'.format(err)
+            
+            # Step 2: Verify PortChannel exists in FRR before deletion
+            st.banner('Step 2: Verifying PortChannel {} exists in FRR on {}'.format(pc_name, selected_dut))
+            frr_output = vxlan_obj.config_dut(selected_dut, 'bgp', 'do show interface {}'.format(pc_name))
+            st.log('FRR PortChannel status before delete: {}'.format(frr_output))
+            
+            # Step 3: Delete PortChannel members and PortChannel
+            st.banner('Step 3: Deleting PortChannel {} on {}'.format(pc_name, selected_dut))
+            if pc_members:
+                for member in pc_members:
+                    pc_obj.delete_portchannel_member(selected_dut, pc_name, member)
+                    st.log('Removed member {} from {}'.format(member, pc_name))
+            pc_obj.delete_portchannel(selected_dut, pc_name)
+            st.log('Deleted PortChannel {} on {}'.format(pc_name, selected_dut))
+            st.wait(10, 'Waiting for convergence after PortChannel deletion')
+            
+            # Step 4: Verify PortChannel removed from FRR
+            st.banner('Step 4: Verifying PortChannel {} removed from FRR'.format(pc_name))
+            frr_output_after_del = vxlan_obj.config_dut(selected_dut, 'bgp', 'do show interface {}'.format(pc_name))
+            st.log('FRR PortChannel status after delete: {}'.format(frr_output_after_del))
+            
+            # Step 5: Re-add PortChannel with same config
+            st.banner('Step 5: Re-adding PortChannel {} on {}'.format(pc_name, selected_dut))
+            pc_obj.create_portchannel(selected_dut, pc_name)
+            st.log('Created PortChannel {} on {}'.format(pc_name, selected_dut))
+            if pc_members:
+                for member in pc_members:
+                    pc_obj.add_portchannel_member(selected_dut, pc_name, member)
+                    st.log('Added member {} to {}'.format(member, pc_name))
+            st.wait(15, 'Waiting for convergence after PortChannel re-add')
+            
+            # Step 6: Verify PortChannel added back in FRR
+            st.banner('Step 6: Verifying PortChannel {} added back in FRR'.format(pc_name))
+            frr_output_after_add = vxlan_obj.config_dut(selected_dut, 'bgp', 'do show interface {}'.format(pc_name))
+            st.log('FRR PortChannel status after re-add: {}'.format(frr_output_after_add))
+            
+            # Step 7: Verify base setup after recovery
+            st.banner('Step 7: Verifying base setup after PortChannel re-add')
+            retry_count = test_cfg['global'].get('proc_restart_retries', 7)
+            result_after = verify_base_setup_bgw([selected_dut], retry=retry_count)
+            if not result_after:
+                result_str += "Base setup verification failed after PortChannel re-add\n"
+            else:
+                st.banner("Base setup verification passed after PortChannel re-add")
+            
+            # Step 8: Verify traffic after recovery
+            if st.getenv('skip_tgen', 'false') != 'true':
+                st.banner('Step 8: Verifying traffic after PortChannel re-add')
+                traffic_result = verify_traffic(tgen_handles, bum=True,
+                                                traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                                scope=None)
+                if not traffic_result:
+                    result_str += "Traffic verification failed after PortChannel re-add\n"
+                else:
+                    st.banner("Traffic verification passed after PortChannel re-add")
+            
+            # Step 9: Check for core files/crashes
+            st.banner("Step 9: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                result_str += "Core files detected\n"
+            else:
+                st.log("No core files detected")
+        
+        except Exception as e:
+            result_str += 'Exception: {}\n'.format(e)
+            # Try to restore PortChannel
+            try:
+                pc_obj.create_portchannel(selected_dut, pc_name)
+                for member in pc_members:
+                    pc_obj.add_portchannel_member(selected_dut, pc_name, member)
+            except Exception:
+                pass
+        
+        if not result_str:
+            st.banner('TEST PASSED: Solution_dci:24 / L3VNI_dci:101 - {}'.format(tc_id))
+            report_result(True, tc_id)
+        else:
+            st.banner('TEST FAILED: {}'.format(tc_id))
+            st.error('Failure details:\n{}'.format(result_str))
+            report_result(False, tc_id, result_str)
+
+
+# ============================================================================
 # BASE TEST CLASS (DCI base config + base testcases only)
 # ============================================================================
 

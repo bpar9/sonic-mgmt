@@ -2564,7 +2564,7 @@ def find_l2_traffic_endpoints(host_info_dict):
                         i+=1
     return end_point_dict
 
-def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,5],"3":[6,7],"4":[8,9]}):
+def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,5],"3":[6,7],"4":[8,9]}, dci_enabled=False):
     '''
     output:
     {'traffic_item_1': {'dir': '2-->3', 'src_vlan': 2, 'src_int': 'T1D5P1', 'dst_vlan': 3, 'dst_int': 'T1D6P1'}, 
@@ -2672,7 +2672,8 @@ def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,
 
     # MH (PortChannel) source flows — 1 pair per VRF per destination interface
     # Follows l3vni_dci_traffic_flows.txt pattern: MH source uses first VLAN pair only
-    if leaf0_pc_interface and leaf0_pc_interface in temp_dict:
+    # Only generated for DCI topologies to avoid adding unexpected flows in non-DCI tests.
+    if dci_enabled and leaf0_pc_interface and leaf0_pc_interface in temp_dict:
         pc_node = temp_dict[leaf0_pc_interface]['node']
         for interface, val in temp_dict.items():
             dst_node = val['node']
@@ -6763,7 +6764,7 @@ def get_evpn_vni(dut):
     }, ...]
     """
     cmd = 'show evpn vni'
-    output = st.show(dut, cmd, type='vtysh', skip_tmpl=True)
+    output = config_dut(dut, 'bgp', cmd, get_output=True)
     
     ret_val = []
     
@@ -6838,9 +6839,16 @@ def get_expected_evpn_vni(dut):
     l3vni_config = dut_cfg.get('l3vni', [])
     if isinstance(l3vni_config, list):
         for l3vni_item in l3vni_config:
-            vni = l3vni_item.get('vxlan_id')
+            # Support both YAML key names: 'vxlan_id' (DCI) and 'l3vni' (legacy)
+            vni = l3vni_item.get('vxlan_id') or l3vni_item.get('l3vni')
             vrf_id = l3vni_item.get('vrf_id', '')
-            vrf = 'Vrf{}'.format(vrf_id) if vrf_id else 'default'
+            # Format VRF name: numeric vrf_id -> 'Vrf<N>', string already prefixed -> as-is
+            if vrf_id and str(vrf_id).isdigit():
+                vrf = 'Vrf{}'.format(vrf_id)
+            elif vrf_id:
+                vrf = str(vrf_id)
+            else:
+                vrf = 'default'
             if vni:
                 # BGW vxlan_if includes VLAN suffix: 'vxlan-dc-101', 'vxlan-dc-102'
                 if is_bgw:

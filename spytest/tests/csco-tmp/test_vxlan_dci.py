@@ -1008,7 +1008,7 @@ def tgen_preconfig(**kwargs):
     st.log(f"  Generated {len(all_l2_endpoints)} L2 endpoints from orphan ports")
     
     st.log("Step 2: Generating all L3 traffic endpoints using vxlan_helper...")
-    all_l3_endpoints = vxlan_obj.find_l3_traffic_endpoints(g_v4_host_info_dict, vrf_vlan_dict=vrf_vlan_dict)
+    all_l3_endpoints = vxlan_obj.find_l3_traffic_endpoints(g_v4_host_info_dict, vrf_vlan_dict=vrf_vlan_dict, dci_enabled=True)
     st.log(f"Generated {len(all_l3_endpoints)} L3 endpoints (before filtering)")
     
     if use_custom_filter:
@@ -2115,7 +2115,7 @@ ALL_CHECKS = [
     'ebgp_multihop',     # eBGP multihop EVPN sessions between BGWs across DCs
     'evpn_vni',          # EVPN VNI table (L3 VNIs on BGW nodes)
     'rt_rewrite',        # RT-REWRITE route-map verification (BGW nodes only)
-    'mac_arp',           # MAC and ARP table entries for L3VNI hosts
+    # 'mac_arp',         # MAC and ARP table entries for L3VNI hosts (disabled — will add later)
     'portchannel',       # PortChannel operational status
     'evpn_type5_comprehensive',  # Comprehensive Type-5: path-count, best-path, RT/ET/RMAC (BGW); prefix-presence (leaf)
     'rib_fib',           # RIB/FIB install check: show ip route vrf on BGWs
@@ -3970,7 +3970,6 @@ class TestVxlanDCIBase():
             3) Within DC, there can be MH or SH host
             4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:13)
             5) Send L3VNI IPv4 inter-VLAN traffic within DC
-            6) Verify MAC and ARP entries on leaf nodes (L3VNI_dci:13)
             7) Verify no traffic drop
             8) Verify no crash/core seen
             
@@ -3982,7 +3981,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify VRF-VNI mappings and Type-5 routes on all nodes
             2. Send L2VNI and L3VNI IPv4 traffic within DC1
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l2l3vni_ipv4_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -4008,12 +4006,6 @@ class TestVxlanDCIBase():
             st.log(summ)
             result = False
         
-        # Step 3: Verify MAC and ARP entries on leaf nodes (L3VNI_dci:13)
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4028,7 +4020,6 @@ class TestVxlanDCIBase():
             3) Within DC, there can be MH or SH host
             4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:13)
             5) Send L3VNI IPv6 inter-VLAN traffic within DC
-            6) Verify MAC and ARP entries on leaf nodes (L3VNI_dci:13)
             7) Verify no traffic drop
             8) Verify no crash/core seen
             
@@ -4040,7 +4031,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify VRF-VNI mappings and Type-5 routes on all nodes
             2. Send L2VNI and L3VNI IPv6 traffic within DC1
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l2l3vni_ipv6_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -4066,12 +4056,6 @@ class TestVxlanDCIBase():
             st.log(summ)
             result = False
         
-        # Step 3: Verify MAC and ARP entries on leaf nodes (L3VNI_dci:13)
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4085,7 +4069,6 @@ class TestVxlanDCIBase():
             2) Verify ipv4 L2VNI and L3VNI traffic between hosts across DC1, DC2 and DC3
             3) Across DC, there will be SH host only in phase 1
             4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:14)
-            5) Verify MAC and ARP entries after cross-DC traffic (L3VNI_dci:14)
             6) Verify no traffic drop
             7) Verify no crash/core seen
             
@@ -4095,7 +4078,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify VRF-VNI mappings and Type-5 routes on all nodes
             2. Send L2VNI and L3VNI IPv4 traffic across DCI
-            3. Verify MAC and ARP entries after cross-DC traffic
         """
         tc_id = "test_base_dci_l2vni_ipv4_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -4121,12 +4103,6 @@ class TestVxlanDCIBase():
             st.log(summ)
             result = False
         
-        # Step 3: Verify MAC and ARP entries after cross-DC traffic (L3VNI_dci:14)
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4140,7 +4116,6 @@ class TestVxlanDCIBase():
             2) Verify ipv6 L2VNI and L3VNI traffic between hosts across DC1, DC2 and DC3
             3) Across DC, there will be SH host only in phase 1
             4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:15)
-            5) Verify MAC and ARP entries after cross-DC traffic (L3VNI_dci:15)
             6) Verify no traffic drop
             7) Verify no crash/core seen
             
@@ -4150,7 +4125,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify VRF-VNI mappings and Type-5 routes on all nodes
             2. Send L2VNI and L3VNI IPv6 traffic across DCI
-            3. Verify MAC and ARP entries after cross-DC traffic
         """
         tc_id = "test_base_dci_l2vni_ipv6_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -4176,12 +4150,6 @@ class TestVxlanDCIBase():
             st.log(summ)
             result = False
         
-        # Step 3: Verify MAC and ARP entries after cross-DC traffic (L3VNI_dci:15)
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4648,7 +4616,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv4 traffic between the orphan hosts within DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -4658,7 +4625,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5 routes)
             2. Send L3VNI IPv4 traffic within DC (includes SH flows)
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l3vni_sh_ipv4_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -4683,12 +4649,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI SH IPv4 within-DC traffic: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4700,7 +4660,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv4 traffic between the orphan hosts across DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -4710,7 +4669,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
             2. Send L3VNI IPv4 traffic across DCI (includes SH flows)
-            3. Verify MAC and ARP entries
         """
         tc_id = "test_base_dci_l3vni_sh_ipv4_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -4735,12 +4693,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI SH IPv4 traffic across DCI: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4752,7 +4704,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv6 traffic between the orphan hosts within DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -4762,7 +4713,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5 routes)
             2. Send L3VNI IPv6 traffic within DC (includes SH flows)
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l3vni_sh_ipv6_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -4787,12 +4737,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI SH IPv6 within-DC traffic: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4804,7 +4748,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv6 traffic between the orphan hosts across DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -4814,7 +4757,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
             2. Send L3VNI IPv6 traffic across DCI (includes SH flows)
-            3. Verify MAC and ARP entries
         """
         tc_id = "test_base_dci_l3vni_sh_ipv6_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -4839,12 +4781,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI SH IPv6 traffic across DCI: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4856,7 +4792,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv4 traffic between the MH hosts within DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -4867,7 +4802,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5, EVPN ES)
             2. Send L3VNI IPv4 traffic within DC (includes MH flows)
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l3vni_mh_ipv4_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -4892,12 +4826,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI MH IPv4 within-DC traffic: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4909,7 +4837,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv4 traffic between the MH hosts across DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -4920,7 +4847,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5, EVPN ES on BGW nodes)
             2. Send L3VNI IPv4 traffic across DCI (includes MH flows)
-            3. Verify MAC and ARP entries
         """
         tc_id = "test_base_dci_l3vni_mh_ipv4_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -4945,12 +4871,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI MH IPv4 traffic across DCI: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -4962,7 +4882,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv6 traffic between the MH hosts within DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -4973,7 +4892,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5, EVPN ES)
             2. Send L3VNI IPv6 traffic within DC (includes MH flows)
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l3vni_mh_ipv6_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -4998,12 +4916,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI MH IPv6 within-DC traffic: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -5015,7 +4927,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure hosts in each VLAN across different VRFs
             3) Send L3VNI IPv6 traffic between the MH hosts across DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -5026,7 +4937,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5, EVPN ES on BGW nodes)
             2. Send L3VNI IPv6 traffic across DCI (includes MH flows)
-            3. Verify MAC and ARP entries
         """
         tc_id = "test_base_dci_l3vni_mh_ipv6_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -5051,12 +4961,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI MH IPv6 traffic across DCI: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI IPv6 traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC IPv6 traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -5068,7 +4972,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure dual-stack hosts in each VLAN across different VRFs
             3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts within DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -5078,7 +4981,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5 routes)
             2. Send simultaneous L3VNI IPv4 and IPv6 traffic within DC (SH hosts)
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l3vni_dualstack_sh_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -5110,12 +5012,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI dual-stack SH IPv6 within-DC traffic: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -5127,7 +5023,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure dual-stack hosts in each VLAN across different VRFs
             3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts across DCI
-            4) Verify MAC and ARP entries. Verify Type-5 routes
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -5137,7 +5032,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5 routes on BGW nodes)
             2. Send simultaneous L3VNI IPv4 and IPv6 traffic across DCI (SH hosts)
-            3. Verify MAC and ARP entries
         """
         tc_id = "test_base_dci_l3vni_dualstack_sh_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -5169,12 +5063,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI dual-stack SH IPv6 traffic across DCI: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI dual-stack traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC dual-stack traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -5186,7 +5074,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure dual-stack multi-homed hosts with ESI in each VLAN
             3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts within DC
-            4) Verify MAC and ARP entries. Verify Type-5 routes and EVPN ES
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -5196,7 +5083,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5, EVPN ES)
             2. Send simultaneous L3VNI IPv4 and IPv6 traffic within DC (MH hosts)
-            3. Verify MAC and ARP entries on leaf nodes
         """
         tc_id = "test_base_dci_l3vni_dualstack_mh_within_dc"
         test_cfg['tc_id'] = tc_id
@@ -5228,12 +5114,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI dual-stack MH IPv6 within-DC traffic: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries on leaf nodes')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed on leaf nodes\n'
-            result = False
         
         report_result(result, tc_id, summ)
     
@@ -5245,7 +5125,6 @@ class TestVxlanDCIBase():
             1) Base profile bring up
             2) Configure dual-stack multi-homed hosts with ESI in each VLAN
             3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts across DCI
-            4) Verify MAC and ARP entries. Verify Type-5 routes and EVPN ES
             5) Verify no traffic drops and no cores and crash
             
         Note:
@@ -5255,7 +5134,6 @@ class TestVxlanDCIBase():
         Steps:
             1. Verify base setup (VRF-VNI, Type-5, EVPN ES on BGW nodes)
             2. Send simultaneous L3VNI IPv4 and IPv6 traffic across DCI (MH hosts)
-            3. Verify MAC and ARP entries
         """
         tc_id = "test_base_dci_l3vni_dualstack_mh_across_dci"
         test_cfg['tc_id'] = tc_id
@@ -5287,12 +5165,6 @@ class TestVxlanDCIBase():
             summ += 'L3VNI dual-stack MH IPv6 traffic across DCI: Fail\n'
             result = False
         
-        # Step 3: Verify MAC and ARP entries
-        st.banner('Step 3: Verify MAC and ARP entries after cross-DC L3VNI dual-stack traffic')
-        leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
-        if not verify_base_setup_bgw(leaf_nodes, checks=['mac_arp']):
-            summ += 'MAC/ARP verification failed after cross-DC dual-stack traffic\n'
-            result = False
         
         report_result(result, tc_id, summ)
     

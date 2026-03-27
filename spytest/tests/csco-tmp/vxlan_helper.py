@@ -5994,6 +5994,11 @@ def get_expected_vxlan_tunnel(dut):
     if not isinstance(l2vni_config, list):
         l2vni_config = [l2vni_config]
     
+    # Get L3VNI configuration
+    l3vni_config = dut_cfg.get('l3vni', [])
+    if not isinstance(l3vni_config, list):
+        l3vni_config = [l3vni_config] if l3vni_config else []
+
     # For BGW nodes with DCI
     if is_bgw:
         # Get source IPs
@@ -6026,6 +6031,30 @@ def get_expected_vxlan_tunnel(dut):
                     'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
                     'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
                 })
+
+        # L3VNI entries on BGW: mapped on both vxlan-dc and vxlan-wan tunnels
+        for l3vni_item in l3vni_config:
+            vrf_id = l3vni_item.get('vrf_id')
+            vni = l3vni_item.get('vxlan_id') or l3vni_item.get('vni')
+            if not vrf_id or not vni:
+                continue
+            vlan_id = vrf_id  # L3VNI VLAN = VRF ID (e.g. Vrf101 -> Vlan101)
+            if dc_source_ip:
+                ret_val.append({
+                    'vxlan_tunnel_name': 'vxlan-dc',
+                    'source_ip': dc_source_ip,
+                    'destination_ip': '',
+                    'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
+                    'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
+                })
+            if wan_source_ip:
+                ret_val.append({
+                    'vxlan_tunnel_name': 'vxlan-wan',
+                    'source_ip': wan_source_ip,
+                    'destination_ip': '',
+                    'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
+                    'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
+                })
     
     # For regular leaf nodes
     else:
@@ -6047,6 +6076,21 @@ def get_expected_vxlan_tunnel(dut):
                     'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
                     'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
                 })
+
+        # L3VNI entries on leaf: mapped on the same VXLAN tunnel
+        for l3vni_item in l3vni_config:
+            vrf_id = l3vni_item.get('vrf_id')
+            vni = l3vni_item.get('vxlan_id') or l3vni_item.get('vni')
+            if not vrf_id or not vni:
+                continue
+            vlan_id = vrf_id  # L3VNI VLAN = VRF ID (e.g. Vrf101 -> Vlan101)
+            ret_val.append({
+                'vxlan_tunnel_name': tunnel_name,
+                'source_ip': source_ip,
+                'destination_ip': '',
+                'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
+                'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
+            })
     
     return ret_val
 

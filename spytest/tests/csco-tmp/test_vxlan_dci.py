@@ -1313,18 +1313,35 @@ def tgen_preconfig(**kwargs):
         if l3_within_mh_v4:
             stream_handles['l3_v4'].extend(l3_within_mh_v4 if isinstance(l3_within_mh_v4, list) else [l3_within_mh_v4])
 
-    # L3 IPv4 cross-DC streams (DCI-specific 23 flows)
-    if l3_cross_dc_endpoints:
-        l3_cross_combos = set((ep.get('src_vrf'), ep.get('src_vlan')) for ep in l3_cross_dc_endpoints.values())
-        st.log(f"  L3 cross-DC (DCI): {len(l3_cross_dc_endpoints)} endpoints, {len(l3_cross_combos)} VRF-VLAN combos")
-        l3_cross_v4 = vxlan_obj.create_traffic_item(device_handles=v4_device_handles,
-                                                    endpoints=l3_cross_dc_endpoints,
-                                                    topo_handles=topo_handles,
-                                                    multi_dst='vrf', name_prfx='L3-DCI-CROSS',
-                                                    rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
-                                                    pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
-        if l3_cross_v4:
-            stream_handles['l3_v4'].extend(l3_cross_v4 if isinstance(l3_cross_v4, list) else [l3_cross_v4])
+    # L3 IPv4 cross-DC streams (DCI-specific 23 flows) — split into SH and MH
+    l3_cross_sh = {k: v for k, v in l3_cross_dc_endpoints.items()
+                   if not v.get('src_int', '').startswith('PortChannel')}
+    l3_cross_mh = {k: v for k, v in l3_cross_dc_endpoints.items()
+                   if v.get('src_int', '').startswith('PortChannel')}
+
+    if l3_cross_sh:
+        l3_cross_sh_combos = set((ep.get('src_vrf'), ep.get('src_vlan')) for ep in l3_cross_sh.values())
+        st.log(f"  L3 cross-DC SH: {len(l3_cross_sh)} endpoints, {len(l3_cross_sh_combos)} VRF-VLAN combos")
+        l3_cross_sh_v4 = vxlan_obj.create_traffic_item(device_handles=v4_device_handles,
+                                                       endpoints=l3_cross_sh,
+                                                       topo_handles=topo_handles,
+                                                       multi_dst='vrf', name_prfx='L3-SH-CROSS',
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_cross_sh_v4:
+            stream_handles['l3_v4'].extend(l3_cross_sh_v4 if isinstance(l3_cross_sh_v4, list) else [l3_cross_sh_v4])
+
+    if l3_cross_mh:
+        l3_cross_mh_combos = set((ep.get('src_vrf'), ep.get('src_vlan')) for ep in l3_cross_mh.values())
+        st.log(f"  L3 cross-DC MH: {len(l3_cross_mh)} endpoints, {len(l3_cross_mh_combos)} VRF-VLAN combos")
+        l3_cross_mh_v4 = vxlan_obj.create_traffic_item(device_handles=v4_device_handles,
+                                                       endpoints=l3_cross_mh,
+                                                       topo_handles=topo_handles,
+                                                       multi_dst='vrf', name_prfx='L3-MH-CROSS',
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_cross_mh_v4:
+            stream_handles['l3_v4'].extend(l3_cross_mh_v4 if isinstance(l3_cross_mh_v4, list) else [l3_cross_mh_v4])
     
     st.banner(f"Creating L2 IPv6 traffic items: {len(l2_orphan_endpoints) + len(l2_pc_endpoints)} endpoints")
     st.log(f"  Creating IPv6 traffic from ORPHAN sources: {len(l2_orphan_endpoints)} endpoints")
@@ -1418,16 +1435,26 @@ def tgen_preconfig(**kwargs):
         if l3_within_mh_v6:
             stream_handles['l3_v6'].extend(l3_within_mh_v6 if isinstance(l3_within_mh_v6, list) else [l3_within_mh_v6])
 
-    # L3 IPv6 cross-DC streams (DCI-specific 23 flows)
-    if l3_cross_dc_endpoints:
-        l3_cross_v6 = vxlan_obj.create_traffic_item(device_handles=v6_device_handles,
-                                                    endpoints=l3_cross_dc_endpoints,
-                                                    topo_handles=topo_handles,
-                                                    version="ipv6", multi_dst='vrf', name_prfx='L3-DCI-CROSS',
-                                                    rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
-                                                    pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
-        if l3_cross_v6:
-            stream_handles['l3_v6'].extend(l3_cross_v6 if isinstance(l3_cross_v6, list) else [l3_cross_v6])
+    # L3 IPv6 cross-DC streams — split into SH and MH (reuse l3_cross_sh/l3_cross_mh from IPv4)
+    if l3_cross_sh:
+        l3_cross_sh_v6 = vxlan_obj.create_traffic_item(device_handles=v6_device_handles,
+                                                       endpoints=l3_cross_sh,
+                                                       topo_handles=topo_handles,
+                                                       version="ipv6", multi_dst='vrf', name_prfx='L3-SH-CROSS',
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_cross_sh_v6:
+            stream_handles['l3_v6'].extend(l3_cross_sh_v6 if isinstance(l3_cross_sh_v6, list) else [l3_cross_sh_v6])
+
+    if l3_cross_mh:
+        l3_cross_mh_v6 = vxlan_obj.create_traffic_item(device_handles=v6_device_handles,
+                                                       endpoints=l3_cross_mh,
+                                                       topo_handles=topo_handles,
+                                                       version="ipv6", multi_dst='vrf', name_prfx='L3-MH-CROSS',
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
+        if l3_cross_mh_v6:
+            stream_handles['l3_v6'].extend(l3_cross_mh_v6 if isinstance(l3_cross_mh_v6, list) else [l3_cross_mh_v6])
     
     # BUM traffic configuration
     st.banner("Configuring BUM traffic")
@@ -5035,16 +5062,13 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        # Step 1: Verify base setup via verify_base_setup_bgw on all nodes
-        st.banner('Step 1: Verify base setup via verify_base_setup_bgw on all nodes')
-        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw']):
-            summ += 'Base setup verification failed on one or more nodes\n'
-            result = False
-        
-        # Step 2: Verify Type-5 routes with IPv6 VTEP next-hop on leaf nodes (L3VNI_dci:2)
+        # Verify Type-5 routes with IPv6 VTEP next-hop on leaf nodes (L3VNI_dci:2)
+        # Note: Base setup (L2VNI + L3VNI) is already verified in test_base_dci_bringup (Solution_dci:1).
+        # This test focuses on the unique L3VNI_dci:2 checks: Type-5 route format, L3VNI in
+        # extended community, and IPv6 VTEP next-hop on leaf nodes.
         leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw']
                       if 'leaf' in node.lower()]
-        st.banner('Step 2: Verify Type-5 routes with IPv6 VTEP and VRF-VNI on leaf nodes')
+        st.banner('Verify Type-5 routes with IPv6 VTEP and VRF-VNI on leaf nodes')
         st.log('Checking: route format [5]:[0]:[prefix_len]:[prefix], L3VNI in ext-community, IPv6 VTEP next-hop')
         st.log('Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP next-hop')
         st.log('Leaf nodes: {}'.format(leaf_nodes))

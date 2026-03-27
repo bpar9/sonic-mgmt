@@ -6802,7 +6802,7 @@ def get_evpn_vni(dut):
     }, ...]
     """
     cmd = 'show evpn vni'
-    output = config_dut(dut, 'bgp', cmd, get_output=True)
+    output = st.show(dut, cmd, type='vtysh', skip_tmpl=True)
     
     ret_val = []
     

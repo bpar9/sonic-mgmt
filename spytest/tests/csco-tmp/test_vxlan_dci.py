@@ -4180,7 +4180,7 @@ class TestVxlanInterfaceTriggers():
             desc = "host orphan"
 
         test_cfg['tc_id'] = tc_id
-        tc_cfg = get_tc_params(tc_id)
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
         st.banner("TEST Solution_dci:{}: {} shut/no shut on {} leafs ({})".format(
             solution_num, desc, dc.upper(), tc_id))
 
@@ -4314,7 +4314,7 @@ class TestVxlanInterfaceTriggers():
         }
         test_num, tc_id = test_map[(action, scope)]
         test_cfg['tc_id'] = tc_id
-        tc_cfg = get_tc_params(tc_id)
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
 
         st.banner("TEST Solution_dci:{} / L3VNI_dci:{}: DCI link {} - scope:{} ({})".format(
             test_num, test_num + 13, action, scope, tc_id))

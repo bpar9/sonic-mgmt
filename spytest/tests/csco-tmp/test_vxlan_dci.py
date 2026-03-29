@@ -2263,8 +2263,7 @@ ALL_CHECKS = [
     'rt_rewrite',        # RT-REWRITE route-map verification (BGW nodes only)
     # 'mac_arp',         # MAC and ARP table entries for L3VNI hosts (disabled — will add later)
     'portchannel',       # PortChannel operational status
-    'evpn_type5_comprehensive',  # Comprehensive Type-5: path-count, best-path, RT/ET/RMAC (BGW); prefix-presence (leaf)
-    'rib_fib',           # RIB/FIB install check: show ip route vrf on BGWs
+    'evpn_type5_comprehensive',  # Unified Type-5: 10 boolean checks (present, has_best, has_rt, has_et, has_rmac, has_ipv6_nh, installed_in_rib, installed_in_fib, has_local_class_path, has_remote_class_path) — same logic on leaf and BGW
 ]
 
 # Pre-defined check sets for verify_base_setup_bgw (e.g. checks='bgp_only' after BGP reset)
@@ -2276,7 +2275,7 @@ CHECK_SETS = {
     'data_plane': ['vlan_vni', 'vrf_vni', 'vteps', 'tunnels'],
     'control_plane': ['bgp', 'evpn_es', 'evpn_type1', 'evpn_type4',
                       'ebgp_multihop', 'evpn_vni', 'rt_rewrite',
-                      'evpn_type5_comprehensive', 'rib_fib'],
+                      'evpn_type5_comprehensive'],
 }
 
 
@@ -2311,8 +2310,9 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
         'ebgp_multihop' - eBGP multihop EVPN sessions between BGWs across DCs (BGW only)
         'evpn_vni'      - EVPN VNI table with L3 VNI verification (BGW only)
         'portchannel'   - PortChannel operational status
-        'evpn_type5_comprehensive' - Comprehensive Type-5: path-count, best-path, RT/ET/RMAC (BGW only)
-        'rib_fib'       - RIB/FIB install check: tenant subnets in routing table (BGW only)
+        'evpn_type5_comprehensive' - Unified Type-5 verification (same 10 boolean checks on leaf+BGW):
+            present, has_best, has_rt, has_et, has_rmac, has_ipv6_nh,
+            installed_in_rib, installed_in_fib, has_local_class_path, has_remote_class_path
     
     Returns:
         If return_dict=False (default): Boolean - True if all checks pass, False otherwise
@@ -2723,24 +2723,6 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
             except Exception as err:
                 st.log(f'Type-5 comprehensive on {dut}: Fail - {err}')
                 results[dut]['evpn_type5_comprehensive'] = False
-                results['overall'] = False
-
-        # ============================================================
-        # RIB/FIB Install Check (show ip route vrf on leaf + BGW)
-        # ============================================================
-        if 'rib_fib' in checks_to_run:
-            try:
-                exp_routes = vxlan_obj.get_expected_type5_routes(dut)
-                vxlan_obj.verify_evpn_type5_rib_fib(
-                    dut, exp_routes, vl_retries=retry)
-                ipv4_count = sum(1 for r in exp_routes if ':' not in r['prefix'])
-                node_type = 'BGW' if 'bgw' in dut else 'leaf'
-                st.log(f'RIB/FIB install on {dut} ({node_type}): Pass '
-                       f'({ipv4_count} IPv4 prefixes in routing table)')
-                results[dut]['rib_fib'] = True
-            except Exception as err:
-                st.log(f'RIB/FIB install on {dut}: Fail - {err}')
-                results[dut]['rib_fib'] = False
                 results['overall'] = False
 
         # Per-node summary
@@ -4889,7 +4871,7 @@ class TestVxlanDCIBase():
         
         # Perform comprehensive base setup verification on all nodes
         # This runs ALL checks including L3VNI: vrf_vni, vlan_vni,
-        # evpn_type5_comprehensive, rib_fib, ebgp_multihop, evpn_vni, etc.
+        # evpn_type5_comprehensive (incl. RIB/FIB), ebgp_multihop, evpn_vni, etc.
         st.log('Performing comprehensive L2VNI + L3VNI verification on all DCI nodes...')
         result = verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'])
         if result:

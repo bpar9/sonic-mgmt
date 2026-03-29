@@ -7323,11 +7323,12 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
     BGW nodes (path-count model):
       1. prefix exists
       2. path count matches expected for that site
-      3. at least one local-site leaf path exists (if expect_local_leaf=True)
-      4. at least one remote/BGW path exists
-      5. best path is local-site leaf path (if expect_local_leaf=True)
-      6. route has RT, ET, and RMAC
-      7. at least one path has IPv6 VTEP next-hop
+      3. best path exists
+      4. at least one local-site leaf path exists (if expect_local_leaf=True)
+      5. at least one remote/BGW path exists
+      6. best path is local-site leaf path (if expect_local_leaf=True)
+      7. route has RT, ET, and RMAC
+      8. at least one path has IPv6 VTEP next-hop
 
     Leaf nodes (per-VRF prefix-presence model):
       For each leaf, per VRF:
@@ -7335,8 +7336,15 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
       2. all expected IPv4 prefixes present
       3. all expected IPv6 prefixes present
       4. best path exists for each prefix
-      5. if prefix is locally originated in that DC, best path next-hop
+      5. attributes present (RT, ET, RMAC) on at least one path
+      6. at least one usable path per prefix (valid with next-hop)
+      7. if prefix is locally originated in that DC, best path next-hop
          must be local leaf VTEP and weight should be 32768
+      8. optionally, at least one re-originated/BGW-style path
+         (only checked when bgw_asns provided in exp_route)
+
+    RIB/FIB install check is done separately via verify_evpn_type5_rib_fib()
+    on both leaf and BGW nodes.
 
     Uses compare_exp_actual_data() for structured tabular output.
 
@@ -7384,8 +7392,12 @@ def _verify_type5_leaf(dut, exp_routes, detailed):
       2. all expected IPv4 prefixes present
       3. all expected IPv6 prefixes present
       4. best path exists for each prefix
-      5. if prefix is locally originated in that DC, best path next-hop
+      5. attributes present (RT, ET, RMAC) on at least one path
+      6. at least one usable path per prefix (valid with next-hop)
+      7. if prefix is locally originated in that DC, best path next-hop
          must be local leaf VTEP and weight should be 32768
+      8. optionally, at least one re-originated/BGW-style path
+         (only checked when bgw_asns provided in exp_route)
 
     All prefixes on a leaf are locally originated in the same DC.
     """
@@ -7418,12 +7430,21 @@ def _verify_type5_leaf(dut, exp_routes, detailed):
     for exp_route in exp_routes:
         prefix = exp_route['prefix']
 
+        # Check if this route has optional BGW-style path expectation
+        bgw_asns = exp_route.get('bgw_asns', set())
+        check_bgw_path = bool(bgw_asns)
+
         exp_row = {
             'prefix': prefix,
             'present': 'yes',
             'has_best_path': 'yes',
+            'has_rt': 'yes',
+            'has_et': 'yes',
+            'has_rmac': 'yes',
+            'has_usable_path': 'yes',
             'best_nh_is_local_vtep': 'yes',
             'best_weight_32768': 'yes',
+            'has_bgw_path': 'yes' if check_bgw_path else 'n/a',
         }
         exp_data.append(exp_row)
 
@@ -7432,8 +7453,13 @@ def _verify_type5_leaf(dut, exp_routes, detailed):
                 'prefix': prefix,
                 'present': 'no',
                 'has_best_path': 'no',
+                'has_rt': 'no',
+                'has_et': 'no',
+                'has_rmac': 'no',
+                'has_usable_path': 'no',
                 'best_nh_is_local_vtep': 'no',
                 'best_weight_32768': 'no',
+                'has_bgw_path': 'no' if check_bgw_path else 'n/a',
             }
             act_data.append(act_row)
             continue
@@ -7441,6 +7467,17 @@ def _verify_type5_leaf(dut, exp_routes, detailed):
         info = detailed[prefix]
         best_path = info.get('best_path')
         has_best = best_path is not None
+
+        # Attribute checks — at least one path has RT, ET, RMAC
+        has_rt = any(p.get('rt') for p in info['paths'])
+        has_et = any(p.get('et') for p in info['paths'])
+        has_rmac = any(p.get('rmac') for p in info['paths'])
+
+        # Usable path — at least one valid path with a next-hop
+        has_usable = any(
+            p.get('is_valid') and p.get('next_hop')
+            for p in info['paths']
+        )
 
         # Check best path next-hop matches leaf's own VTEP
         best_nh_match = False
@@ -7451,20 +7488,39 @@ def _verify_type5_leaf(dut, exp_routes, detailed):
             best_nh_match = (bp_nh == local_vtep) if local_vtep else False
             best_weight_ok = (bp_weight == '32768')
 
+        # Optional BGW-style (re-originated) path check
+        has_bgw = False
+        if check_bgw_path:
+            bgw_asns_str = {str(a) for a in bgw_asns}
+            for path in info['paths']:
+                as_path = path.get('as_path', '')
+                path_asns = set(as_path.split())
+                if path_asns & bgw_asns_str:
+                    has_bgw = True
+                    break
+
         act_row = {
             'prefix': prefix,
             'present': 'yes',
             'has_best_path': 'yes' if has_best else 'no',
+            'has_rt': 'yes' if has_rt else 'no',
+            'has_et': 'yes' if has_et else 'no',
+            'has_rmac': 'yes' if has_rmac else 'no',
+            'has_usable_path': 'yes' if has_usable else 'no',
             'best_nh_is_local_vtep': 'yes' if best_nh_match else 'no',
             'best_weight_32768': 'yes' if best_weight_ok else 'no',
+            'has_bgw_path': ('yes' if has_bgw else 'no')
+                            if check_bgw_path else 'n/a',
         }
         act_data.append(act_row)
 
-        st.log('  {} present=yes best={} nh={} (exp={}) weight={}'.format(
-            prefix, has_best,
-            best_path.get('next_hop', '') if best_path else '',
-            local_vtep,
-            best_path.get('weight', '') if best_path else ''))
+        st.log('  {} present=yes best={} RT={} ET={} RMAC={} usable={} '
+               'nh={} (exp={}) weight={} bgw_path={}'.format(
+                   prefix, has_best, has_rt, has_et, has_rmac, has_usable,
+                   best_path.get('next_hop', '') if best_path else '',
+                   local_vtep,
+                   best_path.get('weight', '') if best_path else '',
+                   has_bgw if check_bgw_path else 'n/a'))
 
     # Per-VRF prefix count summary
     for vrf in all_vrfs:
@@ -7486,7 +7542,17 @@ def _verify_type5_leaf(dut, exp_routes, detailed):
 
 def _verify_type5_bgw(dut, exp_routes, detailed):
     """
-    BGW-specific Type-5 verification (path-count model, unchanged from original).
+    BGW-specific Type-5 verification (path-count model).
+
+    For each BGW, per prefix checks:
+      1. prefix exists
+      2. path count matches expected for that site
+      3. best path exists
+      4. at least one local-site leaf path exists
+      5. at least one remote/BGW path exists
+      6. best path is local-site leaf path
+      7. route has RT, ET, and RMAC
+      8. at least one path has IPv6 VTEP next-hop (if expected)
     """
     exp_data = []
     act_data = []
@@ -7504,6 +7570,7 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
         exp_row = {
             'prefix': prefix,
             'path_count': str(expected_path_count),
+            'best_path_exists': 'yes',
             'has_local_leaf_path': exp_local,
             'has_remote_bgw_path': 'yes',
             'best_path_is_local_leaf': exp_best_local,
@@ -7518,6 +7585,7 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
             act_row = {
                 'prefix': prefix,
                 'path_count': '0',
+                'best_path_exists': 'no',
                 'has_local_leaf_path': 'no',
                 'has_remote_bgw_path': 'no',
                 'best_path_is_local_leaf': 'no',
@@ -7569,9 +7637,12 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
         has_et = any(p.get('et') for p in info['paths'])
         has_rmac = any(p.get('rmac') for p in info['paths'])
 
+        has_best = best_path is not None
+
         act_row = {
             'prefix': prefix,
             'path_count': str(actual_path_count),
+            'best_path_exists': 'yes' if has_best else 'no',
             'has_local_leaf_path': 'yes' if has_local_leaf else 'no',
             'has_remote_bgw_path': 'yes' if has_remote_bgw else 'no',
             'best_path_is_local_leaf': 'yes' if best_is_local_leaf else 'no',
@@ -7583,10 +7654,11 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
         }
         act_data.append(act_row)
 
-        st.log('  {} paths={} local_leaf={} remote_bgw={} best_local={} '
+        st.log('  {} paths={} best={} local_leaf={} remote_bgw={} best_local={} '
                'RT={} ET={} RMAC={} ipv6_nh={}'.format(
-                   prefix, actual_path_count, has_local_leaf, has_remote_bgw,
-                   best_is_local_leaf, has_rt, has_et, has_rmac, has_ipv6_nh))
+                   prefix, actual_path_count, has_best, has_local_leaf,
+                   has_remote_bgw, best_is_local_leaf, has_rt, has_et,
+                   has_rmac, has_ipv6_nh))
 
     compare_exp_actual_data(exp_data, act_data, ['prefix'])
     return act_data

@@ -2726,25 +2726,22 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                 results['overall'] = False
 
         # ============================================================
-        # RIB/FIB Install Check (show ip route vrf on BGWs)
+        # RIB/FIB Install Check (show ip route vrf on leaf + BGW)
         # ============================================================
         if 'rib_fib' in checks_to_run:
-            if 'bgw' not in dut:
-                st.log(f'RIB/FIB check on {dut}: Skipped (not a BGW node)')
+            try:
+                exp_routes = vxlan_obj.get_expected_type5_routes(dut)
+                vxlan_obj.verify_evpn_type5_rib_fib(
+                    dut, exp_routes, vl_retries=retry)
+                ipv4_count = sum(1 for r in exp_routes if ':' not in r['prefix'])
+                node_type = 'BGW' if 'bgw' in dut else 'leaf'
+                st.log(f'RIB/FIB install on {dut} ({node_type}): Pass '
+                       f'({ipv4_count} IPv4 prefixes in routing table)')
                 results[dut]['rib_fib'] = True
-            else:
-                try:
-                    exp_routes = vxlan_obj.get_expected_type5_routes(dut)
-                    vxlan_obj.verify_evpn_type5_rib_fib(
-                        dut, exp_routes, vl_retries=retry)
-                    ipv4_count = sum(1 for r in exp_routes if ':' not in r['prefix'])
-                    st.log(f'RIB/FIB install on {dut}: Pass '
-                           f'({ipv4_count} IPv4 prefixes in routing table)')
-                    results[dut]['rib_fib'] = True
-                except Exception as err:
-                    st.log(f'RIB/FIB install on {dut}: Fail - {err}')
-                    results[dut]['rib_fib'] = False
-                    results['overall'] = False
+            except Exception as err:
+                st.log(f'RIB/FIB install on {dut}: Fail - {err}')
+                results[dut]['rib_fib'] = False
+                results['overall'] = False
 
         # Per-node summary
         node_passed = all(results[dut].values())

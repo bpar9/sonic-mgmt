@@ -6919,14 +6919,18 @@ def get_expected_type5_routes(dut):
     """
     Generate expected EVPN Type-5 route prefixes for a node based on SAG addressing.
 
-    BGW node perspective (comprehensive path-count model):
+    BGW node perspective (comprehensive path-count model with range):
       - Paths from same-DC leafs (via OVERLAY/spine RR)
       - Paths from remote-DC BGWs (via OVERLAY_WAN)
       - local_leaf_asns = same-DC leaf ASNs
       - remote_bgw_asns = other-DC BGW ASNs
-      - DC1 BGWs: 4 local leaves + (DC2: 2 BGWs x 2 leaves) + (DC3: 1 BGW x 1 leaf) = 9
-      - DC2 BGWs: 2 local leaves + (DC1: 2 BGWs x 4 leaves) + (DC3: 1 BGW x 1 leaf) = 11
-      - DC3 BGW:  1 local leaf   + (DC1: 2 BGWs x 4 leaves) + (DC2: 2 BGWs x 2 leaves) = 13
+      - Min path count: local_leaves + remote_bgw_count
+        (each remote BGW sends best-only path per prefix)
+      - Max path count: local_leaves + SUM(bgws_per_dc * leaves_per_dc)
+        (each remote BGW re-originates all its DC's leaf routes)
+      - DC1 BGWs: min=4+3=7  max=4+(2*2)+(1*1)=9
+      - DC2 BGWs: min=2+3=5  max=2+(2*4)+(1*1)=11
+      - DC3 BGW:  min=1+4=5  max=1+(2*4)+(2*2)=13
 
     Leaf node perspective (per-VRF prefix-presence model):
       - Leaf nodes see within-DC Type-5 routes only
@@ -6947,8 +6951,9 @@ def get_expected_type5_routes(dut):
         dut: Node hostname to generate expected routes for (BGW or leaf)
 
     Returns:
-        list of dicts. For BGW nodes: prefix, vrf, path_count, local_leaf_asns,
-        remote_bgw_asns, expect_local_leaf, expect_ipv6_nexthop, l3vni.
+        list of dicts. For BGW nodes: prefix, vrf, path_count_min,
+        path_count_max, local_leaf_asns, remote_bgw_asns, expect_local_leaf,
+        expect_ipv6_nexthop, l3vni.
         For leaf nodes: prefix, vrf, is_leaf, local_vtep, l3vni.
     """
     cfg_dict = get_cfg_dict()
@@ -7046,14 +7051,18 @@ def get_expected_type5_routes(dut):
             [r['prefix'] for r in expected_routes]))
         return expected_routes
 
-    # --- BGW node: comprehensive path-count model ---
-    # Each remote BGW carries routes from ALL leaves in its DC, each under a
-    # separate RD.  So the number of WAN-received paths per prefix is:
-    #   SUM over each remote DC of (bgw_count_in_dc * leaf_count_in_dc)
-    # NOT simply the total number of remote BGW nodes.
+    # --- BGW node: comprehensive path-count model (range-based) ---
+    # The actual path count per prefix depends on whether each remote BGW
+    # re-originates paths from ALL leaves in its DC or only the best path.
+    #
+    # Min (best-only): local_leaf_count + total_remote_bgw_count
+    #   Each remote BGW sends at most one path per prefix.
+    # Max (all-leaves): local_leaf_count + SUM(bgws * leaves per remote DC)
+    #   Each remote BGW re-originates every leaf's route under its own RD.
     local_leaf_asns = set()
     remote_bgw_asns = set()
     local_leaf_count = 0
+    remote_bgw_count = 0
 
     # Per-remote-DC counters: {dc: {'bgws': count, 'leaves': count}}
     remote_dc_counts = {}
@@ -7068,27 +7077,35 @@ def get_expected_type5_routes(dut):
                 remote_dc_counts[node_dc] = {'bgws': 0, 'leaves': 0}
             if 'bgw' in node_name:
                 remote_dc_counts[node_dc]['bgws'] += 1
+                remote_bgw_count += 1
                 remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
             elif 'leaf' in node_name:
                 remote_dc_counts[node_dc]['leaves'] += 1
 
     # BGW nodes do NOT show self-originated Type-5 paths.
-    # Remote path count = sum of (bgws * leaves) per remote DC because each
-    # BGW re-originates every leaf's route under its own RD.
-    remote_path_count = sum(
+    # Min: one WAN path per remote BGW (best-only re-origination).
+    # Max: one WAN path per remote (BGW * leaf) pair (all-leaf re-origination).
+    remote_path_max = sum(
         dc['bgws'] * dc['leaves']
         for dc in remote_dc_counts.values()
     )
-    expected_path_count = local_leaf_count + remote_path_count
+    remote_path_min = remote_bgw_count
+    expected_path_count_min = local_leaf_count + remote_path_min
+    expected_path_count_max = local_leaf_count + remote_path_max
     expect_local_leaf = local_leaf_count > 0
     expect_ipv6_nexthop = True
 
-    st.log('Type-5 path count for {} ({}, BGW): {} local leaves + {} remote WAN paths = {}'.format(
-        dut, dut_dc, local_leaf_count, remote_path_count, expected_path_count))
+    st.log('Type-5 path count for {} ({}, BGW): {} local leaves + '
+           'remote WAN paths [{} .. {}] = [{} .. {}]'.format(
+               dut, dut_dc, local_leaf_count,
+               remote_path_min, remote_path_max,
+               expected_path_count_min, expected_path_count_max))
     for dc_name in sorted(remote_dc_counts.keys()):
         dc = remote_dc_counts[dc_name]
-        st.log('  Remote {}: {} BGWs x {} leaves = {} paths'.format(
-            dc_name, dc['bgws'], dc['leaves'], dc['bgws'] * dc['leaves']))
+        st.log('  Remote {}: {} BGWs x {} leaves = {} max paths '
+               '({} min)'.format(
+                   dc_name, dc['bgws'], dc['leaves'],
+                   dc['bgws'] * dc['leaves'], dc['bgws']))
     st.log('Local leaf ASNs: {}, Remote BGW ASNs: {}'.format(
         local_leaf_asns, remote_bgw_asns))
 
@@ -7101,7 +7118,8 @@ def get_expected_type5_routes(dut):
         ipv4_entry = {
             'prefix': ipv4_prefix,
             'vrf': vrf,
-            'path_count': str(expected_path_count),
+            'path_count_min': str(expected_path_count_min),
+            'path_count_max': str(expected_path_count_max),
             'local_leaf_asns': local_leaf_asns,
             'remote_bgw_asns': remote_bgw_asns,
             'expect_local_leaf': expect_local_leaf,
@@ -7115,7 +7133,8 @@ def get_expected_type5_routes(dut):
         ipv6_entry = {
             'prefix': ipv6_prefix,
             'vrf': vrf,
-            'path_count': str(expected_path_count),
+            'path_count_min': str(expected_path_count_min),
+            'path_count_max': str(expected_path_count_max),
             'local_leaf_asns': local_leaf_asns,
             'remote_bgw_asns': remote_bgw_asns,
             'expect_local_leaf': expect_local_leaf,
@@ -7563,24 +7582,32 @@ def _verify_type5_leaf(dut, exp_routes, detailed):
 
 def _verify_type5_bgw(dut, exp_routes, detailed):
     """
-    BGW-specific Type-5 verification (path-count model).
+    BGW-specific Type-5 verification (path-count range model).
 
     For each BGW, per prefix checks:
       1. prefix exists
-      2. path count matches expected for that site
+      2. path count is within expected range [min..max]
       3. best path exists
       4. at least one local-site leaf path exists
       5. at least one remote/BGW path exists
       6. best path is local-site leaf path
       7. route has RT, ET, and RMAC
       8. at least one path has IPv6 VTEP next-hop (if expected)
+
+    Path count range:
+      - Min: local_leaves + remote_bgw_count (best-only re-origination)
+      - Max: local_leaves + SUM(bgws*leaves per remote DC) (all-leaf re-origination)
     """
     exp_data = []
     act_data = []
 
     for exp_route in exp_routes:
         prefix = exp_route['prefix']
-        expected_path_count = exp_route.get('path_count', '0')
+        # Support both range-based and legacy single-value path_count
+        path_count_min = int(exp_route.get('path_count_min',
+                             exp_route.get('path_count', '0')))
+        path_count_max = int(exp_route.get('path_count_max',
+                             exp_route.get('path_count', '0')))
         local_leaf_asns = exp_route.get('local_leaf_asns', set())
         remote_bgw_asns = exp_route.get('remote_bgw_asns', set())
         expect_local_leaf = exp_route.get('expect_local_leaf', True)
@@ -7588,9 +7615,10 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
 
         exp_local = 'yes' if expect_local_leaf else 'no'
         exp_best_local = 'yes' if expect_local_leaf else 'no'
+        path_range_str = '[{}..{}]'.format(path_count_min, path_count_max)
         exp_row = {
             'prefix': prefix,
-            'path_count': str(expected_path_count),
+            'path_count': path_range_str,
             'best_path_exists': 'yes',
             'has_local_leaf_path': exp_local,
             'has_remote_bgw_path': 'yes',
@@ -7620,6 +7648,12 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
 
         info = detailed[prefix]
         actual_path_count = info['path_count']
+
+        # Range check: actual must be within [min..max]
+        path_count_ok = path_count_min <= actual_path_count <= path_count_max
+        # For table display, show actual as matching range string if in range
+        act_path_str = (path_range_str if path_count_ok
+                        else str(actual_path_count))
 
         # Classify paths as local-leaf or remote-BGW based on AS path
         has_local_leaf = False
@@ -7662,7 +7696,7 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
 
         act_row = {
             'prefix': prefix,
-            'path_count': str(actual_path_count),
+            'path_count': act_path_str,
             'best_path_exists': 'yes' if has_best else 'no',
             'has_local_leaf_path': 'yes' if has_local_leaf else 'no',
             'has_remote_bgw_path': 'yes' if has_remote_bgw else 'no',
@@ -7675,9 +7709,10 @@ def _verify_type5_bgw(dut, exp_routes, detailed):
         }
         act_data.append(act_row)
 
-        st.log('  {} paths={} best={} local_leaf={} remote_bgw={} best_local={} '
-               'RT={} ET={} RMAC={} ipv6_nh={}'.format(
-                   prefix, actual_path_count, has_best, has_local_leaf,
+        st.log('  {} paths={} (range {}) best={} local_leaf={} remote_bgw={} '
+               'best_local={} RT={} ET={} RMAC={} ipv6_nh={}'.format(
+                   prefix, actual_path_count, path_range_str,
+                   has_best, has_local_leaf,
                    has_remote_bgw, best_is_local_leaf, has_rt, has_et,
                    has_rmac, has_ipv6_nh))
 
@@ -8439,12 +8474,15 @@ def verify_type5_route_presence_dci(dut, vlan_ids, expect_present=True):
                        '({} paths, best path exists)'.format(
                            prefix, dut, actual_path_count))
         else:
-            # BGW: check path count + route attributes
-            expected_path_count = int(exp_route.get('path_count', 0))
-            if actual_path_count != expected_path_count:
-                st.log('Type-5 prefix {} on {}: path count mismatch '
-                       '(expected={}, actual={})'.format(
-                           prefix, dut, expected_path_count, actual_path_count))
+            # BGW: check path count (range) + route attributes
+            pc_min = int(exp_route.get('path_count_min',
+                         exp_route.get('path_count', 0)))
+            pc_max = int(exp_route.get('path_count_max',
+                         exp_route.get('path_count', 0)))
+            if not (pc_min <= actual_path_count <= pc_max):
+                st.log('Type-5 prefix {} on {}: path count out of range '
+                       '(expected=[{}..{}], actual={})'.format(
+                           prefix, dut, pc_min, pc_max, actual_path_count))
                 all_pass = False
             else:
                 has_rt = any(p.get('rt') for p in info['paths'])
@@ -8457,8 +8495,9 @@ def verify_type5_route_presence_dci(dut, vlan_ids, expect_present=True):
                     all_pass = False
                 else:
                     st.log('Type-5 prefix {} on {}: Pass '
-                           '({} paths, rt/et/rmac ok)'.format(
-                               prefix, dut, actual_path_count))
+                           '({} paths in [{}..{}], rt/et/rmac ok)'.format(
+                               prefix, dut, actual_path_count,
+                               pc_min, pc_max))
 
     if all_pass:
         st.log('Type-5 route presence verified for VLANs {} on {}'.format(

@@ -6924,9 +6924,9 @@ def get_expected_type5_routes(dut):
       - Paths from remote-DC BGWs (via OVERLAY_WAN)
       - local_leaf_asns = same-DC leaf ASNs
       - remote_bgw_asns = other-DC BGW ASNs
-      - DC1 BGWs: 4 leaves + 3 remote BGWs = 7
-      - DC2 BGWs: 2 leaves + 3 remote BGWs = 5
-      - DC3 BGW:  1 leaf   + 4 remote BGWs = 5
+      - DC1 BGWs: 4 local leaves + (DC2: 2 BGWs x 2 leaves) + (DC3: 1 BGW x 1 leaf) = 9
+      - DC2 BGWs: 2 local leaves + (DC1: 2 BGWs x 4 leaves) + (DC3: 1 BGW x 1 leaf) = 11
+      - DC3 BGW:  1 local leaf   + (DC1: 2 BGWs x 4 leaves) + (DC2: 2 BGWs x 2 leaves) = 13
 
     Leaf node perspective (per-VRF prefix-presence model):
       - Leaf nodes see within-DC Type-5 routes only
@@ -7046,28 +7046,49 @@ def get_expected_type5_routes(dut):
             [r['prefix'] for r in expected_routes]))
         return expected_routes
 
-    # --- BGW node: comprehensive path-count model (unchanged) ---
+    # --- BGW node: comprehensive path-count model ---
+    # Each remote BGW carries routes from ALL leaves in its DC, each under a
+    # separate RD.  So the number of WAN-received paths per prefix is:
+    #   SUM over each remote DC of (bgw_count_in_dc * leaf_count_in_dc)
+    # NOT simply the total number of remote BGW nodes.
     local_leaf_asns = set()
     remote_bgw_asns = set()
     local_leaf_count = 0
-    remote_bgw_count = 0
+
+    # Per-remote-DC counters: {dc: {'bgws': count, 'leaves': count}}
+    remote_dc_counts = {}
 
     for node_name in sorted(bgp_info.keys()):
         node_dc = _get_dc_from_name(node_name)
         if 'leaf' in node_name and node_dc == dut_dc:
             local_leaf_count += 1
             local_leaf_asns.add(str(bgp_info[node_name]['as_num']))
-        elif 'bgw' in node_name and node_dc != dut_dc:
-            remote_bgw_count += 1
-            remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
+        elif node_dc != dut_dc:
+            if node_dc not in remote_dc_counts:
+                remote_dc_counts[node_dc] = {'bgws': 0, 'leaves': 0}
+            if 'bgw' in node_name:
+                remote_dc_counts[node_dc]['bgws'] += 1
+                remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
+            elif 'leaf' in node_name:
+                remote_dc_counts[node_dc]['leaves'] += 1
 
-    # BGW nodes do NOT show self-originated Type-5 paths
-    expected_path_count = local_leaf_count + remote_bgw_count
+    # BGW nodes do NOT show self-originated Type-5 paths.
+    # Remote path count = sum of (bgws * leaves) per remote DC because each
+    # BGW re-originates every leaf's route under its own RD.
+    remote_path_count = sum(
+        dc['bgws'] * dc['leaves']
+        for dc in remote_dc_counts.values()
+    )
+    expected_path_count = local_leaf_count + remote_path_count
     expect_local_leaf = local_leaf_count > 0
     expect_ipv6_nexthop = True
 
-    st.log('Type-5 path count for {} ({}, BGW): {} local leaves + {} remote BGWs = {}'.format(
-        dut, dut_dc, local_leaf_count, remote_bgw_count, expected_path_count))
+    st.log('Type-5 path count for {} ({}, BGW): {} local leaves + {} remote WAN paths = {}'.format(
+        dut, dut_dc, local_leaf_count, remote_path_count, expected_path_count))
+    for dc_name in sorted(remote_dc_counts.keys()):
+        dc = remote_dc_counts[dc_name]
+        st.log('  Remote {}: {} BGWs x {} leaves = {} paths'.format(
+            dc_name, dc['bgws'], dc['leaves'], dc['bgws'] * dc['leaves']))
     st.log('Local leaf ASNs: {}, Remote BGW ASNs: {}'.format(
         local_leaf_asns, remote_bgw_asns))
 

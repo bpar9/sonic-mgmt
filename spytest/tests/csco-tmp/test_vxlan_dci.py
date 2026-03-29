@@ -2791,12 +2791,11 @@ class TestVxlanRestartTriggers():
         
         Steps:
             1. Verify base setup before trigger
-            2. Verify traffic before trigger
-            3. Save configurations (SONiC and FRR)
-            4. Restart the specified service on leaf nodes
-            5. Verify docker recovery
-            6. Verify base setup after trigger (with retries)
-            7. Verify traffic flows (L2VNI + L3VNI)
+            2. Save configurations (SONiC and FRR)
+            3. Restart the specified service on leaf nodes
+            4. Verify docker recovery
+            5. Verify base setup after trigger (with retries)
+            6. Verify traffic flows (L2VNI + L3VNI)
         """
         test_num = 32 if restart_type == "bgp" else 33 if restart_type == "swss" else 34
         tc_id = 'test_leaf_restart_{}'.format(restart_type)
@@ -2822,20 +2821,8 @@ class TestVxlanRestartTriggers():
             st.report_fail("test_case_failed")
         st.banner("Base setup verification passed before trigger")
         
-        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
-        if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 2: Verifying traffic BEFORE trigger: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
-                traffic_scope or 'all'))
-            traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                   scope=traffic_scope)
-            if not traffic_result_before:
-                st.error("Traffic verification failed before trigger")
-                st.report_fail("test_case_failed")
-            st.banner("Traffic verification passed before trigger")
-        
-        # Step 3: Save docker count and configs before restart
-        st.banner("Step 3: Saving configurations and docker state")
+        # Step 2: Save docker count and configs before restart
+        st.banner("Step 2: Saving configurations and docker state")
         dut_count_arr = {}
         for dut in target_nodes:
             dut_count_arr[dut] = basic_obj.get_and_match_docker_count(dut)
@@ -2843,16 +2830,16 @@ class TestVxlanRestartTriggers():
             vxlan_obj.config_dut(dut, 'sonic', "sudo config save -y")
             vxlan_obj.config_dut(dut, 'bgp', 'do write')
         
-        # Step 4: Perform restart on selected nodes
-        st.banner('Step 4: Performing {} restart on {} nodes'.format(restart_type, node_desc))
+        # Step 3: Perform restart on selected nodes
+        st.banner('Step 3: Performing {} restart on {} nodes'.format(restart_type, node_desc))
         for dut in target_nodes:
             st.log('Restarting {} on {}'.format(restart_type, dut))
             restart_complete = basic_obj.systemctl_restart_service(dut, restart_type)
             if not restart_complete:
                 st.error('Restart {} failed on {}'.format(restart_type, dut))
         
-        # Step 5: Verify docker recovery
-        st.banner("Step 5: Verifying docker recovery after restart")
+        # Step 4: Verify docker recovery
+        st.banner("Step 4: Verifying docker recovery after restart")
         for dut in target_nodes:
             result = True
             if not poll_wait(basic_obj.verify_docker_status, 180, dut, 'Exited'):
@@ -2868,13 +2855,13 @@ class TestVxlanRestartTriggers():
             if not result:
                 st.report_fail("test_case_failed")
         
-        # Step 6: Verify base setup after restart with retries
+        # Step 5: Verify base setup after restart with retries
         if restart_type == "swss":
             retry_count = 10
         else:
             retry_count = test_cfg['global'].get('proc_restart_retries', 7)
         
-        st.banner('Step 6: Verifying base setup after {} restart (retries: {})'.format(
+        st.banner('Step 5: Verifying base setup after {} restart (retries: {})'.format(
             restart_type, retry_count))
         result_after_trigger = verify_base_setup_bgw(target_nodes, retry=retry_count)
         
@@ -2884,9 +2871,9 @@ class TestVxlanRestartTriggers():
         
         st.banner('Base setup verification passed after {} restart'.format(restart_type))
         
-        # Step 7: Verify traffic (L2VNI + L3VNI)
+        # Step 6: Verify traffic (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 7: Verifying traffic after restart: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+            st.banner('Step 6: Verifying traffic after restart: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
                 traffic_scope or 'all'))
             traffic_result = verify_traffic(tgen_handles, bum=True,
                                             traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
@@ -2896,8 +2883,8 @@ class TestVxlanRestartTriggers():
                 st.report_fail("test_case_failed")
             st.banner("Traffic verification passed after trigger")
         
-        # Step 8: Check for core files/crashes
-        st.banner("Step 8: Checking for core files and crashes")
+        # Step 7: Check for core files/crashes
+        st.banner("Step 7: Checking for core files and crashes")
         if vxlan_obj.check_core():
             st.error("Core files detected after test")
             st.report_fail("test_case_failed")
@@ -2931,12 +2918,11 @@ class TestVxlanRestartTriggers():
         
         Steps:
             1. Verify base setup before trigger
-            2. Verify traffic before trigger (all traffic)
-            3. Save configurations (SONiC and FRR)
-            4. Restart the specified service on DCI/BGW nodes
-            5. Verify docker recovery
-            6. Verify base setup after trigger (with retries)
-            7. Verify traffic flows (L2VNI + L3VNI)
+            2. Save configurations (SONiC and FRR)
+            3. Restart the specified service on DCI/BGW nodes
+            4. Verify docker recovery
+            5. Verify base setup after trigger (with retries)
+            6. Verify traffic flows (L2VNI + L3VNI)
         """
         test_num = 35 if restart_type == "bgp" else 36 if restart_type == "swss" else 37
         tc_id = 'test_dci_restart_{}'.format(restart_type)
@@ -2966,19 +2952,8 @@ class TestVxlanRestartTriggers():
             st.report_fail("test_case_failed")
         st.banner("Base setup verification passed before trigger")
         
-        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
-        if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 2: Verifying cross-DC traffic BEFORE trigger: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6')
-            traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                   scope=traffic_scope)
-            if not traffic_result_before:
-                st.error("Traffic verification failed before trigger")
-                st.report_fail("test_case_failed")
-            st.banner("Traffic verification passed before trigger")
-        
-        # Step 3: Save docker count and configs before restart
-        st.banner("Step 3: Saving configurations and docker state")
+        # Step 2: Save docker count and configs before restart
+        st.banner("Step 2: Saving configurations and docker state")
         dut_count_arr = {}
         for dut in target_nodes:
             dut_count_arr[dut] = basic_obj.get_and_match_docker_count(dut)
@@ -2986,16 +2961,16 @@ class TestVxlanRestartTriggers():
             vxlan_obj.config_dut(dut, 'sonic', "sudo config save -y")
             vxlan_obj.config_dut(dut, 'bgp', 'do write')
         
-        # Step 4: Perform restart on selected nodes
-        st.banner('Step 4: Performing {} restart on {} nodes'.format(restart_type, node_desc))
+        # Step 3: Perform restart on selected nodes
+        st.banner('Step 3: Performing {} restart on {} nodes'.format(restart_type, node_desc))
         for dut in target_nodes:
             st.log('Restarting {} on {}'.format(restart_type, dut))
             restart_complete = basic_obj.systemctl_restart_service(dut, restart_type)
             if not restart_complete:
                 st.error('Restart {} failed on {}'.format(restart_type, dut))
         
-        # Step 5: Verify docker recovery
-        st.banner("Step 5: Verifying docker recovery after restart")
+        # Step 4: Verify docker recovery
+        st.banner("Step 4: Verifying docker recovery after restart")
         for dut in target_nodes:
             result = True
             if not poll_wait(basic_obj.verify_docker_status, 180, dut, 'Exited'):
@@ -3011,13 +2986,13 @@ class TestVxlanRestartTriggers():
             if not result:
                 st.report_fail("test_case_failed")
         
-        # Step 6: Verify base setup after restart with retries
+        # Step 5: Verify base setup after restart with retries
         if restart_type == "swss":
             retry_count = 10
         else:
             retry_count = test_cfg['global'].get('proc_restart_retries', 7)
         
-        st.banner('Step 6: Verifying base setup after {} restart (retries: {})'.format(
+        st.banner('Step 5: Verifying base setup after {} restart (retries: {})'.format(
             restart_type, retry_count))
         result_after_trigger = verify_base_setup_bgw(target_nodes, retry=retry_count)
         
@@ -3027,9 +3002,9 @@ class TestVxlanRestartTriggers():
         
         st.banner('Base setup verification passed after {} restart'.format(restart_type))
         
-        # Step 7: Verify traffic (L2VNI + L3VNI)
+        # Step 6: Verify traffic (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 7: Verifying cross-DC traffic after restart: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6')
+            st.banner('Step 6: Verifying cross-DC traffic after restart: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6')
             traffic_result = verify_traffic(tgen_handles, bum=True,
                                             traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
                                             scope=traffic_scope)
@@ -3038,8 +3013,8 @@ class TestVxlanRestartTriggers():
                 st.report_fail("test_case_failed")
             st.banner("Traffic verification passed after trigger")
         
-        # Step 8: Check for core files/crashes
-        st.banner("Step 8: Checking for core files and crashes")
+        # Step 7: Check for core files/crashes
+        st.banner("Step 7: Checking for core files and crashes")
         if vxlan_obj.check_core():
             st.error("Core files detected after test")
             st.report_fail("test_case_failed")
@@ -3092,13 +3067,12 @@ class TestVxlanReloadTriggers():
         Steps:
             1. Select a node for testing based on node_type
             2. Verify base setup before config reload
-            3. Verify traffic before config reload (L2VNI + L3VNI)
-            4. Save configuration (SONiC + FRR)
-            5. Perform config reload
-            6. Verify docker recovery
-            7. Verify base setup after config reload (with retries)
-            8. Verify all remote VTEPs are present
-            9. Verify traffic flows (L2VNI + L3VNI)
+            3. Save configuration (SONiC + FRR)
+            4. Perform config reload
+            5. Verify docker recovery
+            6. Verify base setup after config reload (with retries)
+            7. Verify all remote VTEPs are present
+            8. Verify traffic flows (L2VNI + L3VNI)
         """
         test_num = 38 if node_type == "leaf" else 39 if node_type == "spine" else 40
         tc_id = 'test_{}_config_reload'.format(node_type)
@@ -3140,29 +3114,16 @@ class TestVxlanReloadTriggers():
             return
         st.banner("Base setup verification passed before config reload")
         
-        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
-        if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 2: Verifying traffic BEFORE config reload: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
-                traffic_scope or 'all'))
-            traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                   scope=traffic_scope)
-            if not traffic_result_before:
-                st.error("Traffic verification failed before config reload")
-                report_result(False, tc_id, "Traffic verification failed before config reload")
-                return
-            st.banner("Traffic verification passed before config reload")
-        
-        # Step 3: Save configuration
-        st.banner("Step 3: Saving configuration before reload")
+        # Step 2: Save configuration
+        st.banner("Step 2: Saving configuration before reload")
         reboot_obj.config_save(selected_dut)
         vxlan_obj.config_dut(selected_dut, "bgp", "do write")
         
         count = basic_obj.get_and_match_docker_count(selected_dut)
         st.log('Docker count before reload: {}'.format(count))
         
-        # Step 4: Perform config reload
-        st.banner('Step 4: Performing config reload on {}'.format(selected_dut))
+        # Step 3: Perform config reload
+        st.banner('Step 3: Performing config reload on {}'.format(selected_dut))
         status = reboot_obj.config_reload(selected_dut)
         
         if status:
@@ -3172,8 +3133,8 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, "Config reload command failed")
             return
         
-        # Step 5: Check docker status
-        st.banner("Step 5: Verifying docker recovery after config reload")
+        # Step 4: Check docker status
+        st.banner("Step 4: Verifying docker recovery after config reload")
         if not poll_wait(basic_obj.verify_docker_status, 180, selected_dut, 'Exited'):
             st.error("Post 'config reload', dockers are not auto recovered.")
             report_result(False, tc_id, "Docker recovery failed - dockers in Exited state after config reload")
@@ -3186,8 +3147,8 @@ class TestVxlanReloadTriggers():
         
         st.wait(60)
         
-        # Step 6: Verify base setup
-        st.banner("Step 6: Verifying base setup after config reload")
+        # Step 5: Verify base setup
+        st.banner("Step 5: Verifying base setup after config reload")
         retry_count = test_cfg['global'].get('config_reload', 7)
         setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
         base_res = verify_base_setup_bgw(setup_nodes, retry=retry_count)
@@ -3198,8 +3159,8 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, 'Base setup verification failed after config reload')
             return
         
-        # Step 7: Check VTEP status
-        st.banner("Step 7: Verifying all remote VTEPs are present")
+        # Step 6: Check VTEP status
+        st.banner("Step 6: Verifying all remote VTEPs are present")
         vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
         if vtep_check_nodes:
             vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
@@ -3212,9 +3173,9 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, "Remote VTEPs not fully recovered after config reload")
             return
         
-        # Step 8: Verify traffic (L2VNI + L3VNI)
+        # Step 7: Verify traffic (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 8: Verifying traffic after config reload: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+            st.banner('Step 7: Verifying traffic after config reload: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
                 traffic_scope or 'all'))
             traffic_result = verify_traffic(tgen_handles, bum=True,
                                             traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
@@ -3225,8 +3186,8 @@ class TestVxlanReloadTriggers():
                 return
             st.banner("Traffic verification passed after config reload")
         
-        # Step 9: Check for core files/crashes
-        st.banner("Step 9: Checking for core files and crashes")
+        # Step 8: Check for core files/crashes
+        st.banner("Step 8: Checking for core files and crashes")
         if vxlan_obj.check_core():
             st.error("Core files detected after config reload")
             report_result(False, tc_id, "Core files detected after config reload")
@@ -3253,15 +3214,14 @@ class TestVxlanReloadTriggers():
         Steps:
             1. Select a node for testing based on node_type
             2. Verify base setup before reboot
-            3. Verify traffic before reboot (L2VNI + L3VNI)
-            4. Save FRR configuration
-            5. Perform system reboot
-            6. Restore helper files (if needed)
-            7. Verify docker recovery
-            8. Verify base setup after reboot (with retries)
-            9. Verify all remote VTEPs are present
-            10. Verify traffic flows (L2VNI + L3VNI)
-            11. Check for core files/crashes
+            3. Save FRR configuration
+            4. Perform system reboot
+            5. Restore helper files (if needed)
+            6. Verify docker recovery
+            7. Verify base setup after reboot (with retries)
+            8. Verify all remote VTEPs are present
+            9. Verify traffic flows (L2VNI + L3VNI)
+            10. Check for core files/crashes
         """
         test_num = 41 if node_type == "leaf" else 42 if node_type == "spine" else 43
         tc_id = 'test_{}_reboot'.format(node_type)
@@ -3303,28 +3263,15 @@ class TestVxlanReloadTriggers():
             return
         st.banner("Base setup verification passed before reboot")
         
-        # Step 2: Verify traffic before trigger (L2VNI + L3VNI)
-        if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 2: Verifying traffic BEFORE reboot: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
-                traffic_scope or 'all'))
-            traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                   traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                   scope=traffic_scope)
-            if not traffic_result_before:
-                st.error("Traffic verification failed before reboot")
-                report_result(False, tc_id, "Traffic verification failed before reboot")
-                return
-            st.banner("Traffic verification passed before reboot")
-        
-        # Step 3: Save FRR configuration
-        st.banner("Step 3: Saving BGP configuration before reboot")
+        # Step 2: Save FRR configuration
+        st.banner("Step 2: Saving BGP configuration before reboot")
         vxlan_obj.config_dut(selected_dut, "bgp", "do write")
         
         count = basic_obj.get_and_match_docker_count(selected_dut)
         st.log('Docker count before reboot: {}'.format(count))
         
-        # Step 4: Perform reboot
-        st.banner('Step 4: Performing reboot on {}'.format(selected_dut))
+        # Step 3: Perform reboot
+        st.banner('Step 3: Performing reboot on {}'.format(selected_dut))
         reboot_obj.dut_reboot(selected_dut)
         
         # Restore helper file after reboot (if function exists)
@@ -3333,8 +3280,8 @@ class TestVxlanReloadTriggers():
         except Exception:
             st.log("restore_helper_file not available or not needed")
         
-        # Step 5: Check docker status
-        st.banner("Step 5: Verifying docker recovery after reboot")
+        # Step 4: Check docker status
+        st.banner("Step 4: Verifying docker recovery after reboot")
         if not poll_wait(basic_obj.verify_docker_status, 180, selected_dut, 'Exited'):
             report_result(False, tc_id, 'Dockers not auto recovered after reboot')
             return
@@ -3344,8 +3291,8 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, 'All dockers not up after reboot')
             return
         
-        # Step 6: Verify base setup
-        st.banner("Step 6: Verifying base setup after reboot")
+        # Step 5: Verify base setup
+        st.banner("Step 5: Verifying base setup after reboot")
         retry_count = 10
         setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
         base_res = verify_base_setup_bgw(setup_nodes, retry=retry_count)
@@ -3356,8 +3303,8 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, 'Base setup verification failed after reboot')
             return
 
-        # Step 6b: Verify all remote VTEPs are present
-        st.banner("Step 6b: Verifying all remote VTEPs are present")
+        # Step 5b: Verify all remote VTEPs are present
+        st.banner("Step 5b: Verifying all remote VTEPs are present")
         vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
         if vtep_check_nodes:
             vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
@@ -3369,9 +3316,9 @@ class TestVxlanReloadTriggers():
             return
         st.banner("All remote vteps are found")
         
-        # Step 7: Verify traffic (L2VNI + L3VNI)
+        # Step 6: Verify traffic (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 7: Verifying traffic after reboot: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
+            st.banner('Step 6: Verifying traffic after reboot: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
                 traffic_scope or 'all'))
             traffic_result = verify_traffic(tgen_handles, bum=True,
                                             traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
@@ -3382,8 +3329,8 @@ class TestVxlanReloadTriggers():
                 return
             st.banner("Traffic verification passed after reboot")
         
-        # Step 8: Check for core files/crashes
-        st.banner("Step 8: Checking for core files and crashes")
+        # Step 7: Check for core files/crashes
+        st.banner("Step 7: Checking for core files and crashes")
         if vxlan_obj.check_core():
             st.error("Core files detected after reboot")
             report_result(False, tc_id, "Core files detected after reboot")
@@ -3410,16 +3357,15 @@ class TestVxlanReloadTriggers():
         Steps:
             1. Select a node for testing based on node_type
             2. Verify base setup before power cycle
-            3. Verify traffic before power cycle (L2VNI + L3VNI)
-            4. Save configurations (SONiC + FRR)
-            5. Power OFF the node via PDU (st.do_rps)
-            6. Power ON the node via PDU
-            7. Restore helper files (if needed)
-            8. Verify docker recovery
-            9. Verify base setup after power cycle (with retries)
-            10. Verify all remote VTEPs are present
-            11. Verify traffic flows (L2VNI + L3VNI)
-            12. Check for core files/crashes
+            3. Save configurations (SONiC + FRR)
+            4. Power OFF the node via PDU (st.do_rps)
+            5. Power ON the node via PDU
+            6. Restore helper files (if needed)
+            7. Verify docker recovery
+            8. Verify base setup after power cycle (with retries)
+            9. Verify all remote VTEPs are present
+            10. Verify traffic flows (L2VNI + L3VNI)
+            11. Check for core files/crashes
         """
         test_num = 44 if node_type == "leaf" else 45 if node_type == "spine" else 46
         tc_id = 'test_{}_power_cycle'.format(node_type)
@@ -3465,22 +3411,8 @@ class TestVxlanReloadTriggers():
         except Exception as err:
             st.log('Base setup check encountered error: {}'.format(err))
         
-        # Step 2: Verify traffic before power cycle (L2VNI + L3VNI)
-        if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 2: Verifying traffic BEFORE power cycle on {} node'.format(node_desc))
-            try:
-                traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                       traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                       scope=traffic_scope)
-                if not traffic_result_before:
-                    st.error("Traffic not healthy before power cycle - proceeding anyway")
-                else:
-                    st.banner("Traffic verification passed before power cycle")
-            except Exception as err:
-                st.log('Traffic verification encountered error: {}'.format(err))
-        
-        # Step 3: Save configurations
-        st.banner("Step 3: Save configurations before power cycle")
+        # Step 2: Save configurations
+        st.banner("Step 2: Save configurations before power cycle")
         try:
             st.log("Saving SONiC config...")
             reboot_obj.config_save(selected_dut)
@@ -3489,8 +3421,8 @@ class TestVxlanReloadTriggers():
         except Exception as err:
             st.log('Config save encountered error: {}'.format(err))
         
-        # Step 4: Get docker count before power cycle
-        st.banner("Step 4: Get docker count before power cycle")
+        # Step 3: Get docker count before power cycle
+        st.banner("Step 3: Get docker count before power cycle")
         doc_count_before = None
         try:
             doc_count_before = basic_obj.get_and_match_docker_count(selected_dut)
@@ -3498,8 +3430,8 @@ class TestVxlanReloadTriggers():
         except Exception as err:
             st.log('Failed to get docker count: {}'.format(err))
         
-        # Step 5: Power OFF the DUT via PDU
-        st.banner('Step 5: Powering OFF {} via PDU'.format(selected_dut))
+        # Step 4: Power OFF the DUT via PDU
+        st.banner('Step 4: Powering OFF {} via PDU'.format(selected_dut))
         try:
             st.log('About to power off {}'.format(selected_dut))
             st.do_rps(selected_dut, "Off")
@@ -3512,8 +3444,8 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, 'Power OFF failed: {}'.format(e))
             return
         
-        # Step 6: Power ON the DUT via PDU
-        st.banner('Step 6: Powering ON {} via PDU'.format(selected_dut))
+        # Step 5: Power ON the DUT via PDU
+        st.banner('Step 5: Powering ON {} via PDU'.format(selected_dut))
         try:
             st.log('About to power on {}'.format(selected_dut))
             st.do_rps(selected_dut, "On", recon=False)
@@ -3533,15 +3465,15 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, "DUT not reachable after power cycle")
             return
         
-        # Step 7: Restore helper files if needed
-        st.banner("Step 7: Restore helper files")
+        # Step 6: Restore helper files if needed
+        st.banner("Step 6: Restore helper files")
         try:
             restore_helper_file(selected_dut)
         except Exception as err:
             st.log('Helper file restore encountered error: {}'.format(err))
         
-        # Step 8: Verify docker recovery
-        st.banner("Step 8: Verify all dockers are up and running")
+        # Step 7: Verify docker recovery
+        st.banner("Step 7: Verify all dockers are up and running")
         docker_recovery_time = 180
         
         try:
@@ -3564,8 +3496,8 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, 'Docker verification error: {}'.format(err))
             return
         
-        # Step 9: Verify base setup after power cycle (with retries)
-        st.banner("Step 9: Verify base setup after power cycle")
+        # Step 8: Verify base setup after power cycle (with retries)
+        st.banner("Step 8: Verify base setup after power cycle")
         retry_count = test_cfg['global'].get('config_reload', 7)
         st.log('Verifying with {} retries...'.format(retry_count))
         setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', [])) if node_type == "spine" else [selected_dut]
@@ -3581,8 +3513,8 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, 'Base setup verification error: {}'.format(err))
             return
 
-        # Step 10: Verify all remote VTEPs are present
-        st.banner("Step 10: Verifying all remote VTEPs are present")
+        # Step 9: Verify all remote VTEPs are present
+        st.banner("Step 9: Verifying all remote VTEPs are present")
         vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
         if vtep_check_nodes:
             vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
@@ -3594,9 +3526,9 @@ class TestVxlanReloadTriggers():
             return
         st.banner("All remote vteps are found")
 
-        # Step 11: Verify traffic flows (L2VNI + L3VNI)
+        # Step 10: Verify traffic flows (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
-            st.banner('Step 11: Verify traffic flows after power cycle on {} node'.format(node_desc))
+            st.banner('Step 10: Verify traffic flows after power cycle on {} node'.format(node_desc))
             convergence_wait = 30
             st.log('Waiting {}s for protocol convergence...'.format(convergence_wait))
             st.wait(convergence_wait)
@@ -3611,8 +3543,8 @@ class TestVxlanReloadTriggers():
                 return
             st.banner("Traffic verification passed after power cycle")
         
-        # Step 12: Check for core files/crashes
-        st.banner("Step 12: Checking for core files and crashes")
+        # Step 11: Check for core files/crashes
+        st.banner("Step 11: Checking for core files and crashes")
         if vxlan_obj.check_core():
             st.error("Core files detected after power cycle")
             report_result(False, tc_id, "Core files detected after power cycle")
@@ -3654,7 +3586,7 @@ class TestVxlanBGPTriggers():
         
         Steps:
             1. Verify base setup before trigger
-            2. Verify traffic before trigger (L2VNI + L3VNI)
+            2. Clear interface counters for baseline
             3. Perform "clear bgp *" on target nodes
             4. Wait for BGP session recovery
             5. Verify base setup after trigger (with retries)
@@ -3710,22 +3642,6 @@ class TestVxlanBGPTriggers():
                     st.error("Base setup not healthy before trigger")
             except Exception as err:
                 st.log('Base setup check encountered error: {}'.format(err))
-            
-            # Step 1b: Verify traffic before trigger (L2VNI + L3VNI)
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 1b: Verifying traffic BEFORE hard BGP reset on {} nodes'.format(node_desc))
-                try:
-                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                           scope=traffic_scope)
-                    if not traffic_result_before:
-                        result_str += "Traffic verification failed before hard BGP reset\n"
-                        st.error("Traffic not healthy before trigger")
-                    else:
-                        st.banner("Traffic verification passed before hard BGP reset")
-                except Exception as err:
-                    st.log('Traffic verification encountered error: {}'.format(err))
-                    result_str += 'Traffic verification error before hard BGP reset: {}\n'.format(err)
             
             # Step 2: Clear interface counters for baseline
             st.banner('Step 2: Clearing interface counters on {} nodes'.format(node_desc))
@@ -3841,7 +3757,7 @@ class TestVxlanBGPTriggers():
         
         Steps:
             1. Verify base setup before trigger
-            2. Verify traffic before trigger (L2VNI + L3VNI)
+            2. Clear interface counters for baseline
             3. Perform "clear bgp * soft" on target nodes
             4. Wait for BGP session recovery
             5. Verify base setup after trigger (with retries)
@@ -3897,22 +3813,6 @@ class TestVxlanBGPTriggers():
                     st.error("Base setup not healthy before trigger")
             except Exception as err:
                 st.log('Base setup check encountered error: {}'.format(err))
-            
-            # Step 1b: Verify traffic before trigger (L2VNI + L3VNI)
-            if st.getenv('skip_tgen', 'false') != 'true':
-                st.banner('Step 1b: Verifying traffic BEFORE soft BGP reset on {} nodes'.format(node_desc))
-                try:
-                    traffic_result_before = verify_traffic(tgen_handles, bum=True,
-                                                           traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
-                                                           scope=traffic_scope)
-                    if not traffic_result_before:
-                        result_str += "Traffic verification failed before soft BGP reset\n"
-                        st.error("Traffic not healthy before trigger")
-                    else:
-                        st.banner("Traffic verification passed before soft BGP reset")
-                except Exception as err:
-                    st.log('Traffic verification encountered error: {}'.format(err))
-                    result_str += 'Traffic verification error before soft BGP reset: {}\n'.format(err)
             
             # Step 2: Clear interface counters for baseline
             st.banner('Step 2: Clearing interface counters on {} nodes'.format(node_desc))

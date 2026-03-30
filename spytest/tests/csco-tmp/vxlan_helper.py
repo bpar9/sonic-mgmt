@@ -6888,18 +6888,22 @@ def get_expected_evpn_vni(dut):
             else:
                 vrf = 'default'
             if vni:
-                # BGW vxlan_if includes VLAN suffix: 'vxlan-dc-101', 'vxlan-dc-102'
-                if is_bgw:
-                    vxlan_if = 'vxlan-dc-{}'.format(vrf_id) if vrf_id else 'vxlan-dc'
-                else:
-                    vxlan_if = 'VXLAN'
-                ret_val.append({
+                entry = {
                     'vni': str(vni),
                     'type': 'L3',
-                    'vxlan_if': vxlan_if,
                     'tenant_vrf': vrf,
                     'num_remote_vteps': 'n/a'  # L3 VNIs don't have remote VTEPs
-                })
+                }
+                # On BGW nodes the L3 VNI lives on exactly one tunnel
+                # interface — either vxlan-dc-<vlan> or vxlan-wan-<vlan>,
+                # depending on which VTEP zebra selects (only 1 VTEP/VNI
+                # is supported).  We intentionally omit vxlan_if from the
+                # expected dict so compare_exp_actual_data won't fail on
+                # the dc-vs-wan difference; verify_evpn_vni() validates
+                # the interface separately.
+                if not is_bgw:
+                    entry['vxlan_if'] = 'VXLAN'
+                ret_val.append(entry)
     
     return ret_val
 
@@ -6907,11 +6911,36 @@ def get_expected_evpn_vni(dut):
 @VerifyLoop()
 def verify_evpn_vni(dut, exp_data, **kwargs):
     """
-    Verify 'show evpn vni' FRR command output attributes
+    Verify 'show evpn vni' FRR command output attributes.
+
+    For L3 VNIs on BGW nodes an additional check ensures the VxLAN
+    interface is either dc-facing (vxlan-dc-<vlan>) **or** wan-facing
+    (vxlan-wan-<vlan>) but NOT both — only 1 VTEP per VNI is supported.
     """
     act_data = get_evpn_vni(dut)
     # Only verify VNI, type, and VRF (don't check dynamic counters like num_macs)
     compare_exp_actual_data(exp_data, act_data, ['vni', 'type'])
+
+    # --- L3 VNI interface direction check (BGW nodes only) ---------------
+    # Each L3 VNI must appear on exactly one tunnel interface, either
+    # vxlan-dc-<vlan> or vxlan-wan-<vlan>.  Appearing on both (or neither)
+    # indicates a configuration problem.
+    is_bgw = 'bgw' in dut.lower()
+    if is_bgw:
+        l3_actual = [row for row in act_data if row.get('type') == 'L3']
+        for row in l3_actual:
+            vni = row.get('vni', '?')
+            vxlan_if = row.get('vxlan_if', '')
+            is_dc = vxlan_if.startswith('vxlan-dc-')
+            is_wan = vxlan_if.startswith('vxlan-wan-')
+            if not (is_dc or is_wan):
+                st.log('EVPN VNI {}: unexpected L3 interface "{}" on {}'.format(
+                    vni, vxlan_if, dut))
+                raise CompareFailed(
+                    'L3 VNI {} on {} has unexpected interface: {}'.format(
+                        vni, dut, vxlan_if))
+            st.log('EVPN VNI {} on {}: L3 interface {} ({}-facing) — OK'.format(
+                vni, dut, vxlan_if, 'dc' if is_dc else 'wan'))
     return act_data
 
 

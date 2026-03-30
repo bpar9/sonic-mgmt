@@ -7001,11 +7001,12 @@ def get_expected_type5_routes(dut):
         elif 'bgw' in node_name and node_dc != dut_dc:
             remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
 
-    # For leaf nodes, "remote class" paths come from same-DC BGWs
-    # (re-originated cross-DC routes).  For BGW nodes, "remote class"
-    # paths come from other-DC BGWs via WAN overlay.
+    # For leaf nodes, do NOT require has_remote_class_path — leaves
+    # don't see BGW ASNs in EVPN Type-5 AS paths (BGW re-originates but
+    # leaf receives via spine RR with only leaf ASNs visible).
+    # For BGW nodes, "remote class" paths come from other-DC BGWs.
     if is_leaf:
-        node_remote_asns = local_bgw_asns
+        node_remote_asns = set()  # empty → has_remote_class_path = n/a
     else:
         node_remote_asns = remote_bgw_asns
 
@@ -7255,17 +7256,18 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
       has_ipv6_nh        - at least one path has IPv6 next-hop
       installed_in_rib   - prefix found in 'show ip route vrf' (IPv4 only)
       installed_in_fib   - prefix has '>' (FIB-selected) flag in RIB output
+                           (any protocol: C>* connected, B>* BGP, etc.)
       has_local_class_path  - path from local-DC source (leaf ASN in AS path)
       has_remote_class_path - path from remote source
-            (BGW: other-DC BGW ASN; Leaf: same-DC BGW re-originated route)
+            (BGW: other-DC BGW ASN; Leaf: n/a — leaves don't see BGW ASNs)
 
     Strict checks intentionally removed (break after restart):
       best_nh_is_local_vtep, best_weight_32768, best_path_is_local_leaf,
       exact path_count == N, exact RD matching
 
     Pass condition: all required booleans are 'yes' (or 'n/a' if not
-    applicable, e.g. has_remote_class_path on a leaf with no cross-DC
-    routes present yet).
+    applicable, e.g. has_remote_class_path always n/a on leaf nodes,
+    installed_in_rib/fib n/a for IPv6 prefixes).
 
     Args:
         dut: Node hostname (BGW or leaf)
@@ -7406,9 +7408,11 @@ def _verify_type5_unified(dut, exp_routes, detailed, vrf_rib_output):
             rib_text = vrf_rib_output[vrf]
             prefix_escaped = re.escape(prefix)
             in_rib = bool(re.search(prefix_escaped, rib_text))
-            # FIB = route selected with '>' flag: "B>* 80.11.0.0/24"
+            # FIB = route with '>' flag, any protocol code:
+            #   Connected: "C>* 80.11.0.0/24" (locally owned subnet)
+            #   BGP:       "B>* 80.12.0.40/32" (remote learned route)
             in_fib = bool(re.search(
-                r'B[*>]+.*' + prefix_escaped, rib_text))
+                r'[A-Z]\S*>\S*\s+' + prefix_escaped, rib_text))
 
         act_row = {
             'prefix': prefix,

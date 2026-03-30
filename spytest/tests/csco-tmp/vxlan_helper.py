@@ -7257,7 +7257,8 @@ def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
       installed_in_rib   - prefix found in 'show ip route vrf' (IPv4 only)
       installed_in_fib   - prefix has '>' (FIB-selected) flag in RIB output
                            (any protocol: C>* connected, B>* BGP, etc.)
-      has_local_class_path  - path from local-DC source (leaf ASN in AS path)
+      has_local_class_path  - path from local-DC source (leaf ASN in AS path,
+                             or self-originated: weight 32768 + empty AS path)
       has_remote_class_path - path from remote source
             (BGW: other-DC BGW ASN; Leaf: n/a — leaves don't see BGW ASNs)
 
@@ -7388,7 +7389,11 @@ def _verify_type5_unified(dut, exp_routes, detailed, vrf_rib_output):
         has_rmac = any(p.get('rmac') for p in info['paths'])
         has_ipv6_nh = any(p.get('ipv6_nexthop') for p in info['paths'])
 
-        # Classify paths as local-class or remote-class based on AS path
+        # Classify paths as local-class or remote-class based on AS path.
+        # Self-originated routes (weight 32768, empty AS path) count as
+        # local-class — the originating leaf IS a local-class source even
+        # though its own ASN doesn't appear in the AS path.  This matters
+        # for single-leaf DCs (e.g. DC3) where ALL routes are self-originated.
         has_local_class = False
         has_remote_class = False
         local_asns_str = {str(a) for a in local_leaf_asns}
@@ -7397,6 +7402,9 @@ def _verify_type5_unified(dut, exp_routes, detailed, vrf_rib_output):
             as_path = path.get('as_path', '')
             path_asns = set(as_path.split())
             if path_asns & local_asns_str:
+                has_local_class = True
+            elif not as_path.strip() and path.get('weight') == '32768':
+                # Self-originated route: empty AS path + weight 32768
                 has_local_class = True
             if path_asns & remote_asns_str:
                 has_remote_class = True

@@ -1219,7 +1219,7 @@ def tgen_preconfig(**kwargs):
                                                               endpoints=l2_orphan_within,
                                                               topo_handles=topo_handles,
                                                               multi_dst='vlan', name_prfx='L2-SH-WITHIN',
-                                                              rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                              rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                               pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if orphan_within_handles:
             stream_handles['l2_v4'].extend(orphan_within_handles if isinstance(orphan_within_handles, list) else [orphan_within_handles])
@@ -1232,7 +1232,7 @@ def tgen_preconfig(**kwargs):
                                                              endpoints=l2_orphan_cross,
                                                              topo_handles=topo_handles,
                                                              multi_dst='vlan', name_prfx='L2-SH-CROSS',
-                                                             rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                             rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                              pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if orphan_cross_handles:
             stream_handles['l2_v4'].extend(orphan_cross_handles if isinstance(orphan_cross_handles, list) else [orphan_cross_handles])
@@ -1251,7 +1251,7 @@ def tgen_preconfig(**kwargs):
                                                                   endpoints=vlan_pc_endpoints,
                                                                   topo_handles=topo_handles,
                                                                   multi_dst='vlan', name_prfx='L2-MH-WITHIN',
-                                                                  rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                                  rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                                   pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
                 if pc_within_handles:
                     stream_handles['l2_v4'].extend(pc_within_handles if isinstance(pc_within_handles, list) else [pc_within_handles])
@@ -1270,7 +1270,7 @@ def tgen_preconfig(**kwargs):
                                                                  endpoints=vlan_pc_endpoints,
                                                                  topo_handles=topo_handles,
                                                                  multi_dst='vlan', name_prfx='L2-MH-CROSS',
-                                                                 rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                                 rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                                  pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
                 if pc_cross_handles:
                     stream_handles['l2_v4'].extend(pc_cross_handles if isinstance(pc_cross_handles, list) else [pc_cross_handles])
@@ -1295,7 +1295,7 @@ def tgen_preconfig(**kwargs):
                                                         endpoints=l3_within_sh,
                                                         topo_handles=topo_handles,
                                                         multi_dst='vrf', name_prfx='L3-SH-WITHIN',
-                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                         pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_within_sh_v4:
             stream_handles['l3_v4'].extend(l3_within_sh_v4 if isinstance(l3_within_sh_v4, list) else [l3_within_sh_v4])
@@ -1308,7 +1308,7 @@ def tgen_preconfig(**kwargs):
                                                         endpoints=l3_within_mh,
                                                         topo_handles=topo_handles,
                                                         multi_dst='vrf', name_prfx='L3-MH-WITHIN',
-                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                         pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_within_mh_v4:
             stream_handles['l3_v4'].extend(l3_within_mh_v4 if isinstance(l3_within_mh_v4, list) else [l3_within_mh_v4])
@@ -1326,7 +1326,7 @@ def tgen_preconfig(**kwargs):
                                                        endpoints=l3_cross_sh,
                                                        topo_handles=topo_handles,
                                                        multi_dst='vrf', name_prfx='L3-SH-CROSS',
-                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_cross_sh_v4:
             stream_handles['l3_v4'].extend(l3_cross_sh_v4 if isinstance(l3_cross_sh_v4, list) else [l3_cross_sh_v4])
@@ -1338,7 +1338,7 @@ def tgen_preconfig(**kwargs):
                                                        endpoints=l3_cross_mh,
                                                        topo_handles=topo_handles,
                                                        multi_dst='vrf', name_prfx='L3-MH-CROSS',
-                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_cross_mh_v4:
             stream_handles['l3_v4'].extend(l3_cross_mh_v4 if isinstance(l3_cross_mh_v4, list) else [l3_cross_mh_v4])
@@ -1355,7 +1355,7 @@ def tgen_preconfig(**kwargs):
                                                                  endpoints=l2_orphan_within,
                                                                  topo_handles=topo_handles,
                                                                  version="ipv6", multi_dst='vlan', name_prfx='L2-SH-WITHIN',
-                                                                 rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                                 rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                                  pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if orphan_within_handles_v6:
             stream_handles['l2_v6'].extend(orphan_within_handles_v6 if isinstance(orphan_within_handles_v6, list) else [orphan_within_handles_v6])
@@ -1366,7 +1366,7 @@ def tgen_preconfig(**kwargs):
                                                                 endpoints=l2_orphan_cross,
                                                                 topo_handles=topo_handles,
                                                                 version="ipv6", multi_dst='vlan', name_prfx='L2-SH-CROSS',
-                                                                rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                                rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                                 pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if orphan_cross_handles_v6:
             stream_handles['l2_v6'].extend(orphan_cross_handles_v6 if isinstance(orphan_cross_handles_v6, list) else [orphan_cross_handles_v6])
@@ -1384,7 +1384,7 @@ def tgen_preconfig(**kwargs):
                                                                      endpoints=vlan_pc_endpoints,
                                                                      topo_handles=topo_handles,
                                                                      version="ipv6", multi_dst='vlan', name_prfx='L2-MH-WITHIN',
-                                                                     rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                                     rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                                      pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
                 if pc_within_handles_v6:
                     stream_handles['l2_v6'].extend(pc_within_handles_v6 if isinstance(pc_within_handles_v6, list) else [pc_within_handles_v6])
@@ -1402,7 +1402,7 @@ def tgen_preconfig(**kwargs):
                                                                     endpoints=vlan_pc_endpoints,
                                                                     topo_handles=topo_handles,
                                                                     version="ipv6", multi_dst='vlan', name_prfx='L2-MH-CROSS',
-                                                                    rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                                    rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                                     pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
                 if pc_cross_handles_v6:
                     stream_handles['l2_v6'].extend(pc_cross_handles_v6 if isinstance(pc_cross_handles_v6, list) else [pc_cross_handles_v6])
@@ -1415,7 +1415,7 @@ def tgen_preconfig(**kwargs):
     # ============================================================
     stream_handles['dci_flap_continuous'] = {}
     _dci_fc_key = 1
-    _fc_rate = test_cfg['global'].get('bum', {}).get('rate_percent', 0.8)
+    _fc_rate = test_cfg['global'].get('bum', {}).get('rate_percent', 0.1)
     _fc_ppb = test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000)
 
     def _dci_merge_flap_continuous(dest, created, start_key):
@@ -1503,7 +1503,7 @@ def tgen_preconfig(**kwargs):
                                                         endpoints=l3_within_sh,
                                                         topo_handles=topo_handles,
                                                         version="ipv6", multi_dst='vrf', name_prfx='L3-SH-WITHIN',
-                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                         pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_within_sh_v6:
             stream_handles['l3_v6'].extend(l3_within_sh_v6 if isinstance(l3_within_sh_v6, list) else [l3_within_sh_v6])
@@ -1514,7 +1514,7 @@ def tgen_preconfig(**kwargs):
                                                         endpoints=l3_within_mh,
                                                         topo_handles=topo_handles,
                                                         version="ipv6", multi_dst='vrf', name_prfx='L3-MH-WITHIN',
-                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                        rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                         pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_within_mh_v6:
             stream_handles['l3_v6'].extend(l3_within_mh_v6 if isinstance(l3_within_mh_v6, list) else [l3_within_mh_v6])
@@ -1525,7 +1525,7 @@ def tgen_preconfig(**kwargs):
                                                        endpoints=l3_cross_sh,
                                                        topo_handles=topo_handles,
                                                        version="ipv6", multi_dst='vrf', name_prfx='L3-SH-CROSS',
-                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_cross_sh_v6:
             stream_handles['l3_v6'].extend(l3_cross_sh_v6 if isinstance(l3_cross_sh_v6, list) else [l3_cross_sh_v6])
@@ -1535,7 +1535,7 @@ def tgen_preconfig(**kwargs):
                                                        endpoints=l3_cross_mh,
                                                        topo_handles=topo_handles,
                                                        version="ipv6", multi_dst='vrf', name_prfx='L3-MH-CROSS',
-                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.8),
+                                                       rate_percent=test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1),
                                                        pkts_per_burst=test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000))
         if l3_cross_mh_v6:
             stream_handles['l3_v6'].extend(l3_cross_mh_v6 if isinstance(l3_cross_mh_v6, list) else [l3_cross_mh_v6])
@@ -1667,7 +1667,7 @@ def tgen_preconfig(**kwargs):
                             topo_handles=topo_handles,
                             multi_dst='vlan', name_prfx=stream_prfx,
                             circuit_type='raw', rx_all_ports=True,
-                            rate_percent=test_cfg['global'].get('bum', {}).get('rate_percent', 0.8),
+                            rate_percent=test_cfg['global'].get('bum', {}).get('rate_percent', 0.1),
                             pkts_per_burst=test_cfg['global'].get('bum', {}).get('pkts_per_burst', 100))
                         
                         if not stream_handles.get(bum_type):
@@ -1751,7 +1751,7 @@ def tgen_preconfig(**kwargs):
                                 topo_handles=topo_handles,
                                 multi_dst='vlan', name_prfx=stream_prfx,
                                 circuit_type='raw', rx_all_ports=True,
-                                rate_percent=test_cfg['global'].get('bum', {}).get('rate_percent', 0.8),
+                                rate_percent=test_cfg['global'].get('bum', {}).get('rate_percent', 0.1),
                                 pkts_per_burst=test_cfg['global'].get('bum', {}).get('pkts_per_burst', 500))
                             
                             if not stream_handles.get(bum_type):

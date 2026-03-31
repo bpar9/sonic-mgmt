@@ -2175,10 +2175,12 @@ def verify_traffic(traffic_handles, regenerate=False, traffic_types=[], traffic_
         # Check if traffic items exist after filtering
         if not traffic_items:
             st.log("No traffic items for {} after filtering".format(traffic_type))
-            # For 'within' scope, missing L2 traffic is a failure (expected within-DC traffic)
-            # For 'cross' scope or no scope, missing traffic might be expected
-            if scope == 'within' and traffic_type in ['l2_v4', 'l2_v6']:
-                st.error("Expected within-DC L2 traffic but found 0 streams - likely traffic generation issue")
+            # When the caller explicitly requested specific traffic_names or a
+            # scope, 0 matching streams means the expected traffic was never
+            # created — that is a test failure, not a silent pass.
+            if traffic_names or (scope in ['within', 'cross']):
+                st.error("Expected {} traffic (names={}, scope={}) but found 0 streams after filtering".format(
+                    traffic_type, traffic_names, scope))
                 traffic_result[traffic_type] = False
             else:
                 st.log("No streams for {} - treating as Pass (no traffic to verify)".format(traffic_type))
@@ -5716,9 +5718,11 @@ class TestVxlanDCIBase():
             result = False
         
         # Step 2: Shutdown Vlan11 interface on target leaf
+        # Note: SONiC CLI 'config interface shutdown' does not support VLAN
+        # interfaces.  Use FRR vtysh to admin-shutdown the SVI instead.
         st.banner('Step 2: Shutdown {} on {} to trigger Type-5 route withdrawal'.format(
             target_vlan, target_leaf))
-        intf_obj.interface_shutdown(target_leaf, [target_vlan])
+        st.config(target_leaf, 'interface {}\n shutdown'.format(target_vlan), type='vtysh')
         st.wait(10, 'Waiting for Type-5 route withdrawal after {} shutdown'.format(target_vlan))
         
         # Step 3: Verify Type-5 route for VLAN 11 is withdrawn on BGW
@@ -5735,7 +5739,7 @@ class TestVxlanDCIBase():
         # Step 4: Bring up Vlan11 interface on target leaf
         st.banner('Step 4: Bring up {} on {} to trigger Type-5 route re-advertisement'.format(
             target_vlan, target_leaf))
-        intf_obj.interface_noshutdown(target_leaf, [target_vlan])
+        st.config(target_leaf, 'interface {}\n no shutdown'.format(target_vlan), type='vtysh')
         st.wait(15, 'Waiting for Type-5 route re-advertisement after {} startup'.format(target_vlan))
         
         # Step 5: Verify Type-5 route for VLAN 11 is re-advertised on BGW

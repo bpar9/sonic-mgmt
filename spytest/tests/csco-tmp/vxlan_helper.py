@@ -2670,8 +2670,9 @@ def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,
                     l3_endpoint_dict[traffic_item]["dst_vrf"] = vrf
                     i+=1
 
-    # MH (PortChannel) source flows — 1 pair per VRF per destination interface
-    # Follows l3vni_dci_traffic_flows.txt pattern: MH source uses first VLAN pair only
+    # MH (PortChannel) source flows — full VLAN pairs per VRF (same as SH)
+    # Generates within-DC and cross-DC MH L3 flows so that WITHIN_DC_VLANS
+    # (e.g. 12, 17) survive scope filtering and L3-MH-WITHIN streams are created.
     # Only generated for DCI topologies to avoid adding unexpected flows in non-DCI tests.
     if dci_enabled and leaf0_pc_interface and leaf0_pc_interface in temp_dict:
         pc_node = temp_dict[leaf0_pc_interface]['node']
@@ -2687,28 +2688,22 @@ def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,
                 pc_vlans = temp_dict[leaf0_pc_interface]['vrf'].get(vrf, [])
                 if not pc_vlans or not vlans:
                     continue
-                # Use first VLAN from PC source, find first different VLAN in dst
-                src_vlan = pc_vlans[0]
-                dst_vlan = None
-                for v in vlans:
-                    if v != src_vlan:
-                        dst_vlan = v
-                        break
-                if dst_vlan is None:
-                    continue
-                traffic_item = "traffic_item_" + str(i)
-                l3_endpoint_dict[traffic_item] = {
-                    "dir": str(src_vlan) + "-->" + str(dst_vlan),
-                    'src_vlan': src_vlan,
-                    "src_int": leaf0_pc_interface,
-                    "src_node": pc_node,
-                    "src_vrf": vrf,
-                    'dst_vlan': dst_vlan,
-                    "dst_int": interface,
-                    "dst_node": dst_node,
-                    "dst_vrf": vrf,
-                }
-                i += 1
+                # Full VLAN pairs (same as SH) so within-DC VLANs are included
+                pair_dict = find_pair(pc_vlans, vlans)
+                for cntr, vlan_pair in pair_dict.items():
+                    traffic_item = "traffic_item_" + str(i)
+                    l3_endpoint_dict[traffic_item] = {
+                        "dir": str(vlan_pair[0]) + "-->" + str(vlan_pair[1]),
+                        'src_vlan': vlan_pair[0],
+                        "src_int": leaf0_pc_interface,
+                        "src_node": pc_node,
+                        "src_vrf": vrf,
+                        'dst_vlan': vlan_pair[1],
+                        "dst_int": interface,
+                        "dst_node": dst_node,
+                        "dst_vrf": vrf,
+                    }
+                    i += 1
     else:
         st.log("find_l3_traffic_endpoints: No PortChannel interface found on first node, "
                "skipping MH source flows")

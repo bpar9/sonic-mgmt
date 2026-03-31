@@ -5233,7 +5233,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv4 traffic within DC (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within',
+                          traffic_names=['L3-SH']):
             st.log('L3VNI SH IPv4 within-DC traffic: Pass')
         else:
             summ += 'L3VNI SH IPv4 within-DC traffic: Fail\n'
@@ -5269,7 +5270,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv4 traffic across DCI (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross',
+                          traffic_names=['L3-SH']):
             st.log('L3VNI SH IPv4 traffic across DCI: Pass')
         else:
             summ += 'L3VNI SH IPv4 traffic across DCI: Fail\n'
@@ -5305,7 +5307,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv6 traffic within DC (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within',
+                          traffic_names=['L3-SH']):
             st.log('L3VNI SH IPv6 within-DC traffic: Pass')
         else:
             summ += 'L3VNI SH IPv6 within-DC traffic: Fail\n'
@@ -5341,7 +5344,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv6 traffic across DCI (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross',
+                          traffic_names=['L3-SH']):
             st.log('L3VNI SH IPv6 traffic across DCI: Pass')
         else:
             summ += 'L3VNI SH IPv6 traffic across DCI: Fail\n'
@@ -5378,7 +5382,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv4 traffic within DC (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within',
+                          traffic_names=['L3-MH']):
             st.log('L3VNI MH IPv4 within-DC traffic: Pass')
         else:
             summ += 'L3VNI MH IPv4 within-DC traffic: Fail\n'
@@ -5415,7 +5420,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv4 traffic across DCI (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross',
+                          traffic_names=['L3-MH']):
             st.log('L3VNI MH IPv4 traffic across DCI: Pass')
         else:
             summ += 'L3VNI MH IPv4 traffic across DCI: Fail\n'
@@ -5452,7 +5458,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv6 traffic within DC (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within',
+                          traffic_names=['L3-MH']):
             st.log('L3VNI MH IPv6 within-DC traffic: Pass')
         else:
             summ += 'L3VNI MH IPv6 within-DC traffic: Fail\n'
@@ -5489,7 +5496,8 @@ class TestVxlanDCIBase():
         
         # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
         st.banner('Verify L3VNI IPv6 traffic across DCI (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross'):
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross',
+                          traffic_names=['L3-MH']):
             st.log('L3VNI MH IPv6 traffic across DCI: Pass')
         else:
             summ += 'L3VNI MH IPv6 traffic across DCI: Fail\n'

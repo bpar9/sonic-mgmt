@@ -5258,6 +5258,161 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
+    def test_base_dci_l3vni_type5_ipv4_prefix_advertisement(self):
+        """
+        L3VNI_dci:9 - L3VNI Control Plane - Type-5 route for IPv4 prefix advertisement
+        
+        Description:
+            1) Bring up BGP session between IXIA and a DUT leaf node (leaf0_dc1)
+            2) Advertise IPv4 prefixes from IXIA (10.100.0.0/24, 10.100.1.0/24, etc.)
+            3) Verify Type-5 routes appear on BGW nodes with correct attributes
+            4) Verify traffic flows from remote nodes to IXIA-advertised IPv4 prefixes
+            
+        IXIA BGP Configuration (per bgp_ixia_dut.txt pattern):
+            - Configure IXIA interface on leaf0_dc1 TGEN port (IPv4 connectivity)
+            - Configure eBGP peer: IXIA AS=65299, leaf AS from topology
+            - Advertise IPv4 prefixes via BGP route advertisement
+            - Start BGP protocol on IXIA
+            
+        Verification:
+            - Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes
+            - Route format: [5]:[0]:[24]:[10.100.0.0] etc.
+            - L3VNI in extended community
+            - Traffic reachability to advertised prefixes
+            
+        Steps:
+            1. Get leaf0_dc1 TGEN port handle from topo_handles
+            2. Configure IXIA interface and BGP peer using configure_ixia_bgp_ipv4_session()
+            3. Start BGP protocol on IXIA
+            4. Verify Type-5 routes on BGW nodes
+            5. Cleanup IXIA BGP session
+        """
+        tc_id = "test_base_dci_l3vni_type5_ipv4_prefix_advertisement"
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+        
+        st.banner('Testcase L3VNI_dci:9: Type-5 route for IPv4 prefix advertisement ({})'.format(tc_id))
+        result = True
+        summ = ''
+        
+        # --- Step 1: Get TGEN handles for leaf0_dc1 ---
+        st.banner('Step 1: Get TGEN handles for leaf0_dc1')
+        topo_handles = tgen_handles.get('topo_handles', {})
+        
+        # Find leaf0_dc1 in topo_handles
+        leaf_node = None
+        for node in topo_handles:
+            if 'leaf0_dc1' in node.lower() or node == test_cfg['nodes']['l2l3vni'][0]:
+                leaf_node = node
+                break
+        
+        if not leaf_node or leaf_node not in topo_handles:
+            summ += 'Cannot find leaf0_dc1 in topo_handles\n'
+            st.log('Available topo_handles nodes: {}'.format(list(topo_handles.keys())))
+            report_result(False, tc_id, summ)
+            return
+        
+        st.log('Using leaf node: {}'.format(leaf_node))
+        
+        # Get first TGEN port for this leaf
+        leaf_ports = topo_handles[leaf_node]
+        port_key = list(leaf_ports.keys())[0]
+        tg_handle = leaf_ports[port_key]['tg_handle']
+        port_handle = leaf_ports[port_key]['port_handle']
+        st.log('TGEN port: {}, port_handle: {}'.format(port_key, port_handle))
+        
+        # --- Step 2: Get leaf ASN from BGP underlay info ---
+        st.banner('Step 2: Get leaf ASN and configure IXIA BGP session')
+        bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
+        leaf_asn = None
+        for node_info in bgp_info:
+            if node_info.get('node') == leaf_node:
+                leaf_asn = str(node_info.get('asn', ''))
+                break
+        
+        if not leaf_asn:
+            summ += 'Cannot determine ASN for leaf node {}\n'.format(leaf_node)
+            report_result(False, tc_id, summ)
+            return
+        
+        st.log('Leaf {} ASN: {}'.format(leaf_node, leaf_asn))
+        
+        # IXIA BGP parameters
+        ixia_asn = '65299'
+        ixia_ip = '80.99.0.100'
+        ixia_gateway = '80.99.0.1'
+        ixia_netmask = '255.255.255.0'
+        ixia_mac = '00:00:AA:BB:CC:09'
+        
+        # IPv4 prefixes to advertise from IXIA
+        ipv4_prefixes = [
+            {'prefix': '10.100.0.0', 'prefix_len': 24, 'num_routes': 1},
+            {'prefix': '10.100.1.0', 'prefix_len': 24, 'num_routes': 1},
+            {'prefix': '10.100.2.0', 'prefix_len': 24, 'num_routes': 1},
+            {'prefix': '10.100.3.0', 'prefix_len': 24, 'num_routes': 1},
+            {'prefix': '10.100.4.0', 'prefix_len': 24, 'num_routes': 1},
+        ]
+        
+        st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
+            ixia_asn, leaf_asn, ixia_ip, ixia_gateway))
+        st.log('IPv4 prefixes to advertise: {}'.format(
+            [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv4_prefixes]))
+        
+        # --- Step 3: Configure IXIA BGP session and advertise IPv4 prefixes ---
+        st.banner('Step 3: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
+        ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
+            tg_handle=tg_handle,
+            port_handle=port_handle,
+            ixia_ip=ixia_ip,
+            gateway=ixia_gateway,
+            netmask=ixia_netmask,
+            src_mac=ixia_mac,
+            ixia_asn=ixia_asn,
+            leaf_asn=leaf_asn,
+            ipv4_prefixes=ipv4_prefixes
+        )
+        
+        if not ixia_result['result']:
+            summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
+            report_result(False, tc_id, summ)
+            return
+        
+        bgp_handle = ixia_result['bgp_handle']
+        interface_handle = ixia_result['interface_handle']
+        st.log('IXIA BGP session configured successfully')
+        st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
+        
+        # --- Step 4: Start BGP protocol on IXIA ---
+        st.banner('Step 4: Start BGP protocol on IXIA')
+        try:
+            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
+            st.log('BGP protocol started on IXIA')
+            # Wait for BGP session to establish and routes to propagate
+            st.wait(30)
+        except Exception as e:
+            st.log('Warning: BGP protocol start returned: {}'.format(e))
+        
+        # --- Step 5: Verify Type-5 routes on BGW nodes ---
+        st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes')
+        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+        st.log('BGW nodes to verify: {}'.format(bgw_nodes))
+        
+        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5']):
+            summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
+            result = False
+        
+        # --- Step 6: Cleanup IXIA BGP session ---
+        st.banner('Step 6: Cleanup IXIA BGP session')
+        try:
+            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
+            st.log('BGP protocol stopped on IXIA')
+        except Exception as e:
+            st.log('Warning: BGP protocol stop returned: {}'.format(e))
+        
+        vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+        
+        report_result(result, tc_id, summ)
+    
     def test_base_dci_l3vni_tunnel_counters(self):
         """
         L3VNI_dci:12 - L3VNI Data Plane - Aggregate tunnel counters

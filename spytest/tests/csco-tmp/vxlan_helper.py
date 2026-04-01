@@ -8192,6 +8192,163 @@ def verify_vrf_vni_after_reload_dci(dut):
     return verify_vrfvnimap(dut)
 
 
+def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
+                                     src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
+                                     vlan_enabled='0', vlan_id='1'):
+    """
+    Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
+
+    This follows the bgp_ixia_dut.txt pattern for IXIA API calls:
+      1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
+      2. Configure BGP peer (eBGP session to leaf)
+      3. Advertise IPv6 prefixes over BGP
+
+    Args:
+        tg_handle: IXIA traffic generator handle
+        port_handle: IXIA port handle connected to leaf
+        ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
+        gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
+        netmask: Subnet mask (e.g. '255.255.255.0')
+        src_mac: IXIA source MAC address (e.g. '00:00:AA:BB:CC:01')
+        ixia_asn: IXIA BGP AS number (e.g. '65299')
+        leaf_asn: Leaf node BGP AS number (e.g. '65200')
+        ipv6_prefixes: List of dicts with keys: prefix, prefix_len, num_routes
+            e.g. [{'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5}]
+        vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
+        vlan_id: VLAN ID if vlan_enabled='1' (default '1')
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'interface_handle': IXIA interface handle,
+            'bgp_handle': BGP peer handle,
+            'route_handles': list of BGP route handles,
+            'details': str summary
+        }
+    """
+    result = {
+        'result': False,
+        'interface_handle': None,
+        'bgp_handle': None,
+        'route_handles': [],
+        'details': ''
+    }
+
+    # Step 1: Configure IXIA interface
+    st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
+    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+        ixia_ip, gateway, netmask, src_mac))
+
+    intf_args = {
+        'port_handle': port_handle,
+        'mode': 'config',
+        'intf_ip_addr': ixia_ip,
+        'gateway': gateway,
+        'netmask': netmask,
+        'src_mac_addr': src_mac,
+        'arp_send_req': '1',
+    }
+    if vlan_enabled == '1':
+        intf_args['vlan'] = '1'
+        intf_args['vlan_id'] = vlan_id
+        intf_args['vlan_id_count'] = '1'
+        intf_args['vlan_id_step'] = '1'
+
+    h1 = tg_handle.tg_interface_config(**intf_args)
+    st.log('Interface config result: {}'.format(h1))
+
+    if not h1 or not h1.get('handle'):
+        result['details'] = 'Failed to configure IXIA interface'
+        st.log(result['details'])
+        return result
+
+    interface_handle = h1['handle']
+    result['interface_handle'] = interface_handle
+    st.log('IXIA interface configured: handle={}'.format(interface_handle))
+
+    # Step 2: Configure BGP peer
+    st.banner('IXIA BGP: Configuring BGP peer (local_as={}, remote_as={})'.format(
+        ixia_asn, leaf_asn))
+
+    bgp_result = tg_handle.tg_emulation_bgp_config(
+        handle=interface_handle,
+        mode='enable',
+        active_connect_enable='1',
+        local_as=ixia_asn,
+        remote_as=leaf_asn,
+        remote_ip_addr=gateway,
+        enable_4_byte_as='1'
+    )
+    st.log('BGP config result: {}'.format(bgp_result))
+
+    if not bgp_result or not bgp_result.get('handle'):
+        result['details'] = 'Failed to configure BGP peer'
+        st.log(result['details'])
+        return result
+
+    bgp_handle = bgp_result['handle']
+    result['bgp_handle'] = bgp_handle
+    st.log('BGP peer configured: handle={}'.format(bgp_handle))
+
+    # Step 3: Advertise IPv6 prefixes
+    st.banner('IXIA BGP: Advertising {} IPv6 prefix group(s)'.format(len(ipv6_prefixes)))
+
+    for idx, prefix_cfg in enumerate(ipv6_prefixes):
+        prefix = prefix_cfg['prefix']
+        prefix_len = prefix_cfg.get('prefix_len', 64)
+        num_routes = prefix_cfg.get('num_routes', 1)
+        # Convert prefix_len to IPv6 netmask representation
+        # For BGP route config, use prefix_length parameter
+        st.log('  Prefix group {}: {} prefixes starting from {}/{}'.format(
+            idx + 1, num_routes, prefix, prefix_len))
+
+        route_result = tg_handle.tg_emulation_bgp_route_config(
+            handle=bgp_handle,
+            mode='add',
+            ip_version='6',
+            num_routes=str(num_routes),
+            prefix=prefix,
+            prefix_length=str(prefix_len),
+            prefix_step=1,
+            as_path='as_seq:1'
+        )
+        st.log('Route config result: {}'.format(route_result))
+
+        if route_result:
+            result['route_handles'].append(route_result)
+
+    result['result'] = True
+    result['details'] = 'IXIA BGP configured: {} IPv6 prefix groups advertised'.format(
+        len(ipv6_prefixes))
+    st.log(result['details'])
+    return result
+
+
+def cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle):
+    """
+    Clean up IXIA BGP session and interface configuration.
+
+    Args:
+        tg_handle: IXIA traffic generator handle
+        bgp_handle: BGP peer handle to remove
+        interface_handle: IXIA interface handle to remove
+    """
+    st.banner('IXIA BGP: Cleaning up BGP session and interface')
+    try:
+        if bgp_handle:
+            tg_handle.tg_emulation_bgp_config(handle=bgp_handle, mode='disable')
+            st.log('BGP session disabled: {}'.format(bgp_handle))
+    except Exception as e:
+        st.log('Warning: Failed to disable BGP session: {}'.format(e))
+
+    try:
+        if interface_handle:
+            tg_handle.tg_interface_config(handle=interface_handle, mode='destroy')
+            st.log('IXIA interface destroyed: {}'.format(interface_handle))
+    except Exception as e:
+        st.log('Warning: Failed to destroy IXIA interface: {}'.format(e))
+
+
 def get_tc_params(tc_id):
     test_cfg = get_cfg_dict()
     if not test_cfg or 'testcases' not in test_cfg.keys():

@@ -5357,13 +5357,14 @@ def _node_matches_expected(node, host_local_node):
     return any(exp in node for exp in host_local_node)
 
 
-def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_type='mac_only', is_mh_host=False, dci_enabled=False):
+def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_type='mac_only', is_mh_host=False, dci_enabled=False, check_seq=True):
     """
     Verify MAC (and optionally IP) is learned with expected sequence on leaf nodes.
 
+    When check_seq=False: only verify MAC is on expected node(s), skip MM sequence check
+    (matches multi-homing behavior at initial learn). When True: enforce sequence.
     When dci_enabled=True: uses _show_evpn_type2_grep for targeted route lookup
-    (avoids full BGP table parse), logs route table for debugging, enforces
-    sequence check on local route. When False: uses standard parse_show path.
+    (avoids full BGP table parse), logs route table for debugging.
     """
     leaf_nodes = []
     for dut in st.get_dut_names():
@@ -5394,19 +5395,18 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
         else:
             cli_output = st.show(node, "do show bgp l2vpn evpn route type 2", **show_kw)
             parsed_output = st.parse_show(node, "show bgp l2vpn evpn route type 2", cli_output, "show_bgp_l2vpn_evpn_route_type_2.tmpl")
-        mac_found = False
-        ip_found = False
+        logged_remote = False  # DCI: log only first remote route per node to avoid verbosity
         for item in parsed_output:
             for key, value in item.items():
                 if host_type == 'mac_only':
                     if key == "mac" and value == mac_addr:
                         mac_found = True
-                        flag = True
                         if item['ip'] == '':
                             if item['weight'] == '32768':
                                 if dci_enabled:
-                                    found_on_node = node
-                                    found_seq = item.get('mm', '')
+                                    if _node_matches_expected(node, host_local_node) or found_on_node is None:
+                                        found_on_node = node
+                                        found_seq = item.get('mm', '') or '0'
                                     _log_evpn_type2_route_table(node, item, 'mac_only')
                                 else:
                                     st.log(item)
@@ -5420,17 +5420,26 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
                                         st.log("mac learnt locally on expected node: {}".format(node))
                                         local_flag = True
                                     else:
-                                        local_flag = False
-                                        st.log("mac learnt locally on unexpected node: {}".format(node)) 
+                                        if not dci_enabled:
+                                            local_flag = False
+                                        st.log("mac learnt locally on unexpected node: {}".format(node))
+                                # Only set flag=True for local route; do not let remote routes overwrite flag
+                                mm_val = item.get('mm', '') or '0'  # FRR omits MM for first learn (seq=0)
+                                if dci_enabled and _node_matches_expected(node, host_local_node):
+                                    st.log("MM comparison: found={} expected={} check_seq={}".format(mm_val, mac_move_seq, check_seq))
+                                if check_seq and mm_val != mac_move_seq:
+                                    flag = False
+                                    st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, mm_val))
+                                elif check_seq:
+                                    flag = True
+                                    st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, mm_val))
+                                else:
+                                    flag = True
                             else:
                                 learn_type = 'remote'
-                    
-                            # Only enforce sequence check on local route; remote routes may have empty/different mm
-                            if item['weight'] == '32768' and item['mm'] != mac_move_seq:
-                                flag = False
-                                st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, item['mm']))
-                            elif item['weight'] == '32768':
-                                st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, item['mm']))
+                                if dci_enabled and not logged_remote:
+                                    _log_evpn_type2_route_table(node, item, 'mac_only', route_type='remote')
+                                    logged_remote = True
                             # Log learning type only for local path to avoid repeated "mac learning : remote" per path
                             if item['weight'] == '32768':
                                 st.log("mac learning : {}".format(learn_type))
@@ -5438,15 +5447,15 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
                 else:
                     if key == "mac" and value == mac_addr:
                         mac_found = True
-                        flag = True
                         if item['ip'] == ip_addr:
                             if not ip_found:
                                 st.log('ip_found')
                             ip_found = True
                             if item['weight'] == '32768':
                                 if dci_enabled:
-                                    found_on_node = node
-                                    found_seq = item.get('mm', '')
+                                    if _node_matches_expected(node, host_local_node) or found_on_node is None:
+                                        found_on_node = node
+                                        found_seq = item.get('mm', '') or '0'
                                     _log_evpn_type2_route_table(node, item, 'mac_and_ip')
                                 else:
                                     st.log(item)
@@ -5455,17 +5464,25 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
                                     st.log("mac learnt locally on expected node: {}".format(node))
                                     local_flag = True
                                 else:
-                                    local_flag = False
-                                    st.log("mac learnt locally on unexpected node: {}".format(node))    
+                                    if not dci_enabled:
+                                        local_flag = False
+                                    st.log("mac learnt locally on unexpected node: {}".format(node))
+                                mm_val = item.get('mm', '') or '0'
+                                if dci_enabled and _node_matches_expected(node, host_local_node):
+                                    st.log("MM comparison: found={} expected={} check_seq={}".format(mm_val, mac_move_seq, check_seq))
+                                if check_seq and mm_val != mac_move_seq:
+                                    flag = False
+                                    st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, mm_val))
+                                elif check_seq:
+                                    flag = True
+                                    st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, mm_val))
+                                else:
+                                    flag = True
                             else:
                                 learn_type = 'remote'
-                    
-                            # Only enforce sequence check on local route; remote routes may have empty/different mm
-                            if item['weight'] == '32768' and item['mm'] != mac_move_seq:
-                                flag = False
-                                st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, item['mm']))
-                            elif item['weight'] == '32768':
-                                st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, item['mm']))
+                                if dci_enabled and not logged_remote:
+                                    _log_evpn_type2_route_table(node, item, 'mac_and_ip', route_type='remote')
+                                    logged_remote = True
                             # Log learning type only for local path to avoid repeated "mac learning : remote" per path
                             if item['weight'] == '32768':
                                 st.log("mac learning : {}".format(learn_type))

@@ -834,22 +834,33 @@ global:
         redirect_off: true
         mac_holdtime: 240
         neigh_holdtime: 180
+    # test_leaf_interface_shut_noshut Step 2b: remote type-2 withdrawal poll on DC2/DC3 leafs
+    # fast_first_n waits use fast_interval_sec, then interval_sec (cuts wall time vs fixed 3s every time)
+    evpn_type2_withdraw_poll:
+        max_retries: 8
+        interval_sec: 2
+        fast_first_n: 5
+        fast_interval_sec: 1
     dci_mac_move:
         within_dc_vlan: 12
         gateway_v4: "80.12.0.1"
         gateway_v6: "8000:12::1"
+        # host_ipv4 / host_ipv6: used for IPv4 prefix and IPv6 /64 base; actual moving-host IPs are chosen per move_dir+host_type (see test_vxlan_dci._dci_mm_host_last_octets)
         host_ipv4: "80.12.0.21"
         host_ipv4_dest2: "80.12.0.22"
         src_ipv4: "80.12.0.99"
         host_ipv6: "8000:12::21"
         host_ipv6_dest2: "8000:12::22"
         src_ipv6: "8000:12::99"
-        host_mac: "00:00:00:00:12:21"
-        src_mac: "00:00:00:00:12:99"
-        host_mac_ipv4: "00:00:00:04:12:21"
-        host_mac_ipv6: "00:00:00:06:12:21"
-        src_mac_ipv4: "00:00:00:04:12:99"
-        src_mac_ipv6: "00:00:00:06:12:99"
+        # MACs use 02:00:00:* (locally administered) — disjoint from IXIA SAG 00:{vlan}:00:00:* on vlan 12
+        host_mac: "02:00:00:00:12:21"
+        src_mac: "02:00:00:00:12:99"
+        host_mac_ipv4: "02:00:00:04:12:21"
+        host_mac_ipv4_dest2: "02:00:00:04:12:22"
+        host_mac_ipv6: "02:00:00:06:12:21"
+        host_mac_ipv6_dest2: "02:00:00:06:12:22"
+        src_mac_ipv4: "02:00:00:04:12:99"
+        src_mac_ipv6: "02:00:00:06:12:99"
         pkts_per_burst_sim: 200
         rate_percent_sim: 0.01
         pkts_per_burst_hw: 1000

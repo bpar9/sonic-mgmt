@@ -574,10 +574,24 @@ def delete_vxlan_config(**kwargs):
     output += 'sudo config vxlan del {} \n'.format(vxlan_name)
     return output 
 
-def generate_bgp_underlay_config(leaf_data,int_list):
+def generate_bgp_underlay_config(leaf_data, int_list, node_name='', dci_enabled=False):
     '''
     Author: Jigar Sanghrajka (jsanghra@cisco.com)
-    
+
+    Generate BGP underlay config for TRANSIT peer-group.
+
+    When dci_enabled=False (default/base config):
+    - 'neighbor TRANSIT activate' under both IPv4 and IPv6 unicast AF (original behavior)
+
+    When dci_enabled=True (DCI config):
+    - No 'neighbor TRANSIT activate' under IPv4 unicast AF for any node
+    - 'neighbor TRANSIT activate' only under IPv6 unicast AF
+
+    Args:
+        leaf_data: Dict with router_id, as_num
+        int_list: List of underlay interface names
+        node_name: Node name string (unused currently, retained for future use)
+        dci_enabled: If True, skip TRANSIT activate under IPv4 AF
     '''
     output = ''
     # BGP underlay configuration
@@ -596,7 +610,8 @@ def generate_bgp_underlay_config(leaf_data,int_list):
         output += 'neighbor {} interface peer-group TRANSIT\n'.format(intf)
     output += 'address-family ipv4 unicast\n'
     output += 'redistribute connected\n'
-    output += 'neighbor TRANSIT activate\n'
+    if not dci_enabled:
+        output += 'neighbor TRANSIT activate\n'
     output += 'exit-address-family\n'
     output += 'address-family ipv6 unicast\n'
     output += 'redistribute connected\n'
@@ -791,6 +806,9 @@ def generate_bgp_transit_wan_config(bgw_data, ebgp_multihop=1, add_redistribute=
     output += 'address-family ipv4 unicast\n'
     if add_redistribute:
         output += 'redistribute connected\n'
+    # Only activate TRANSIT_WAN in ipv4 af — TRANSIT is the DC underlay peer-group
+    # (activated in ipv6 af by generate_bgp_underlay_config), not the WAN peer-group.
+    # Per reference config dci_l2vni_l3vni_fullconfig_Feb24.txt lines 296-298.
     output += 'neighbor TRANSIT_WAN activate\n'
     output += 'exit-address-family\n'
     output += 'end\n'
@@ -914,12 +932,18 @@ def generate_bgp_ihop_direct_config(bgw_data, ihop_peers=None, dc_direct_peers=N
 def generate_source_route_maps(bgw_data, loopback_v4="Loopback0", loopback_v6="Loopback0"):
     """
     Generate route-maps to set source IP for BGP updates.
-    
+
+    NOTE: This function must only be called for BGW nodes, NOT leaf nodes.
+    Per reference config (dci_l2vni_l3vni_fullconfig_Feb24.txt), RM_SET_SRC4/RM_SET_SRC6
+    only exist on BGW nodes (lines 351, 635, 944, 1248, 2994). Leaf nodes do NOT have
+    these route-maps. The caller (config_feature_dci) enforces this via _DCI_ONLY_FEATURES
+    guard for the 'route_maps_dci' feature.
+
     Args:
         bgw_data: BGW node data dictionary
         loopback_v4: Loopback interface for IPv4 source (default: Loopback0)
         loopback_v6: Loopback interface for IPv6 source (default: Loopback0)
-    
+
     Returns:
         Configuration string
     """
@@ -942,7 +966,7 @@ def generate_source_route_maps(bgw_data, loopback_v4="Loopback0", loopback_v6="L
     output += 'set src {}\n'.format(lo_v6_ip)
     output += 'exit\n'
     
-    output += 'route-map RM_SET_SRC4 permit 10\n'
+    output += 'route-map RM_SET_SRC4 permit 20\n'
     output += 'set src {}\n'.format(lo_v4_ip)
     output += 'exit\n'
     
@@ -951,6 +975,448 @@ def generate_source_route_maps(bgw_data, loopback_v4="Loopback0", loopback_v6="L
     output += 'ipv6 protocol bgp route-map RM_SET_SRC6\n'
     output += 'exit\n'
     
+    return output
+
+
+def _get_l3vni_bgw_params(node_name, config_dict, bgp_info):
+    """
+    Compute per-BGW L3VNI parameters from topology data.
+
+    Derives cross-DC L3VNI values, leaf VLAN bindings, leaf ASNs (same DC),
+    remote BGW ASNs, and leaf L3VNI values needed for BGW L3VNI configuration.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num} from generate_bgp_underlay_info
+
+    Returns:
+        dict with keys: as_num, dc, vrf_l3vni_pairs, vlan_bindings_by_vrf,
+                        leaf_asns, leaf_l3vnis_by_vrf, remote_bgw_asns
+        or None if data cannot be derived
+    """
+    dc = _get_dc_from_name(node_name)
+    if not dc:
+        st.warn('Cannot determine DC from node name: {}'.format(node_name))
+        return None
+
+    as_num = bgp_info.get(node_name, {}).get('as_num')
+    if not as_num:
+        st.warn('No ASN found for BGW node: {}'.format(node_name))
+        return None
+
+    # Read BGW's own l3vni data from YAML if available, else fall back to leaf
+    bgw_cfg = config_dict.get(node_name)
+    if isinstance(bgw_cfg, dict) and bgw_cfg.get('l3vni'):
+        bgw_l3vni = bgw_cfg['l3vni']
+    else:
+        bgw_l3vni = None
+
+    # Find a leaf in the same DC to get leaf L3VNI values (for RT-WAN extcommunity)
+    ref_leaf = None
+    for n, cfg in config_dict.items():
+        if n.startswith('leaf') and dc in n and isinstance(cfg, dict) and 'l3vni' in cfg:
+            ref_leaf = cfg
+            break
+    if not bgw_l3vni and (not ref_leaf or not ref_leaf.get('l3vni')):
+        st.warn('No L3VNI data found for BGW {} or any leaf in DC {}'.format(node_name, dc))
+        return None
+
+    # Build VRF -> cross-DC L3VNI pairs and VLAN bindings
+    # All BGWs use cross-DC L3VNI = 10000 + vrf_id (e.g. Vrf101 -> 10101)
+    vrf_l3vni_pairs = []
+    vlan_bindings_by_vrf = {}
+    leaf_l3vnis_by_vrf = {}
+
+    # Use BGW's own l3vni data for VLAN bindings if available
+    l3vni_source = bgw_l3vni if bgw_l3vni else ref_leaf['l3vni']
+    for l3vni_item in l3vni_source:
+        vrf_id = l3vni_item['vrf_id']
+        cross_dc_vni = 10000 + vrf_id
+        vrf_l3vni_pairs.append((vrf_id, cross_dc_vni))
+        vlan_bindings_by_vrf[vrf_id] = l3vni_item.get('vlan_bindings', [])
+
+    # Collect leaf L3VNI values (for RT-WAN extcommunity-list matching)
+    if ref_leaf and ref_leaf.get('l3vni'):
+        for l3vni_item in ref_leaf['l3vni']:
+            vrf_id = l3vni_item['vrf_id']
+            leaf_l3vnis_by_vrf[vrf_id] = l3vni_item.get('vxlan_id', 5000 + vrf_id)
+
+    # Collect leaf ASNs in same DC (for RT-WAN extcommunity-list)
+    leaf_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict['nodes'].get('leaf', [])
+        if dc in n and n in bgp_info
+    ))
+
+    # Collect remote BGW ASNs (BGWs in other DCs, for RT-DC extcommunity-list)
+    all_bgw_nodes = sorted(n for n in config_dict['nodes'].get('all', []) if 'bgw' in n)
+    remote_bgw_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in all_bgw_nodes
+        if n != node_name and dc not in n and n in bgp_info
+    ))
+
+    return {
+        'as_num': as_num,
+        'dc': dc,
+        'vrf_l3vni_pairs': vrf_l3vni_pairs,
+        'vlan_bindings_by_vrf': vlan_bindings_by_vrf,
+        'leaf_asns': leaf_asns,
+        'leaf_l3vnis_by_vrf': leaf_l3vnis_by_vrf,
+        'remote_bgw_asns': remote_bgw_asns,
+    }
+
+
+def generate_l3vni_bgw_sonic_config(node_name, config_dict, bgp_info, mode='add'):
+    """
+    Generate SONiC CLI commands for L3VNI configuration on a BGW node.
+
+    Per l3vni_config_diff.txt, creates VLANs (101/102), VRFs (Vrf101/Vrf102),
+    binds L2 VLANs to VRFs, maps L3VNI VLANs to cross-DC VNI (10101/10102)
+    on both vxlan-dc and vxlan-wan, and sets VRF-VNI mappings.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        mode: 'add' or 'del'
+
+    Returns:
+        SONiC CLI command string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    output = ''
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        cmd = []
+        bindings = params['vlan_bindings_by_vrf'].get(vrf_id, [])
+        if mode == 'add':
+            cmd.append('sudo config vlan add {}\n'.format(vrf_id))
+            cmd.append('sudo config vrf add Vrf{}\n'.format(vrf_id))
+            cmd.append('sudo config interface vrf bind Vlan{} Vrf{}\n'.format(vrf_id, vrf_id))
+            for vlan in bindings:
+                if vlan != vrf_id:
+                    cmd.append('sudo config interface vrf bind Vlan{} Vrf{}\n'.format(vlan, vrf_id))
+            cmd.append('sudo config vxlan map add vxlan-dc {} {}\n'.format(vrf_id, cross_dc_vni))
+            cmd.append('sudo config vxlan map add vxlan-wan {} {}\n'.format(vrf_id, cross_dc_vni))
+            cmd.append('sudo config vrf add_vrf_vni_map Vrf{} {}\n'.format(vrf_id, cross_dc_vni))
+        else:
+            cmd.append('sudo config vrf del_vrf_vni_map Vrf{}\n'.format(vrf_id))
+            cmd.append('sudo config vxlan map del vxlan-wan {} {}\n'.format(vrf_id, cross_dc_vni))
+            cmd.append('sudo config vxlan map del vxlan-dc {} {}\n'.format(vrf_id, cross_dc_vni))
+            for vlan in reversed(bindings):
+                if vlan != vrf_id:
+                    cmd.append('sudo config interface vrf unbind Vlan{}\n'.format(vlan))
+            cmd.append('sudo config interface vrf unbind Vlan{}\n'.format(vrf_id))
+            cmd.append('sudo config vrf del Vrf{}\n'.format(vrf_id))
+            cmd.append('sudo config vlan del {}\n'.format(vrf_id))
+        output += ''.join(cmd)
+    return output
+
+
+def generate_l3vni_bgw_frr_config(node_name, config_dict, bgp_info, dci_vip_maps):
+    """
+    Generate FRR configuration for L3VNI on a BGW node.
+
+    Per l3vni_config_diff.txt, generates:
+      - VRF-VNI bindings (cross-DC L3VNI)
+      - BGP extcommunity-lists (RT-WAN-* for leaf routes, RT-DC-* for remote BGW routes)
+      - RT-REWRITE-WAN route-map (rewrite for WAN-side tunnels)
+      - RT-REWRITE-DC route-map (rewrite for DC-side tunnels)
+      - Apply route-maps to OVERLAY and OVERLAY_WAN neighbors
+      - BGP VRF config with route-target import/export
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        dci_vip_maps: Tuple from generate_dci_vip_maps():
+            (loopback_ipv6_dc_vip, loopback_ipv4_wan_vip, ...)
+
+    Returns:
+        FRR config string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    loopback_ipv6_dc_vip, loopback_ipv4_wan_vip = dci_vip_maps[0], dci_vip_maps[1]
+    as_num = params['as_num']
+    dc_vip_ipv6 = loopback_ipv6_dc_vip.get(node_name, '')
+    wan_vip_ipv4 = loopback_ipv4_wan_vip.get(node_name, '')
+    leaf_asns = params['leaf_asns']
+    remote_bgw_asns = params['remote_bgw_asns']
+
+    output = ''
+
+    # 1) VRF-VNI bindings (all BGWs use cross-DC L3VNI)
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'vrf Vrf{}\n'.format(vrf_id)
+        output += ' vni {}\n'.format(cross_dc_vni)
+        output += 'exit-vrf\n'
+
+    # 2) BGP extcommunity-lists
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+        # RT-WAN: match routes from local leaves (leaf ASN : leaf L3VNI)
+        seq = 5
+        for leaf_asn in leaf_asns:
+            output += 'bgp extcommunity-list standard RT-WAN-{} seq {} permit rt {}:{}\n'.format(
+                cross_dc_vni, seq, leaf_asn, leaf_vni)
+            seq += 5
+        # RT-DC: match routes from remote BGWs (remote BGW ASN : cross-DC L3VNI)
+        seq = 5
+        for remote_asn in remote_bgw_asns:
+            output += 'bgp extcommunity-list standard RT-DC-{} seq {} permit rt {}:{}\n'.format(
+                cross_dc_vni, seq, remote_asn, cross_dc_vni)
+            seq += 5
+
+    # 3) RT-REWRITE-WAN route-map (WAN-side: IPv4 next-hop)
+    permit_seq = 10
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'route-map RT-REWRITE-WAN permit {}\n'.format(permit_seq)
+        output += '  match extcommunity RT-WAN-{}\n'.format(cross_dc_vni)
+        output += '  match evpn route-type prefix\n'
+        output += '  set evpn vni {}\n'.format(cross_dc_vni)
+        output += '  set evpn rmac local\n'
+        output += '  set extcommunity rt {}:{}\n'.format(as_num, cross_dc_vni)
+        output += '  set ip next-hop {}\n'.format(wan_vip_ipv4)
+        output += 'exit\n'
+        permit_seq += 5
+    output += 'route-map RT-REWRITE-WAN permit {}\n'.format(permit_seq)
+    output += 'exit\n'
+
+    # 4) RT-REWRITE-DC route-map (DC-side: IPv6 next-hop)
+    permit_seq = 10
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'route-map RT-REWRITE-DC permit {}\n'.format(permit_seq)
+        output += '  match extcommunity RT-DC-{}\n'.format(cross_dc_vni)
+        output += '  match evpn route-type prefix\n'
+        output += '  set evpn vni {}\n'.format(cross_dc_vni)
+        output += '  set evpn rmac local\n'
+        output += '  set extcommunity rt {}:{}\n'.format(as_num, cross_dc_vni)
+        output += '  set ipv6 next-hop global {}\n'.format(dc_vip_ipv6)
+        output += 'exit\n'
+        permit_seq += 5
+    output += 'route-map RT-REWRITE-DC permit {}\n'.format(permit_seq)
+    output += 'exit\n'
+
+    # 5) Apply route-maps to OVERLAY and OVERLAY_WAN neighbors
+    output += 'router bgp {}\n'.format(as_num)
+    output += 'address-family l2vpn evpn\n'
+    output += 'neighbor OVERLAY route-map RT-REWRITE-DC out\n'
+    output += 'neighbor OVERLAY_WAN route-map RT-REWRITE-WAN out\n'
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+
+    # 6) BGP VRF config with route-target import/export
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+        output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+        output += 'bgp bestpath as-path multipath-relax\n'
+        output += 'address-family l2vpn evpn\n'
+        # Export own RT
+        output += 'route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+        # Import from remote BGWs (remote_asn:cross_dc_vni)
+        for remote_asn in remote_bgw_asns:
+            output += 'route-target import {}:{}\n'.format(remote_asn, cross_dc_vni)
+        # Import from local leaves (leaf_asn:leaf_vni)
+        for leaf_asn in leaf_asns:
+            output += 'route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        output += 'no use-es-l3nhg\n'
+        output += 'advertise ipv4 unicast\n'
+        output += 'advertise ipv6 unicast\n'
+        output += 'exit-address-family\n'
+        output += 'exit\n'
+
+    return output
+
+
+def delete_l3vni_bgw_frr_config(node_name, config_dict, bgp_info):
+    """
+    Generate FRR unconfig commands for L3VNI on a BGW node.
+
+    Removes BGP VRF config, route-maps, extcommunity-lists, and VRF-VNI bindings
+    in reverse order of generate_l3vni_bgw_frr_config.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+
+    Returns:
+        FRR unconfig string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    output = ''
+
+    # Remove BGP VRF config
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'no router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+
+    # Remove route-maps
+    output += 'no route-map RT-REWRITE-WAN\n'
+    output += 'no route-map RT-REWRITE-DC\n'
+
+    # Remove extcommunity-lists
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'no bgp extcommunity-list standard RT-WAN-{}\n'.format(cross_dc_vni)
+        output += 'no bgp extcommunity-list standard RT-DC-{}\n'.format(cross_dc_vni)
+
+    # Remove VRF-VNI bindings (all BGWs use cross-DC L3VNI)
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'vrf Vrf{}\n'.format(vrf_id)
+        output += ' no vni {}\n'.format(cross_dc_vni)
+        output += 'exit-vrf\n'
+
+    output += 'end\n'
+    output += 'exit\n'
+    return output
+
+
+def generate_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
+    """
+    Generate leaf VRF route-target export/import for intra-DC EVPN and
+    route-target imports from local BGW cross-DC L3VNI.
+
+    Per l3vni_config_diff.txt lines 1-39, each leaf needs:
+    1. Intra-DC route-target export (own ASN:leaf_VNI)
+    2. Intra-DC route-target import from other same-DC leafs (peer_ASN:leaf_VNI)
+    3. Cross-DC route-target import from local BGWs (bgw_ASN:cross_dc_VNI)
+
+    Example for DC1 leaf3 (ASN 65203, Vrf102, leaf VNI 5102, cross-DC VNI 10102):
+        route-target export 65203:5102
+        route-target import 65200:5102   (DC1 leaf0)
+        route-target import 65201:5102   (DC1 leaf1)
+        route-target import 65202:5102   (DC1 leaf2)
+        route-target import 65102:10102  (DC1 BGW1)
+        route-target import 65103:10102  (DC1 BGW2)
+
+    Args:
+        node_name: Leaf node hostname (e.g. 'leaf0_dc1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+
+    Returns:
+        FRR config string with route-target export/import statements
+    """
+    dc = _get_dc_from_name(node_name)
+    if not dc or 'bgw' in node_name:
+        return ''  # Only for leaf/spine nodes, not BGWs
+
+    as_num = bgp_info.get(node_name, {}).get('as_num')
+    if not as_num:
+        return ''
+
+    # Get L3VNI data for this leaf
+    config = config_dict.get(node_name, {})
+    if not isinstance(config, dict) or not config.get('l3vni'):
+        return ''
+
+    # Find BGW nodes in the same DC and collect their ASNs
+    local_bgw_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict.get('nodes', {}).get('all', [])
+        if 'bgw' in n and dc in n and n in bgp_info
+    ))
+
+    # Find other leaf nodes in the same DC and collect their ASNs
+    local_leaf_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict.get('nodes', {}).get('all', [])
+        if 'bgw' not in n and 'spine' not in n and dc in n
+        and n != node_name and n in bgp_info
+    ))
+
+    output = ''
+    for l3vni_item in config['l3vni']:
+        vrf_id = l3vni_item['vrf_id']
+        leaf_vni = l3vni_item.get('vxlan_id', 5000 + vrf_id)
+        cross_dc_vni = 10000 + vrf_id
+        output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+        output += 'address-family l2vpn evpn\n'
+        # Intra-DC: export own leaf route-target
+        output += 'route-target export {}:{}\n'.format(as_num, leaf_vni)
+        # Intra-DC: import from other same-DC leafs
+        for leaf_asn in local_leaf_asns:
+            output += 'route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        # Cross-DC: import from local BGWs
+        for bgw_asn in local_bgw_asns:
+            output += 'route-target import {}:{}\n'.format(bgw_asn, cross_dc_vni)
+        output += 'exit-address-family\n'
+        output += 'exit\n'
+
+    if output:
+        output += 'end\n'
+        output += 'exit\n'
+
+    return output
+
+
+def delete_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
+    """
+    Remove leaf VRF route-target export/import for intra-DC EVPN and
+    cross-DC L3VNI.
+
+    Reverse of generate_l3vni_leaf_rt_config: removes the route-target
+    export/import statements that were added for intra-DC and cross-DC L3VNI.
+
+    Args:
+        node_name: Leaf node hostname (e.g. 'leaf0_dc1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+
+    Returns:
+        FRR unconfig string
+    """
+    dc = _get_dc_from_name(node_name)
+    if not dc or 'bgw' in node_name:
+        return ''
+
+    as_num = bgp_info.get(node_name, {}).get('as_num')
+    if not as_num:
+        return ''
+
+    config = config_dict.get(node_name, {})
+    if not isinstance(config, dict) or not config.get('l3vni'):
+        return ''
+
+    local_bgw_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict.get('nodes', {}).get('all', [])
+        if 'bgw' in n and dc in n and n in bgp_info
+    ))
+
+    local_leaf_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in config_dict.get('nodes', {}).get('all', [])
+        if 'bgw' not in n and 'spine' not in n and dc in n
+        and n != node_name and n in bgp_info
+    ))
+
+    output = ''
+    for l3vni_item in config['l3vni']:
+        vrf_id = l3vni_item['vrf_id']
+        leaf_vni = l3vni_item.get('vxlan_id', 5000 + vrf_id)
+        cross_dc_vni = 10000 + vrf_id
+        output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+        output += 'address-family l2vpn evpn\n'
+        # Remove intra-DC export
+        output += 'no route-target export {}:{}\n'.format(as_num, leaf_vni)
+        # Remove intra-DC imports from other same-DC leafs
+        for leaf_asn in local_leaf_asns:
+            output += 'no route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        # Remove cross-DC imports from local BGWs
+        for bgw_asn in local_bgw_asns:
+            output += 'no route-target import {}:{}\n'.format(bgw_asn, cross_dc_vni)
+        output += 'exit-address-family\n'
+        output += 'exit\n'
+
+    if output:
+        output += 'end\n'
+        output += 'exit\n'
+
     return output
 
 
@@ -2098,7 +2564,7 @@ def find_l2_traffic_endpoints(host_info_dict):
                         i+=1
     return end_point_dict
 
-def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,5],"3":[6,7],"4":[8,9]}):
+def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,5],"3":[6,7],"4":[8,9]}, dci_enabled=False):
     '''
     output:
     {'traffic_item_1': {'dir': '2-->3', 'src_vlan': 2, 'src_int': 'T1D5P1', 'dst_vlan': 3, 'dst_int': 'T1D6P1'}, 
@@ -2165,6 +2631,13 @@ def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,
                         temp_dict[interface]['vrf'][vrf].append(vlan)
                 if len(temp_dict[interface]['vrf'][vrf]) == 0:
                     temp_dict[interface]['vrf'].pop(vrf)
+    # Also find PortChannel (MH) interface on first node
+    leaf0_pc_interface = None
+    for item in leaf0_interface_list:
+        if item.startswith('PortChannel'):
+            leaf0_pc_interface = item
+            break
+
     l3_endpoint_dict = {}
     def find_pair(src_vlans,dst_vlans):
         pair_dict = {}
@@ -2176,6 +2649,7 @@ def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,
                     i+=1    
         return pair_dict
     i=1
+    # SH (orphan) source flows — full VLAN pairs per VRF
     for interface, val in temp_dict.items():
         dst_node = val['node']
         vrf_dict = val['vrf']
@@ -2195,7 +2669,160 @@ def find_l3_traffic_endpoints(host_info_dict, vrf_vlan_dict = {"1":[2,3],"2":[4,
                     l3_endpoint_dict[traffic_item]["dst_node"] = dst_node
                     l3_endpoint_dict[traffic_item]["dst_vrf"] = vrf
                     i+=1
+
+    # MH (PortChannel) source flows — full VLAN pairs per VRF (same as SH)
+    # Generates within-DC and cross-DC MH L3 flows so that WITHIN_DC_VLANS
+    # (e.g. 12, 17) survive scope filtering and L3-MH-WITHIN streams are created.
+    # Only generated for DCI topologies to avoid adding unexpected flows in non-DCI tests.
+    if dci_enabled and leaf0_pc_interface and leaf0_pc_interface in temp_dict:
+        pc_node = temp_dict[leaf0_pc_interface]['node']
+        for interface, val in temp_dict.items():
+            dst_node = val['node']
+            vrf_dict = val['vrf']
+            # Skip self (same interface) and the P1 interface on the same node
+            if interface == leaf0_pc_interface:
+                continue
+            if interface == leaf0_ref_interface:
+                continue
+            for vrf, vlans in vrf_dict.items():
+                pc_vlans = temp_dict[leaf0_pc_interface]['vrf'].get(vrf, [])
+                if not pc_vlans or not vlans:
+                    continue
+                # Full VLAN pairs (same as SH) so within-DC VLANs are included
+                pair_dict = find_pair(pc_vlans, vlans)
+                for cntr, vlan_pair in pair_dict.items():
+                    traffic_item = "traffic_item_" + str(i)
+                    l3_endpoint_dict[traffic_item] = {
+                        "dir": str(vlan_pair[0]) + "-->" + str(vlan_pair[1]),
+                        'src_vlan': vlan_pair[0],
+                        "src_int": leaf0_pc_interface,
+                        "src_node": pc_node,
+                        "src_vrf": vrf,
+                        'dst_vlan': vlan_pair[1],
+                        "dst_int": interface,
+                        "dst_node": dst_node,
+                        "dst_vrf": vrf,
+                    }
+                    i += 1
+    else:
+        st.log("find_l3_traffic_endpoints: No PortChannel interface found on first node, "
+               "skipping MH source flows")
+
     return l3_endpoint_dict
+
+
+def find_l3_dci_traffic_endpoints(host_info_dict, config_dict, vrf_vlan_dict=None):
+    """
+    Generate L3 DCI cross-DC traffic endpoints per l3vni_dci_traffic_flows.txt.
+
+    Creates exactly 23 flows across VRF101 and VRF102 with specific
+    source/destination node, interface type (SH=orphan, MH=PortChannel),
+    and VLAN pairs.
+
+    Flow summary (23 total):
+      leaf0_dc1 SH  -> leaf0_dc2 SH:  4 VRF101 + 4 VRF102 = 8
+      leaf0_dc1 SH  -> leaf0_dc2 MH:  4 VRF101 + 4 VRF102 = 8
+      leaf0_dc1 MH  -> leaf0_dc2 SH:  1 VRF101 + 1 VRF102 = 2
+      leaf0_dc1 MH  -> leaf0_dc2 MH:  1 VRF101 + 1 VRF102 = 2
+      leaf1_dc2 SH  -> leaf0_dc3 SH:  2 VRF101 + 1 VRF102 = 3
+                                                      Total = 23
+
+    Args:
+        host_info_dict: Dict of node -> interface -> vlan -> host_info
+                        (from generate_sag_hosts)
+        config_dict:    Full config dict from get_cfg_dict()
+        vrf_vlan_dict:  Dict of vrf_id -> [vlan_list].  If None, derived
+                        from config_dict.
+
+    Returns:
+        dict: Endpoint dict in same format as find_l3_traffic_endpoints,
+              keyed by 'traffic_item_<N>'.
+    """
+    if not host_info_dict:
+        return {}
+
+    # Derive VRF-VLAN mapping from config if not provided
+    if vrf_vlan_dict is None:
+        vrf_vlan_dict = {}
+        for node_name, node_cfg in config_dict.items():
+            if isinstance(node_cfg, dict) and node_cfg.get('l3vni'):
+                for item in node_cfg['l3vni']:
+                    vrf_vlan_dict[item['vrf_id']] = item['vlan_bindings']
+                break
+
+    # VLAN pairs per VRF (src_vlan -> dst_vlan) from l3vni_dci_traffic_flows.txt
+    vrf101_full_pairs = [(11, 12), (12, 13), (13, 14), (15, 11)]
+    vrf102_full_pairs = [(16, 17), (17, 18), (18, 19), (20, 16)]
+    # MH source: only 1 pair per VRF (first pair)
+    vrf101_mh_pairs = [(11, 12)]
+    vrf102_mh_pairs = [(16, 17)]
+    # leaf1_dc2 -> leaf0_dc3: 2 VRF101 + 1 VRF102
+    vrf101_dc2_dc3_pairs = [(11, 12), (12, 13)]
+    vrf102_dc2_dc3_pairs = [(16, 17)]
+
+    # Helper: resolve interface name for a node
+    # SH (orphan) = first interface with 'P1' in name
+    # MH (PortChannel) = first interface starting with 'PortChannel'
+    def _resolve_intf(node, intf_type):
+        if node not in host_info_dict:
+            return None
+        for intf_name in host_info_dict[node]:
+            if intf_type == 'SH' and 'P1' in intf_name and not intf_name.startswith('PortChannel'):
+                return intf_name
+            if intf_type == 'MH' and intf_name.startswith('PortChannel'):
+                return intf_name
+        return None
+
+    # Helper: determine VRF for a VLAN
+    def _vrf_for_vlan(vlan):
+        for vrf_id, vlans in vrf_vlan_dict.items():
+            if vlan in vlans:
+                return vrf_id
+        return ''
+
+    # Define all flow groups per l3vni_dci_traffic_flows.txt
+    # Each entry: (src_node, src_type, dst_node, dst_type, vlan_pairs)
+    flow_groups = [
+        # leaf0_dc1 SH -> leaf0_dc2 SH: full pairs
+        ('leaf0_dc1', 'SH', 'leaf0_dc2', 'SH', vrf101_full_pairs + vrf102_full_pairs),
+        # leaf0_dc1 SH -> leaf0_dc2 MH: full pairs
+        ('leaf0_dc1', 'SH', 'leaf0_dc2', 'MH', vrf101_full_pairs + vrf102_full_pairs),
+        # leaf0_dc1 MH -> leaf0_dc2 SH: 1 pair per VRF
+        ('leaf0_dc1', 'MH', 'leaf0_dc2', 'SH', vrf101_mh_pairs + vrf102_mh_pairs),
+        # leaf0_dc1 MH -> leaf0_dc2 MH: 1 pair per VRF
+        ('leaf0_dc1', 'MH', 'leaf0_dc2', 'MH', vrf101_mh_pairs + vrf102_mh_pairs),
+        # leaf1_dc2 SH -> leaf0_dc3 SH: 2 VRF101 + 1 VRF102
+        ('leaf1_dc2', 'SH', 'leaf0_dc3', 'SH', vrf101_dc2_dc3_pairs + vrf102_dc2_dc3_pairs),
+    ]
+
+    endpoints = {}
+    idx = 1
+    for src_node, src_type, dst_node, dst_type, vlan_pairs in flow_groups:
+        src_intf = _resolve_intf(src_node, src_type)
+        dst_intf = _resolve_intf(dst_node, dst_type)
+        if not src_intf or not dst_intf:
+            st.log('find_l3_dci_traffic_endpoints: cannot resolve intf '
+                   'src={}:{} dst={}:{}'.format(src_node, src_type, dst_node, dst_type))
+            continue
+        for src_vlan, dst_vlan in vlan_pairs:
+            vrf = _vrf_for_vlan(src_vlan)
+            traffic_item = 'traffic_item_{}'.format(idx)
+            endpoints[traffic_item] = {
+                'dir': '{}-->{}'.format(src_vlan, dst_vlan),
+                'src_vlan': src_vlan,
+                'src_int': src_intf,
+                'src_node': src_node,
+                'src_vrf': vrf,
+                'dst_vlan': dst_vlan,
+                'dst_int': dst_intf,
+                'dst_node': dst_node,
+                'dst_vrf': vrf,
+            }
+            idx += 1
+
+    st.log('find_l3_dci_traffic_endpoints: generated {} flows'.format(len(endpoints)))
+    return endpoints
+
 
 def create_traffic_item(device_handles, endpoints, topo_handles, transmit_mode="single_burst",
                         version = "ipv4", udp_header = False, multi_dst = None, name_prfx='TI', 
@@ -2838,7 +3465,8 @@ def generate_dci_vip_maps():
     """
     vars = st.get_testbed_vars()
     config_dict = get_cfg_dict()
-    bgw_nodes = sorted([n for n in config_dict['nodes']['all'] if 'bgw' in n])
+    bgw_nodes = sorted([n for n in config_dict['nodes']['all'] if 'bgw' in n],
+                       key=get_node_sort_key)
     if not bgw_nodes:
         return ({}, {}, {}, {})
 
@@ -2859,12 +3487,13 @@ def generate_dci_vip_maps():
         dc = _get_dc_from_name(node)
         dc_num = int(dc.replace('dc', '')) if dc else 1
         loopback_ipv6_dc_vip[node] = "{}:1::1".format(dc_vip_base + (dc_num - 1) * dc_vip_step)
+        wan_octet = wan_vip_base + dc_num - 1
         loopback_ipv4_wan_vip[node] = "{}.{}.{}.{}".format(
-            wan_vip_base + dc_num, wan_vip_base + dc_num, wan_vip_base + dc_num, wan_vip_base + dc_num)
+            wan_octet, wan_octet, wan_octet, wan_octet)
         loopback_ipv4_wan_overlay[node] = "{}.{}.{}.{}".format(
             overlay_base + i * 10, overlay_base + i * 10, overlay_base + i * 10, overlay_base + i * 10)
         if dc and dc != 'dc1':
-            loopback20_ips[node] = "80.80.80.{}".format(80 + len(loopback20_ips))
+            loopback20_ips[node] = "100.100.100.{}".format(1 + len(loopback20_ips))
     generate_dci_vip_maps._loopback20_ips = loopback20_ips
     return (loopback_ipv6_dc_vip,
             loopback_ipv4_wan_vip,
@@ -2881,6 +3510,44 @@ def _get_dc_from_name(name):
         if p.startswith('dc') and p[2:].isdigit():
             return p
     return None
+
+def get_dci_link_interfaces(dut, test_cfg):
+    """
+    Get DCI-facing link interfaces on a BGW/DCI node.
+
+    Looks up the 'dci_int' key from the interface config for the given node,
+    which contains the list of interfaces connecting to remote DC BGW nodes
+    (WAN/DCI links). Falls back to finding interfaces by naming convention
+    if dci_int is not available.
+
+    Args:
+        dut: DUT name (e.g. 'spine2_dc1_bgw1')
+        test_cfg: Test configuration dictionary containing 'int_config' or topology info
+
+    Returns:
+        list: List of DCI-facing interface names, or empty list if none found
+    """
+    config_dict = get_cfg_dict()
+    int_config = config_dict.get('int_config', {})
+
+    # Primary: use dci_int from config
+    dci_intfs = int_config.get(dut, {}).get('dci_int', [])
+    if dci_intfs:
+        st.log('get_dci_link_interfaces: {} has dci_int: {}'.format(dut, dci_intfs))
+        return list(dci_intfs)
+
+    # Fallback: look in test_cfg for WAN/DCI link info
+    if test_cfg and test_cfg.get('int_config'):
+        dci_intfs = test_cfg['int_config'].get(dut, {}).get('dci_int', [])
+        if dci_intfs:
+            st.log('get_dci_link_interfaces: {} has dci_int from test_cfg: {}'.format(dut, dci_intfs))
+            return list(dci_intfs)
+
+    # Second fallback: get all interfaces and filter for WAN-facing ones
+    # BGW nodes typically have interfaces toward other BGWs labeled in topology
+    st.log('get_dci_link_interfaces: no dci_int found for {}, returning empty'.format(dut))
+    return []
+
 
 def get_node_sort_key(node):
     """Return a deterministic sort key tuple for topology nodes.
@@ -3236,7 +3903,7 @@ def config_feature(nodes, feature, vars=None):
                 config_out = generate_bgp_l3vni_config(config,bgp_info[node])
             elif feature == 'bgp_underlay':
                 int_config_dict = get_config_interfaces_list(vars)
-                config_out = generate_bgp_underlay_config(bgp_info[node],int_config_dict[node]['underlay'])
+                config_out = generate_bgp_underlay_config(bgp_info[node],int_config_dict[node]['underlay'], node_name=node)
             elif feature == 'bgp_overlay':
                 config_out = generate_bgp_overlay_config(overlay_info[node])
             elif feature == 'bgp_bfd_underlay':
@@ -3321,6 +3988,8 @@ def config_feature_dci(nodes, feature, **kwargs):
         bgp_overlay_wan_dci: OVERLAY_WAN peer-group for EVPN across DCs
         bgp_ihop_direct_dci: IHOP and DC_DIRECT peer-groups
         route_maps_dci: Source route-maps for BGP updates
+        l3vni_sonic_bgw_dci: SONiC CLI for L3VNI on BGW (VLAN, VRF, VXLAN map, VRF-VNI)
+        l3vni_frr_bgw_dci: FRR config for L3VNI on BGW (VRF-VNI, extcommunity, RT-REWRITE, BGP VRF)
         delete_*: Unconfig variants for the above
 
     Args:
@@ -3340,7 +4009,7 @@ def config_feature_dci(nodes, feature, **kwargs):
      transit_wan_ipv4_underlay) = config_feature_dci._dci_vip_cache
 
     # Load BGP BGW info when needed (cached across calls)
-    _BGP_BGW_FEATURES = ('bgp_transit_wan_dci', 'bgp_overlay_wan_dci')
+    _BGP_BGW_FEATURES = ('bgp_transit_wan_dci', 'bgp_overlay_wan_dci', 'bgp_ihop_direct_dci')
     if feature in _BGP_BGW_FEATURES:
         if not hasattr(config_feature_dci, "_bgp_info_bgw_cache"):
             all_bgw_nodes = [n for n in config_dict['nodes']['all'] if 'bgw' in n]
@@ -3356,9 +4025,13 @@ def config_feature_dci(nodes, feature, **kwargs):
 
     _DCI_ONLY_FEATURES = ('loopback_dci', 'config_interface_ip_dci', 'nvo_dci', 'bgp_transit_wan_dci',
                           'bgp_overlay_wan_dci', 'bgp_ihop_direct_dci', 'route_maps_dci', 'l2vni_dci',
+                          'l3vni_sonic_bgw_dci', 'l3vni_frr_bgw_dci',
+                          'delete_l3vni_sonic_bgw_dci', 'delete_l3vni_frr_bgw_dci',
                           'delete_l2vni_dci', 'delete_vxlan_dci', 'delete_interface_ip_dci')
     _BGP_CONFIG_FEATURES = ('bgp_transit_wan_dci', 'bgp_overlay_wan_dci', 'bgp_ihop_direct_dci',
                            'route_maps_dci', 'bgp_overlay_dci', 'bgp_underlay_dci', 'bgp_l3vni_config_dci',
+                           'l3vni_frr_bgw_dci', 'delete_l3vni_frr_bgw_dci',
+                           'l3vni_leaf_rt_dci', 'delete_l3vni_leaf_rt_dci',
                            'delete_bgp_l3vni_config_dci', 'delete_bgp_config_dci')
     loopback20_ips = getattr(generate_dci_vip_maps, '_loopback20_ips', {})
 
@@ -3385,7 +4058,7 @@ def config_feature_dci(nodes, feature, **kwargs):
             config_out += generate_vxlan_config(loopback_ipv4_wan_vip[node], dci_enabled=True, vxlan_name='vxlan-wan', nvo_name='NVO-WAN')
         elif feature == 'bgp_underlay_dci':
             int_config_dict = get_config_interfaces_list(vars)
-            config_out = generate_bgp_underlay_config(bgp_info[node], int_config_dict[node]['underlay'])
+            config_out = generate_bgp_underlay_config(bgp_info[node], int_config_dict[node]['underlay'], node_name=node, dci_enabled=True)
         elif feature == 'bgp_overlay_dci':
             config_out = generate_bgp_overlay_config(overlay_info[node], dci_enabled=True, node_name=node)
         elif feature == 'bgp_l3vni_config_dci':
@@ -3401,7 +4074,28 @@ def config_feature_dci(nodes, feature, **kwargs):
             dc_direct_peers = bgp_info_bgw[node].get('neighbor_dc_direct', [])
             config_out = generate_bgp_ihop_direct_config(bgp_info_bgw[node], ihop_peers, dc_direct_peers)
         elif feature == 'route_maps_dci':
-            config_out = generate_source_route_maps(bgp_info[node])
+            # Build data dict with loopback IPs for generate_source_route_maps
+            # Use Loopback1 (WAN overlay) IP for RM_SET_SRC4, not router_id (Loopback0)
+            # Reference: DC1 BGW1 uses 10.10.10.10 (Loopback1), not 10.200.200.102 (Loopback0)
+            loopback_v6_map = generate_loopback_ip(version='v6')
+            rm_data = {
+                'loopback_ipv4': loopback_ipv4_wan_overlay.get(node, ''),
+                'loopback_ipv6': loopback_v6_map.get(node, '')
+            }
+            config_out = generate_source_route_maps(rm_data)
+        elif feature == 'l3vni_sonic_bgw_dci':
+            config_out = generate_l3vni_bgw_sonic_config(node, config_dict, bgp_info)
+        elif feature == 'l3vni_frr_bgw_dci':
+            config_out = generate_l3vni_bgw_frr_config(
+                node, config_dict, bgp_info, config_feature_dci._dci_vip_cache)
+        elif feature == 'delete_l3vni_sonic_bgw_dci':
+            config_out = generate_l3vni_bgw_sonic_config(node, config_dict, bgp_info, mode='del')
+        elif feature == 'delete_l3vni_frr_bgw_dci':
+            config_out = delete_l3vni_bgw_frr_config(node, config_dict, bgp_info)
+        elif feature == 'l3vni_leaf_rt_dci':
+            config_out = generate_l3vni_leaf_rt_config(node, config_dict, bgp_info)
+        elif feature == 'delete_l3vni_leaf_rt_dci':
+            config_out = delete_l3vni_leaf_rt_config(node, config_dict, bgp_info)
         elif feature == 'delete_l2vni_dci':
             config_out = generate_l2vni_config(config, dci_enabled=True, mode='del')
         elif feature == 'delete_vxlan_dci':
@@ -4087,12 +4781,14 @@ def get_expected_vxlan_remotevtep(dut):
 
         #
         # 1b) DC IPv6 VTEPs: DUT DC VIP -> local leaves' loopbacks
+        # Only include actual leaf nodes — non-BGW spines and sibling BGWs
+        # do NOT form VXLAN tunnels visible in 'show vxlan remotevtep'.
         #
         src_v6 = loopback_ipv6_dc_vip.get(dut)
         if src_v6:
             local_leaves = [
                 n for n in nodes.get('l2l3vni', [])
-                if _get_dc_from_name(n) == dut_dc
+                if _get_dc_from_name(n) == dut_dc and 'leaf' in n
             ]
 
             local_leaves_sorted = sorted(local_leaves)
@@ -4661,13 +5357,14 @@ def _node_matches_expected(node, host_local_node):
     return any(exp in node for exp in host_local_node)
 
 
-def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_type='mac_only', is_mh_host=False, dci_enabled=False):
+def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_type='mac_only', is_mh_host=False, dci_enabled=False, check_seq=True):
     """
     Verify MAC (and optionally IP) is learned with expected sequence on leaf nodes.
 
+    When check_seq=False: only verify MAC is on expected node(s), skip MM sequence check
+    (matches multi-homing behavior at initial learn). When True: enforce sequence.
     When dci_enabled=True: uses _show_evpn_type2_grep for targeted route lookup
-    (avoids full BGP table parse), logs route table for debugging, enforces
-    sequence check on local route. When False: uses standard parse_show path.
+    (avoids full BGP table parse), logs route table for debugging.
     """
     leaf_nodes = []
     for dut in st.get_dut_names():
@@ -4698,19 +5395,18 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
         else:
             cli_output = st.show(node, "do show bgp l2vpn evpn route type 2", **show_kw)
             parsed_output = st.parse_show(node, "show bgp l2vpn evpn route type 2", cli_output, "show_bgp_l2vpn_evpn_route_type_2.tmpl")
-        mac_found = False
-        ip_found = False
+        logged_remote = False  # DCI: log only first remote route per node to avoid verbosity
         for item in parsed_output:
             for key, value in item.items():
                 if host_type == 'mac_only':
                     if key == "mac" and value == mac_addr:
                         mac_found = True
-                        flag = True
                         if item['ip'] == '':
                             if item['weight'] == '32768':
                                 if dci_enabled:
-                                    found_on_node = node
-                                    found_seq = item.get('mm', '')
+                                    if _node_matches_expected(node, host_local_node) or found_on_node is None:
+                                        found_on_node = node
+                                        found_seq = item.get('mm', '') or '0'
                                     _log_evpn_type2_route_table(node, item, 'mac_only')
                                 else:
                                     st.log(item)
@@ -4724,17 +5420,26 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
                                         st.log("mac learnt locally on expected node: {}".format(node))
                                         local_flag = True
                                     else:
-                                        local_flag = False
-                                        st.log("mac learnt locally on unexpected node: {}".format(node)) 
+                                        if not dci_enabled:
+                                            local_flag = False
+                                        st.log("mac learnt locally on unexpected node: {}".format(node))
+                                # Only set flag=True for local route; do not let remote routes overwrite flag
+                                mm_val = item.get('mm', '') or '0'  # FRR omits MM for first learn (seq=0)
+                                if dci_enabled and _node_matches_expected(node, host_local_node):
+                                    st.log("MM comparison: found={} expected={} check_seq={}".format(mm_val, mac_move_seq, check_seq))
+                                if check_seq and mm_val != mac_move_seq:
+                                    flag = False
+                                    st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, mm_val))
+                                elif check_seq:
+                                    flag = True
+                                    st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, mm_val))
+                                else:
+                                    flag = True
                             else:
                                 learn_type = 'remote'
-                    
-                            # Only enforce sequence check on local route; remote routes may have empty/different mm
-                            if item['weight'] == '32768' and item['mm'] != mac_move_seq:
-                                flag = False
-                                st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, item['mm']))
-                            elif item['weight'] == '32768':
-                                st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, item['mm']))
+                                if dci_enabled and not logged_remote:
+                                    _log_evpn_type2_route_table(node, item, 'mac_only', route_type='remote')
+                                    logged_remote = True
                             # Log learning type only for local path to avoid repeated "mac learning : remote" per path
                             if item['weight'] == '32768':
                                 st.log("mac learning : {}".format(learn_type))
@@ -4742,15 +5447,15 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
                 else:
                     if key == "mac" and value == mac_addr:
                         mac_found = True
-                        flag = True
                         if item['ip'] == ip_addr:
                             if not ip_found:
                                 st.log('ip_found')
                             ip_found = True
                             if item['weight'] == '32768':
                                 if dci_enabled:
-                                    found_on_node = node
-                                    found_seq = item.get('mm', '')
+                                    if _node_matches_expected(node, host_local_node) or found_on_node is None:
+                                        found_on_node = node
+                                        found_seq = item.get('mm', '') or '0'
                                     _log_evpn_type2_route_table(node, item, 'mac_and_ip')
                                 else:
                                     st.log(item)
@@ -4759,17 +5464,25 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
                                     st.log("mac learnt locally on expected node: {}".format(node))
                                     local_flag = True
                                 else:
-                                    local_flag = False
-                                    st.log("mac learnt locally on unexpected node: {}".format(node))    
+                                    if not dci_enabled:
+                                        local_flag = False
+                                    st.log("mac learnt locally on unexpected node: {}".format(node))
+                                mm_val = item.get('mm', '') or '0'
+                                if dci_enabled and _node_matches_expected(node, host_local_node):
+                                    st.log("MM comparison: found={} expected={} check_seq={}".format(mm_val, mac_move_seq, check_seq))
+                                if check_seq and mm_val != mac_move_seq:
+                                    flag = False
+                                    st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, mm_val))
+                                elif check_seq:
+                                    flag = True
+                                    st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, mm_val))
+                                else:
+                                    flag = True
                             else:
                                 learn_type = 'remote'
-                    
-                            # Only enforce sequence check on local route; remote routes may have empty/different mm
-                            if item['weight'] == '32768' and item['mm'] != mac_move_seq:
-                                flag = False
-                                st.log("found wrong sequence id: expected - {} found - {} ".format(mac_move_seq, item['mm']))
-                            elif item['weight'] == '32768':
-                                st.log("found correct sequence id: expected-->{}, found -->{} ".format(mac_move_seq, item['mm']))
+                                if dci_enabled and not logged_remote:
+                                    _log_evpn_type2_route_table(node, item, 'mac_and_ip', route_type='remote')
+                                    logged_remote = True
                             # Log learning type only for local path to avoid repeated "mac learning : remote" per path
                             if item['weight'] == '32768':
                                 st.log("mac learning : {}".format(learn_type))
@@ -5383,6 +6096,11 @@ def get_expected_vxlan_tunnel(dut):
     if not isinstance(l2vni_config, list):
         l2vni_config = [l2vni_config]
     
+    # Get L3VNI configuration
+    l3vni_config = dut_cfg.get('l3vni', [])
+    if not isinstance(l3vni_config, list):
+        l3vni_config = [l3vni_config] if l3vni_config else []
+
     # For BGW nodes with DCI
     if is_bgw:
         # Get source IPs
@@ -5415,6 +6133,30 @@ def get_expected_vxlan_tunnel(dut):
                     'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
                     'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
                 })
+
+        # L3VNI entries on BGW: mapped on both vxlan-dc and vxlan-wan tunnels
+        for l3vni_item in l3vni_config:
+            vrf_id = l3vni_item.get('vrf_id')
+            vni = l3vni_item.get('vxlan_id') or l3vni_item.get('vni')
+            if not vrf_id or not vni:
+                continue
+            vlan_id = vrf_id  # L3VNI VLAN = VRF ID (e.g. Vrf101 -> Vlan101)
+            if dc_source_ip:
+                ret_val.append({
+                    'vxlan_tunnel_name': 'vxlan-dc',
+                    'source_ip': dc_source_ip,
+                    'destination_ip': '',
+                    'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
+                    'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
+                })
+            if wan_source_ip:
+                ret_val.append({
+                    'vxlan_tunnel_name': 'vxlan-wan',
+                    'source_ip': wan_source_ip,
+                    'destination_ip': '',
+                    'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
+                    'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
+                })
     
     # For regular leaf nodes
     else:
@@ -5436,6 +6178,21 @@ def get_expected_vxlan_tunnel(dut):
                     'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
                     'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
                 })
+
+        # L3VNI entries on leaf: mapped on the same VXLAN tunnel
+        for l3vni_item in l3vni_config:
+            vrf_id = l3vni_item.get('vrf_id')
+            vni = l3vni_item.get('vxlan_id') or l3vni_item.get('vni')
+            if not vrf_id or not vni:
+                continue
+            vlan_id = vrf_id  # L3VNI VLAN = VRF ID (e.g. Vrf101 -> Vlan101)
+            ret_val.append({
+                'vxlan_tunnel_name': tunnel_name,
+                'source_ip': source_ip,
+                'destination_ip': '',
+                'tunnel_map_name': f'map_{vni}_Vlan{vlan_id}',
+                'tunnel_map_mapping': f'{vni} -> Vlan{vlan_id}'
+            })
     
     return ret_val
 
@@ -6057,7 +6814,7 @@ def get_evpn_vni(dut):
     }, ...]
     """
     cmd = 'show evpn vni'
-    output = config_dut(dut, 'bgp', cmd, get_output=True)
+    output = st.show(dut, cmd, type='vtysh', skip_tmpl=True)
     
     ret_val = []
     
@@ -6132,16 +6889,33 @@ def get_expected_evpn_vni(dut):
     l3vni_config = dut_cfg.get('l3vni', [])
     if isinstance(l3vni_config, list):
         for l3vni_item in l3vni_config:
-            vni = l3vni_item.get('l3vni')
-            vrf = l3vni_item.get('vrf_id', 'default')
+            # Support both YAML key names: 'vxlan_id' (DCI) and 'l3vni' (legacy)
+            vni = l3vni_item.get('vxlan_id') or l3vni_item.get('l3vni')
+            vrf_id = l3vni_item.get('vrf_id', '')
+            # Format VRF name: numeric vrf_id -> 'Vrf<N>', string already prefixed -> as-is
+            if vrf_id and str(vrf_id).isdigit():
+                vrf = 'Vrf{}'.format(vrf_id)
+            elif vrf_id:
+                vrf = str(vrf_id)
+            else:
+                vrf = 'default'
             if vni:
-                ret_val.append({
+                entry = {
                     'vni': str(vni),
                     'type': 'L3',
-                    'vxlan_if': 'vxlan-dc' if is_bgw else 'VXLAN',
                     'tenant_vrf': vrf,
                     'num_remote_vteps': 'n/a'  # L3 VNIs don't have remote VTEPs
-                })
+                }
+                # On BGW nodes the L3 VNI lives on exactly one tunnel
+                # interface — either vxlan-dc-<vlan> or vxlan-wan-<vlan>,
+                # depending on which VTEP zebra selects (only 1 VTEP/VNI
+                # is supported).  We intentionally omit vxlan_if from the
+                # expected dict so compare_exp_actual_data won't fail on
+                # the dc-vs-wan difference; verify_evpn_vni() validates
+                # the interface separately.
+                if not is_bgw:
+                    entry['vxlan_if'] = 'VXLAN'
+                ret_val.append(entry)
     
     return ret_val
 
@@ -6149,12 +6923,1126 @@ def get_expected_evpn_vni(dut):
 @VerifyLoop()
 def verify_evpn_vni(dut, exp_data, **kwargs):
     """
-    Verify 'show evpn vni' FRR command output attributes
+    Verify 'show evpn vni' FRR command output attributes.
+
+    For L3 VNIs on BGW nodes an additional check ensures the VxLAN
+    interface is either dc-facing (vxlan-dc-<vlan>) **or** wan-facing
+    (vxlan-wan-<vlan>) but NOT both — only 1 VTEP per VNI is supported.
     """
     act_data = get_evpn_vni(dut)
     # Only verify VNI, type, and VRF (don't check dynamic counters like num_macs)
     compare_exp_actual_data(exp_data, act_data, ['vni', 'type'])
+
+    # --- L3 VNI interface direction check (BGW nodes only) ---------------
+    # Each L3 VNI must appear on exactly one tunnel interface, either
+    # vxlan-dc-<vlan> or vxlan-wan-<vlan>.  Appearing on both (or neither)
+    # indicates a configuration problem.
+    is_bgw = 'bgw' in dut.lower()
+    if is_bgw:
+        l3_actual = [row for row in act_data if row.get('type') == 'L3']
+        for row in l3_actual:
+            vni = row.get('vni', '?')
+            vxlan_if = row.get('vxlan_if', '')
+            is_dc = vxlan_if.startswith('vxlan-dc-')
+            is_wan = vxlan_if.startswith('vxlan-wan-')
+            if not (is_dc or is_wan):
+                st.log('EVPN VNI {}: unexpected L3 interface "{}" on {}'.format(
+                    vni, vxlan_if, dut))
+                raise CompareFailed(
+                    'L3 VNI {} on {} has unexpected interface: {}'.format(
+                        vni, dut, vxlan_if))
+            st.log('EVPN VNI {} on {}: L3 interface {} ({}-facing) — OK'.format(
+                vni, dut, vxlan_if, 'dc' if is_dc else 'wan'))
     return act_data
+
+
+def get_expected_type5_routes(dut):
+    """
+    Generate expected EVPN Type-5 route prefixes for a node based on SAG addressing.
+
+    Unified model for both leaf and BGW nodes.  Each entry carries:
+      - prefix, vrf, l3vni
+      - local_leaf_asns: ASNs of same-DC leaf nodes
+      - remote_bgw_asns: ASNs of other-DC BGW nodes (for BGW),
+        or same-DC BGW ASNs (for leaf, used for remote-class path detection)
+      - is_leaf: True for leaf nodes, absent/False for BGW nodes
+
+    Strict checks intentionally omitted (may break after restart):
+      - exact path_count, best_nh_is_local_vtep, best_weight_32768,
+        best_path_is_local_leaf, exact RD matching
+
+    Per SAG addressing:
+      - IPv4: leaf SVI gateway = 80.<vlan>.0.1/24, Type-5 prefix = 80.<vlan>.0.0/24
+      - IPv6: leaf SVI gateway = 8000:<vlan>::1/64, Type-5 prefix = 8000:<vlan>::/64
+
+    VLAN-to-VRF mapping (from YAML):
+      - VLANs 11-15 -> Vrf101 (cross-DC L3VNI 10101)
+      - VLANs 16-20 -> Vrf102 (cross-DC L3VNI 10102)
+
+    Args:
+        dut: Node hostname to generate expected routes for (BGW or leaf)
+
+    Returns:
+        list of dicts with: prefix, vrf, l3vni, local_leaf_asns,
+        remote_bgw_asns, is_leaf (True for leaf nodes).
+    """
+    cfg_dict = get_cfg_dict()
+    is_leaf = 'leaf' in dut
+    is_bgw = 'bgw' in dut
+
+    # Build VLAN-to-VRF and VLAN-to-L3VNI mapping from a reference leaf node
+    vlan_vrf_map = {}   # {vlan_id: 'VrfXXX'}
+    vrf_l3vni_map = {}  # {'VrfXXX': 'cross_dc_vni'}
+
+    for node_name, node_cfg in sorted(cfg_dict.items()):
+        if not isinstance(node_cfg, dict) or 'leaf' not in node_name:
+            continue
+        l3vni_list = node_cfg.get('l3vni', [])
+        if not isinstance(l3vni_list, list):
+            continue
+        for l3vni_item in l3vni_list:
+            vrf_id = l3vni_item.get('vrf_id')
+            vlan_bindings = l3vni_item.get('vlan_bindings', [])
+            if vrf_id:
+                vrf_name = 'Vrf{}'.format(vrf_id)
+                for vlan in vlan_bindings:
+                    # Skip L3VNI VLANs (101, 102) - not data VLANs
+                    if vlan < 100:
+                        vlan_vrf_map[vlan] = vrf_name
+        if vlan_vrf_map:
+            break  # Only need one leaf as reference
+
+    # Get cross-DC L3VNI per VRF from BGW YAML config
+    for node_name, node_cfg in cfg_dict.items():
+        if not isinstance(node_cfg, dict) or 'bgw' not in node_name:
+            continue
+        for l3vni_item in node_cfg.get('l3vni', []):
+            vrf_id = l3vni_item.get('vrf_id')
+            vxlan_id = l3vni_item.get('vxlan_id')
+            if vrf_id and vxlan_id:
+                vrf_name = 'Vrf{}'.format(vrf_id)
+                vrf_l3vni_map[vrf_name] = str(vxlan_id)
+        if vrf_l3vni_map:
+            break  # All BGWs share same cross-DC VNI
+
+    bgp_info = get_bgp_underlay_info_cached()
+    dut_dc = _get_dc_from_name(dut)
+
+    # --- Collect local leaf ASNs and remote/BGW ASNs for all node types ---
+    local_leaf_asns = set()
+    local_bgw_asns = set()   # same-DC BGW ASNs (for leaf remote-class detection)
+    remote_bgw_asns = set()  # other-DC BGW ASNs (for BGW remote-class detection)
+
+    for node_name in sorted(bgp_info.keys()):
+        node_dc = _get_dc_from_name(node_name)
+        if 'leaf' in node_name and node_dc == dut_dc:
+            local_leaf_asns.add(str(bgp_info[node_name]['as_num']))
+        elif 'bgw' in node_name and node_dc == dut_dc:
+            local_bgw_asns.add(str(bgp_info[node_name]['as_num']))
+        elif 'bgw' in node_name and node_dc != dut_dc:
+            remote_bgw_asns.add(str(bgp_info[node_name]['as_num']))
+
+    # For leaf nodes, do NOT require has_remote_class_path — leaves
+    # don't see BGW ASNs in EVPN Type-5 AS paths (BGW re-originates but
+    # leaf receives via spine RR with only leaf ASNs visible).
+    # For BGW nodes, "remote class" paths come from other-DC BGWs.
+    if is_leaf:
+        node_remote_asns = set()  # empty → has_remote_class_path = n/a
+    else:
+        node_remote_asns = remote_bgw_asns
+
+    st.log('Type-5 expected for {} ({}): local_leaf_asns={} remote_asns={}'.format(
+        dut, 'leaf' if is_leaf else 'BGW', local_leaf_asns, node_remote_asns))
+
+    expected_routes = []
+    for vlan_id in sorted(vlan_vrf_map.keys()):
+        vrf = vlan_vrf_map[vlan_id]
+        l3vni = vrf_l3vni_map.get(vrf, '')
+        for af, fmt in [('v4', '80.{}.0.0/24'), ('v6', '8000:{}::/64')]:
+            prefix = fmt.format(vlan_id)
+            entry = {
+                'prefix': prefix,
+                'vrf': vrf,
+                'local_leaf_asns': local_leaf_asns,
+                'remote_bgw_asns': node_remote_asns,
+            }
+            if is_leaf:
+                entry['is_leaf'] = True
+            if l3vni:
+                entry['l3vni'] = l3vni
+            expected_routes.append(entry)
+
+    st.log('Expected Type-5 routes for {} ({} prefixes): {}'.format(
+        dut, len(expected_routes),
+        [r['prefix'] for r in expected_routes]))
+    return expected_routes
+
+
+def _parse_type5_routes_detailed(cli_output):
+    """
+    Parse 'show bgp l2vpn evpn route type prefix' output capturing ALL paths
+    per prefix with per-path attributes.
+
+    FRR compact list output format (multiple paths per prefix, across RDs):
+      Route Distinguisher: 10.10.10.1:2
+      *>i[5]:[0]:[24]:[80.11.0.0]
+                          2000:1::1                    0    100      0 65200 i
+                          RT:65200:5101 ET:5101 Rmac:00:01:02:aa:bb:cc
+       * i[5]:[0]:[24]:[80.11.0.0]
+                          103.103.103.103              0    100      0 65103 65201 i
+                          RT:65103:10101 ET:10101 Rmac:00:01:02:cc:dd:ee
+
+    Note: st.show() with skip_tmpl=True returns output with spytest framework
+    log prefixes on each line (e.g. "2026-03-23 20:11:18,750 T0000: INFO
+    [D3-spine2_dc1_bgw1] *>i[5]:[0]:[24]:[80.11.0.0]"). These are stripped
+    before parsing.
+
+    Path status indicators:
+      '*' = valid      '>' = best       'i' = internal (iBGP)
+
+    Returns:
+        dict keyed by prefix string:
+        {
+          '80.11.0.0/24': {
+            'path_count': 7,
+            'paths': [
+              {
+                'is_best': True,
+                'is_valid': True,
+                'next_hop': '2000:1::1',
+                'as_path': '65200',
+                'rt': '65200:5101',
+                'et': '5101',
+                'rmac': '00:01:02:aa:bb:cc',
+                'ipv6_nexthop': True,
+              },
+              ...
+            ],
+            'best_path': <ref to best path dict or None>,
+          },
+          ...
+        }
+    """
+    import re
+    prefixes = {}
+
+    # Strip spytest framework log prefix from each line.
+    # e.g. "2026-03-23 20:11:18,750 T0000: INFO  [D3-spine2_dc1_bgw1] "
+    # Same pattern used by _show_evpn_type2_grep().
+    _log_prefix_re = re.compile(
+        r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[^\]]*\]\s*"
+    )
+    lines = cli_output.splitlines()
+    lines = [_log_prefix_re.sub("", line) for line in lines]
+
+    # --- Patterns ---
+
+    # NLRI line: status chars + [5]:[0]:[mask]:[prefix]
+    # e.g. "*>i[5]:[0]:[24]:[80.11.0.0]"  or  " * i[5]:[0]:[64]:[8000:11::]"
+    nlri_re = re.compile(
+        r'\[5\]:\[0\]:\[(\d+)\]:\[([\d\.a-fA-F:]+)\]'
+    )
+
+    # Next-hop line with metrics and AS path, ending with origin code.
+    # After log-prefix stripping, leading whitespace may be removed, so
+    # the line can start at column 0 or be indented.
+    # FRR columns: Next Hop | Metric | LocPrf | Weight | Path
+    # Metric and LocPrf may be blank (just whitespace).  Weight is always
+    # present.  After weight the AS-path ASNs follow (single-space separated)
+    # then the origin code (i/e/?).
+    # Examples after log-prefix stripping:
+    #   "103.103.103.103                        0 65104 65204 ?"
+    #   "2000:1::4                0             0 65203 ?"
+    nexthop_metrics_re = re.compile(
+        r'^\s*'
+        r'([\d\.]{7,}|[0-9a-fA-F]+:[0-9a-fA-F:]+)'  # next-hop (IPv4 or IPv6)
+        r'(?:\([^)]+\))?'                              # optional (hostname)
+        r'(.*?)'                                       # metrics + AS path blob
+        r'\s+([iIeE\?])\s*$'                          # origin code
+    )
+
+    # Next-hop line without metrics (locally-originated, next-hop on own line):
+    # e.g. "fd27::1(leaf0_dc1)" or "                    fd27::1(leaf0_dc1)"
+    nexthop_only_re = re.compile(
+        r'^\s*'
+        r'([\d\.]{7,}|[0-9a-fA-F]+:[0-9a-fA-F:]+)'  # next-hop
+        r'(?:\([^)]+\))?'                              # optional (hostname)
+        r'\s*$'
+    )
+
+    # Weight-only continuation (follows next-hop-only for local routes):
+    # e.g. "                                                       32768 i"
+    weight_origin_re = re.compile(
+        r'^\s+(\d+)\s+([iIeE\?])\s*$'
+    )
+
+    # Extended community attributes
+    et_re = re.compile(r'ET:(\d+)')
+    rt_re = re.compile(r'RT:(\d+:\d+)')
+    rmac_re = re.compile(r'Rmac:([0-9a-fA-F:]+)')
+
+    current_prefix = None
+    current_path = None
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Check for NLRI line containing [5]:[0]:[mask]:[prefix]
+        nlri_match = nlri_re.search(line)
+        if nlri_match:
+            prefix_len = nlri_match.group(1)
+            prefix_addr = nlri_match.group(2)
+            current_prefix = '{}/{}'.format(prefix_addr, prefix_len)
+
+            if current_prefix not in prefixes:
+                prefixes[current_prefix] = {
+                    'path_count': 0,
+                    'paths': [],
+                    'best_path': None,
+                }
+
+            # Extract status from text before [5]:
+            pre_nlri = line[:nlri_match.start()]
+            is_valid = '*' in pre_nlri
+            is_best = '>' in pre_nlri
+
+            current_path = {
+                'is_best': is_best,
+                'is_valid': is_valid,
+                'next_hop': '',
+                'weight': '',
+                'as_path': '',
+                'rt': '',
+                'et': '',
+                'rmac': '',
+                'ipv6_nexthop': False,
+            }
+            prefixes[current_prefix]['paths'].append(current_path)
+            prefixes[current_prefix]['path_count'] += 1
+            if is_best:
+                prefixes[current_prefix]['best_path'] = current_path
+            continue
+
+        if current_path is None or current_prefix is None:
+            continue
+
+        # Check for next-hop line (only if current path doesn't have one yet)
+        if not current_path['next_hop']:
+            nh_m = nexthop_metrics_re.match(line)
+            if nh_m:
+                next_hop = nh_m.group(1)
+                middle = nh_m.group(2)
+                # Split the middle blob by 2+ spaces to separate FRR
+                # fixed-width columns (Metric, LocPrf, Weight+Path).
+                # The LAST group contains "weight AS_path" where weight
+                # is the first token and AS path ASNs follow.
+                groups = [g.strip() for g in re.split(r'\s{2,}', middle)
+                          if g.strip()]
+                as_path_str = ''
+                weight_str = ''
+                if groups:
+                    last = groups[-1]
+                    tokens = last.split()
+                    # First token is weight; remaining tokens are AS path
+                    weight_str = tokens[0] if tokens else ''
+                    as_path_str = ' '.join(tokens[1:]) if len(tokens) > 1 else ''
+                current_path['next_hop'] = next_hop
+                current_path['weight'] = weight_str
+                current_path['as_path'] = as_path_str
+                current_path['ipv6_nexthop'] = ':' in next_hop
+                continue
+
+            nh_only = nexthop_only_re.match(line)
+            if nh_only:
+                next_hop = nh_only.group(1)
+                current_path['next_hop'] = next_hop
+                current_path['ipv6_nexthop'] = ':' in next_hop
+                continue
+
+        # Check for weight-only continuation (locally-originated routes)
+        w_m = weight_origin_re.match(line)
+        if w_m:
+            if not current_path.get('weight'):
+                current_path['weight'] = w_m.group(1)
+            continue
+
+        # Check for extended community attributes (RT:xxx ET:xxx Rmac:xxx)
+        if 'RT:' in line or 'ET:' in line or 'Rmac:' in line:
+            et_match = et_re.search(line)
+            if et_match and not current_path['et']:
+                current_path['et'] = et_match.group(1)
+            rt_match = rt_re.search(line)
+            if rt_match and not current_path['rt']:
+                current_path['rt'] = rt_match.group(1)
+            rmac_match = rmac_re.search(line)
+            if rmac_match and not current_path['rmac']:
+                current_path['rmac'] = rmac_match.group(1)
+
+    return prefixes
+
+
+@VerifyLoop()
+def verify_evpn_type5_comprehensive(dut, exp_routes, **kwargs):
+    """
+    Unified EVPN Type-5 route verification for both leaf and BGW nodes.
+
+    Same 10 boolean checks per prefix on every node type:
+      present            - prefix exists in Type-5 output
+      has_best           - at least one best path selected
+      has_rt             - at least one path has Route-Target ext-community
+      has_et             - at least one path has Encap-Type ext-community
+      has_rmac           - at least one path has Router-MAC ext-community
+      has_ipv6_nh        - at least one path has IPv6 next-hop
+      installed_in_rib   - prefix found in 'show ip route vrf' (IPv4 only)
+      installed_in_fib   - prefix has '>' (FIB-selected) flag in RIB output
+                           (any protocol: C>* connected, B>* BGP, etc.)
+      has_local_class_path  - path from local-DC source (leaf ASN in AS path,
+                             or self-originated: weight 32768 + empty AS path)
+      has_remote_class_path - path from remote source
+            (BGW: other-DC BGW ASN; Leaf: n/a — leaves don't see BGW ASNs)
+
+    Strict checks intentionally removed (break after restart):
+      best_nh_is_local_vtep, best_weight_32768, best_path_is_local_leaf,
+      exact path_count == N, exact RD matching
+
+    Pass condition: all required booleans are 'yes' (or 'n/a' if not
+    applicable, e.g. has_remote_class_path always n/a on leaf nodes,
+    installed_in_rib/fib n/a for IPv6 prefixes).
+
+    Args:
+        dut: Node hostname (BGW or leaf)
+        exp_routes: list from get_expected_type5_routes()
+        cli_output (str, optional): Pre-fetched 'show bgp l2vpn evpn route
+            type prefix' output.  If provided, skips CLI fetch.
+    """
+    import re
+    st.banner('Comprehensive Type-5 verification on {}'.format(dut))
+
+    # --- Fetch Type-5 EVPN route output ---
+    cli_output = kwargs.get('cli_output', None)
+    if cli_output is None:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    if not cli_output or not cli_output.strip():
+        raise CompareEmptyData('No Type-5 route output on {}'.format(dut))
+
+    detailed = _parse_type5_routes_detailed(cli_output)
+    if not detailed:
+        sample = '\n'.join(cli_output.splitlines()[:10])
+        st.log('Type-5 parse debug - first 10 raw lines on {}:\n{}'.format(
+            dut, sample))
+        raise CompareEmptyData(
+            'No Type-5 routes parsed from output on {}'.format(dut))
+
+    st.log('Parsed {} unique Type-5 prefixes from {}'.format(
+        len(detailed), dut))
+
+    # --- Fetch RIB per VRF for installed_in_rib / installed_in_fib ---
+    vrf_rib_output = {}  # {vrf: raw_cli_output}
+    vrfs_needed = set(r.get('vrf', '') for r in exp_routes if r.get('vrf'))
+    for vrf in sorted(vrfs_needed):
+        try:
+            rib_out = st.show(dut,
+                              "do show ip route vrf {}".format(vrf),
+                              type='vtysh', skip_tmpl=True)
+            vrf_rib_output[vrf] = rib_out or ''
+        except Exception as err:
+            st.log('RIB fetch for {} on {} failed: {}'.format(vrf, dut, err))
+            vrf_rib_output[vrf] = ''
+
+    # --- Build unified per-prefix check table ---
+    return _verify_type5_unified(dut, exp_routes, detailed, vrf_rib_output)
+
+
+def _verify_type5_unified(dut, exp_routes, detailed, vrf_rib_output):
+    """
+    Unified Type-5 verification — same 10 boolean columns for every prefix
+    on both leaf and BGW nodes.
+
+    Columns:
+      present, has_best, has_rt, has_et, has_rmac, has_ipv6_nh,
+      installed_in_rib, installed_in_fib,
+      has_local_class_path, has_remote_class_path
+
+    Args:
+        dut: node hostname
+        exp_routes: list from get_expected_type5_routes()
+        detailed: dict from _parse_type5_routes_detailed()
+        vrf_rib_output: {vrf: raw 'show ip route vrf' output}
+    """
+    import re
+    exp_data = []
+    act_data = []
+
+    for exp_route in exp_routes:
+        prefix = exp_route['prefix']
+        vrf = exp_route.get('vrf', '')
+        local_leaf_asns = exp_route.get('local_leaf_asns', set())
+        remote_bgw_asns = exp_route.get('remote_bgw_asns', set())
+        is_ipv6_prefix = ':' in prefix.split('/')[0]
+
+        # For IPv6 prefixes, RIB/FIB check is n/a (would need show ipv6 route)
+        rib_applicable = not is_ipv6_prefix
+        # has_remote_class_path is 'yes' only when remote ASNs are expected
+        remote_applicable = bool(remote_bgw_asns)
+
+        exp_row = {
+            'prefix': prefix,
+            'present': 'yes',
+            'has_best': 'yes',
+            'has_rt': 'yes',
+            'has_et': 'yes',
+            'has_rmac': 'yes',
+            'has_ipv6_nh': 'yes',
+            'installed_in_rib': 'yes' if rib_applicable else 'n/a',
+            'installed_in_fib': 'yes' if rib_applicable else 'n/a',
+            'has_local_class_path': 'yes',
+            'has_remote_class_path': 'yes' if remote_applicable else 'n/a',
+        }
+        exp_data.append(exp_row)
+
+        # --- Prefix not found at all ---
+        if prefix not in detailed:
+            act_row = {
+                'prefix': prefix,
+                'present': 'no',
+                'has_best': 'no',
+                'has_rt': 'no',
+                'has_et': 'no',
+                'has_rmac': 'no',
+                'has_ipv6_nh': 'no',
+                'installed_in_rib': 'no' if rib_applicable else 'n/a',
+                'installed_in_fib': 'no' if rib_applicable else 'n/a',
+                'has_local_class_path': 'no',
+                'has_remote_class_path': 'no' if remote_applicable else 'n/a',
+            }
+            act_data.append(act_row)
+            continue
+
+        info = detailed[prefix]
+        best_path = info.get('best_path')
+
+        # Attribute checks — at least one path has the ext-community
+        has_rt = any(p.get('rt') for p in info['paths'])
+        has_et = any(p.get('et') for p in info['paths'])
+        has_rmac = any(p.get('rmac') for p in info['paths'])
+        has_ipv6_nh = any(p.get('ipv6_nexthop') for p in info['paths'])
+
+        # Classify paths as local-class or remote-class based on AS path.
+        # Self-originated routes (weight 32768, empty AS path) count as
+        # local-class — the originating leaf IS a local-class source even
+        # though its own ASN doesn't appear in the AS path.  This matters
+        # for single-leaf DCs (e.g. DC3) where ALL routes are self-originated.
+        has_local_class = False
+        has_remote_class = False
+        local_asns_str = {str(a) for a in local_leaf_asns}
+        remote_asns_str = {str(a) for a in remote_bgw_asns}
+        for path in info['paths']:
+            as_path = path.get('as_path', '')
+            path_asns = set(as_path.split())
+            if path_asns & local_asns_str:
+                has_local_class = True
+            elif not as_path.strip() and path.get('weight') == '32768':
+                # Self-originated route: empty AS path + weight 32768
+                has_local_class = True
+            if path_asns & remote_asns_str:
+                has_remote_class = True
+
+        # RIB / FIB check (IPv4 only)
+        in_rib = False
+        in_fib = False
+        if rib_applicable and vrf in vrf_rib_output:
+            rib_text = vrf_rib_output[vrf]
+            prefix_escaped = re.escape(prefix)
+            in_rib = bool(re.search(prefix_escaped, rib_text))
+            # FIB = route with '>' flag, any protocol code:
+            #   Connected: "C>* 80.11.0.0/24" (locally owned subnet)
+            #   BGP:       "B>* 80.12.0.40/32" (remote learned route)
+            in_fib = bool(re.search(
+                r'[A-Z]\S*>\S*\s+' + prefix_escaped, rib_text))
+
+        act_row = {
+            'prefix': prefix,
+            'present': 'yes',
+            'has_best': 'yes' if best_path else 'no',
+            'has_rt': 'yes' if has_rt else 'no',
+            'has_et': 'yes' if has_et else 'no',
+            'has_rmac': 'yes' if has_rmac else 'no',
+            'has_ipv6_nh': 'yes' if has_ipv6_nh else 'no',
+            'installed_in_rib': ('yes' if in_rib else 'no')
+                                if rib_applicable else 'n/a',
+            'installed_in_fib': ('yes' if in_fib else 'no')
+                                if rib_applicable else 'n/a',
+            'has_local_class_path': 'yes' if has_local_class else 'no',
+            'has_remote_class_path': ('yes' if has_remote_class else 'no')
+                                     if remote_applicable else 'n/a',
+        }
+        act_data.append(act_row)
+
+        st.log('  {} present=yes best={} RT={} ET={} RMAC={} ipv6_nh={} '
+               'rib={} fib={} local_class={} remote_class={}'.format(
+                   prefix, bool(best_path), has_rt, has_et, has_rmac,
+                   has_ipv6_nh, in_rib, in_fib,
+                   has_local_class, has_remote_class))
+
+    # Run structured comparison — raises CompareFailed if mismatch
+    compare_exp_actual_data(exp_data, act_data, ['prefix'])
+    return act_data
+
+
+def verify_bgp_evpn_multihop_sessions_dci(dut):
+    """
+    Verify eBGP multihop EVPN sessions between BGW spines across DCs.
+
+    Per l3vni_config_diff.txt, BGW spines establish eBGP multihop (255)
+    L2VPN EVPN sessions to remote BGWs in other DCs over the WAN overlay.
+    Each BGW has:
+      - OVERLAY peer-group: iBGP to local DC leafs (IPv6 loopback)
+      - OVERLAY_WAN peer-group: eBGP multihop to remote DC BGWs (IPv4 overlay)
+
+    This function verifies:
+      1. BGP L2VPN EVPN summary shows expected remote BGW neighbors
+      2. All remote BGW sessions are in Established state
+      3. Sessions are receiving prefixes (PfxRcd > 0)
+
+    BGW ASN assignments from l3vni_config_diff.txt:
+      - DC1 BGW1: AS 65102, DC1 BGW2: AS 65103
+      - DC2 BGW1: AS 65104, DC2 BGW2: AS 65105
+      - DC3 BGW1: AS 65106
+
+    Args:
+        dut: BGW node hostname to verify
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'total_neighbors': int,
+            'established_count': int,
+            'remote_bgw_neighbors': list of neighbor IPs,
+            'details': str summary
+        }
+    """
+    import re
+    result = {
+        'result': False,
+        'total_neighbors': 0,
+        'established_count': 0,
+        'remote_bgw_neighbors': [],
+        'details': ''
+    }
+
+    st.banner('Checking eBGP multihop EVPN sessions on {}'.format(dut))
+
+    # Get expected remote BGW neighbors using generate_dci_vip_maps
+    dc_match = re.search(r'_(dc\d+)', dut)
+    if not dc_match:
+        result['details'] = 'Cannot determine DC for node: {}'.format(dut)
+        st.log(result['details'])
+        return result
+
+    my_dc = dc_match.group(1)
+
+    (loopback_ipv6_dc_vip,
+     loopback_ipv4_wan_vip,
+     loopback_ipv4_wan_overlay,
+     transit_wan_ipv4_underlay) = generate_dci_vip_maps()
+
+    # Expected remote BGW neighbors (other DCs) via WAN overlay IPs
+    expected_remote_bgws = []
+    for bgw_node, overlay_ip in loopback_ipv4_wan_overlay.items():
+        if bgw_node == dut:
+            continue
+        bgw_dc_match = re.search(r'_(dc\d+)', bgw_node)
+        if bgw_dc_match and bgw_dc_match.group(1) != my_dc:
+            expected_remote_bgws.append(overlay_ip)
+
+    if not expected_remote_bgws:
+        result['details'] = 'No remote BGW neighbors expected for {}'.format(dut)
+        st.log(result['details'])
+        return result
+
+    st.log('Expected remote BGW neighbors for {}: {}'.format(dut, expected_remote_bgws))
+
+    # Get actual BGP L2VPN EVPN summary
+    try:
+        act_data = get_bgp_summary(dut)
+    except Exception as err:
+        result['details'] = 'Failed to get BGP summary on {}: {}'.format(dut, err)
+        st.log(result['details'])
+        return result
+
+    evpn_data = [entry for entry in act_data if entry.get('protocol') == 'L2VPN EVPN']
+    result['total_neighbors'] = len(evpn_data)
+
+    # Check each expected remote BGW is present and established
+    for expected_ip in expected_remote_bgws:
+        found = False
+        for entry in evpn_data:
+            if entry.get('neighbor') == expected_ip:
+                found = True
+                result['remote_bgw_neighbors'].append(expected_ip)
+                state = str(entry.get('state', ''))
+                # Numeric state means PfxRcd count = session established
+                if state.isdigit():
+                    result['established_count'] += 1
+                    st.log('Remote BGW {} session established (PfxRcd={})'.format(
+                        expected_ip, state))
+                elif state.lower() in ('established', 'up'):
+                    result['established_count'] += 1
+                    st.log('Remote BGW {} session established'.format(expected_ip))
+                else:
+                    st.log('Remote BGW {} session NOT established (state={})'.format(
+                        expected_ip, state))
+                break
+        if not found:
+            st.log('Remote BGW {} NOT found in BGP summary on {}'.format(expected_ip, dut))
+
+    # Build summary
+    details_parts = []
+    details_parts.append('{}/{} remote BGW sessions found'.format(
+        len(result['remote_bgw_neighbors']), len(expected_remote_bgws)))
+    details_parts.append('{} established'.format(result['established_count']))
+    details_parts.append('total L2VPN EVPN neighbors: {}'.format(result['total_neighbors']))
+    result['details'] = '; '.join(details_parts)
+    st.log(result['details'])
+
+    # Pass if all expected remote BGW sessions are established
+    result['result'] = (result['established_count'] == len(expected_remote_bgws))
+    return result
+
+
+def verify_rt_rewrite_dci(dut, **kwargs):
+    """
+    Verify Route-Target translation across domains on a BGW node for L3VNI DCI.
+
+    Per l3vni_config_diff.txt, each BGW has RT-REWRITE route-maps that
+    rewrite Type-5 routes:
+      - RT-REWRITE-WAN: match local leaf RTs -> set own ASN RT, VNI, RMAC,
+        IPv4 WAN VIP next-hop (for WAN-side advertisement)
+      - RT-REWRITE-DC: match remote BGW RTs -> set own ASN RT, VNI, RMAC,
+        IPv6 DC VIP next-hop (for DC-side advertisement)
+
+    This function verifies with expected-vs-actual comparison:
+      1. RT-REWRITE-WAN and RT-REWRITE-DC route-maps are configured
+      2. Type-5 routes carry correct RT values per domain:
+         - Local leaf paths have leaf-domain RTs (e.g. 65200:5101)
+         - Remote BGW paths have BGW-domain cross-DC RTs (e.g. 65104:10101)
+      3. Expected BGW cross-DC RTs match pattern <remote_bgw_asn>:<cross_dc_vni>
+      4. All expected remote BGW RTs are present in actual Type-5 output
+
+    Args:
+        dut: BGW node hostname to verify
+        cli_output (str, optional): Pre-fetched 'show bgp l2vpn evpn route type prefix'
+            output. If provided, skips CLI fetch to avoid duplicate dumps when multiple
+            checks need the same output.
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'route_maps_found': list of route-map names found,
+            'rt_values': set of RT values found in Type-5 routes,
+            'details': str summary
+        }
+    """
+    import re
+    result = {
+        'result': False,
+        'route_maps_found': [],
+        'rt_values': set(),
+        'details': ''
+    }
+
+    st.banner('Checking RT-REWRITE route-maps and RT per domain on {}'.format(dut))
+
+    # Step 1: Verify RT-REWRITE route-maps are configured
+    try:
+        rmap_output = st.show(dut, "do show route-map", type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        result['details'] = 'Failed to get route-maps on {}: {}'.format(dut, err)
+        st.log(result['details'])
+        return result
+
+    if rmap_output:
+        for rmap_name in ['RT-REWRITE-WAN', 'RT-REWRITE-DC']:
+            if rmap_name in rmap_output:
+                result['route_maps_found'].append(rmap_name)
+                st.log('Route-map {} found on {}'.format(rmap_name, dut))
+            else:
+                st.log('Route-map {} NOT found on {}'.format(rmap_name, dut))
+
+    if len(result['route_maps_found']) < 2:
+        result['details'] = 'Missing route-maps on {}: found {} of 2 (RT-REWRITE-WAN, RT-REWRITE-DC)'.format(
+            dut, len(result['route_maps_found']))
+        st.log(result['details'])
+        return result
+
+    # Step 2: Build expected RT values per domain
+    cfg_dict = get_cfg_dict()
+    bgp_info = get_bgp_underlay_info_cached()
+    dut_dc = _get_dc_from_name(dut)
+
+    # Expected cross-DC VNIs from YAML
+    expected_cross_dc_vnis = set()
+    for node_name, node_cfg in cfg_dict.items():
+        if 'bgw' in node_name and isinstance(node_cfg, dict):
+            for item in node_cfg.get('l3vni', []):
+                vxlan_id = item.get('vxlan_id')
+                if vxlan_id:
+                    expected_cross_dc_vnis.add(str(vxlan_id))
+
+    # Build expected RTs from remote BGWs: <remote_bgw_asn>:<cross_dc_vni>
+    expected_remote_bgw_rts = set()
+    for node_name in sorted(bgp_info.keys()):
+        node_dc = _get_dc_from_name(node_name)
+        if 'bgw' in node_name and node_dc != dut_dc:
+            asn = str(bgp_info[node_name]['as_num'])
+            for vni in expected_cross_dc_vnis:
+                expected_remote_bgw_rts.add('{}:{}'.format(asn, vni))
+
+    # Build expected RTs from local leafs: <leaf_asn>:<leaf_vni>
+    expected_local_leaf_rts = set()
+    for node_name in sorted(bgp_info.keys()):
+        node_dc = _get_dc_from_name(node_name)
+        if 'leaf' in node_name and node_dc == dut_dc:
+            asn = str(bgp_info[node_name]['as_num'])
+            # Leaf VNIs come from YAML l3vni config
+            for nn, nc in cfg_dict.items():
+                if nn == node_name and isinstance(nc, dict):
+                    for item in nc.get('l3vni', []):
+                        vxlan_id = item.get('vxlan_id')
+                        if vxlan_id:
+                            expected_local_leaf_rts.add('{}:{}'.format(asn, vxlan_id))
+
+    st.log('Expected remote BGW RTs on {}: {}'.format(dut, expected_remote_bgw_rts))
+    st.log('Expected local leaf RTs on {}: {}'.format(dut, expected_local_leaf_rts))
+
+    # Step 3: Parse actual RTs from Type-5 route output
+    # Use pre-fetched output if provided, otherwise fetch from device
+    cli_output = kwargs.get('cli_output', None)
+    if cli_output is None:
+        try:
+            cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                                 type='vtysh', skip_tmpl=True)
+        except Exception as err:
+            result['details'] = 'Failed to get Type-5 routes on {}: {}'.format(dut, err)
+            st.log(result['details'])
+            return result
+
+    if not cli_output or not cli_output.strip():
+        result['details'] = 'No Type-5 route output on {} (route-maps present but no routes)'.format(dut)
+        st.log(result['details'])
+        return result
+
+    # Extract all RT values from Type-5 route output
+    rt_pattern = re.compile(r'RT:(\d+:\d+)')
+    actual_rt_values = set()
+    for line in cli_output.splitlines():
+        for rt_match in rt_pattern.finditer(line):
+            actual_rt_values.add(rt_match.group(1))
+
+    result['rt_values'] = actual_rt_values
+
+    # Step 4: Compare expected vs actual using structured comparison
+    exp_data = []
+    act_data = []
+
+    # Check each expected remote BGW RT
+    for rt in sorted(expected_remote_bgw_rts):
+        exp_data.append({'rt_value': rt, 'domain': 'remote_bgw', 'present': 'yes'})
+        act_data.append({'rt_value': rt, 'domain': 'remote_bgw',
+                         'present': 'yes' if rt in actual_rt_values else 'no'})
+
+    # Check each expected local leaf RT
+    for rt in sorted(expected_local_leaf_rts):
+        exp_data.append({'rt_value': rt, 'domain': 'local_leaf', 'present': 'yes'})
+        act_data.append({'rt_value': rt, 'domain': 'local_leaf',
+                         'present': 'yes' if rt in actual_rt_values else 'no'})
+
+    # Log comparison details
+    missing_rts = set()
+    for exp, act in zip(exp_data, act_data):
+        if exp['present'] != act['present']:
+            missing_rts.add(exp['rt_value'])
+            st.log('RT {} ({}) MISSING on {}'.format(
+                exp['rt_value'], exp['domain'], dut))
+        else:
+            st.log('RT {} ({}) FOUND on {}'.format(
+                exp['rt_value'], exp['domain'], dut))
+
+    # Build summary
+    total_expected = len(expected_remote_bgw_rts) + len(expected_local_leaf_rts)
+    found_count = total_expected - len(missing_rts)
+    details_parts = []
+    details_parts.append('Route-maps: {}'.format(result['route_maps_found']))
+    details_parts.append('RT per domain: {}/{} expected RTs found'.format(
+        found_count, total_expected))
+    if missing_rts:
+        details_parts.append('Missing RTs: {}'.format(missing_rts))
+    details_parts.append('Remote BGW RTs: {}'.format(
+        expected_remote_bgw_rts & actual_rt_values))
+    details_parts.append('Local leaf RTs: {}'.format(
+        expected_local_leaf_rts & actual_rt_values))
+
+    result['details'] = '; '.join(details_parts)
+    st.log(result['details'])
+
+    # Pass if both route-maps present and all expected RTs found
+    result['result'] = (len(result['route_maps_found']) == 2 and
+                        len(missing_rts) == 0)
+
+    # Use compare_exp_actual_data for structured tabular output if there's a mismatch
+    if not result['result'] and exp_data:
+        try:
+            compare_exp_actual_data(exp_data, act_data, ['rt_value'])
+        except (CompareFailed, CompareEmptyData):
+            pass  # Already captured in result
+
+    return result
+
+
+def _get_expected_local_arp_entries(dut):
+    """
+    Build expected local ARP entries for a leaf node from SAG host addressing.
+
+    Uses generate_sag_hosts() logic to derive per-VLAN host IPs and MACs that
+    should appear in the local ARP table on a leaf node.  Only locally-connected
+    IPv4 hosts (on Ethernet / PortChannel interfaces) are expected in ARP.
+
+    The SAG addressing scheme (DCI_NORMAL_SAG_ADDRESSING.md):
+      - MAC: 00:<vlan_hex>:00:00:04:<counter_hex>  (IPv4 version octet = 04)
+      - IP:  80.<vlan>.0.<counter>
+      - counter increments by 10 per interface, across all nodes sorted by DC
+        then leaf number
+
+    Returns:
+        list of dicts: [{'ip': '80.11.0.10', 'mac': '00:0b:00:00:04:0a',
+                         'vlan': '11'}, ...]
+    """
+    cfg_dict = get_cfg_dict()
+
+    # Collect VLANs from the node's l2vni config
+    node_cfg = cfg_dict.get(dut, {})
+    vlan_list = []
+    if isinstance(node_cfg, dict) and node_cfg.get('l2vni'):
+        l2vni = node_cfg['l2vni']
+        if isinstance(l2vni, list):
+            for item in l2vni:
+                vlan_list.append(item['vlan_id'])
+        else:
+            vlan_list = list(range(l2vni['vlan_start_range'],
+                                   l2vni['vlan_start_range'] + l2vni['count']))
+
+    if not vlan_list:
+        st.log('No VLANs found for {} in YAML config'.format(dut))
+        return []
+
+    # Count interfaces per node in sorted SAG order to derive counter offsets
+    # The global counter starts at 10 and increments by 10 per interface
+    # across all nodes sorted by (dc_num, node_type, leaf_num)
+    def _sort_key(name):
+        dc_match = re.search(r'_dc(\d+)', name)
+        leaf_match = re.search(r'(leaf|spine)(\d+)', name)
+        dc_num = int(dc_match.group(1)) if dc_match else 0
+        node_type = leaf_match.group(1) if leaf_match else name
+        leaf_num = int(leaf_match.group(2)) if leaf_match else 0
+        return (dc_num, node_type, leaf_num)
+
+    # Determine how many interfaces each node has and where dut's interfaces start
+    # We need to replicate the same ordering as generate_sag_hosts
+    svi_nodes = []
+    for node_name, ncfg in sorted(cfg_dict.items(), key=lambda x: _sort_key(x[0])):
+        if not isinstance(ncfg, dict):
+            continue
+        if 'leaf' not in node_name:
+            continue
+        if not ncfg.get('l2vni'):
+            continue
+        svi_nodes.append(node_name)
+
+    # Count interfaces per node from l2vni config members
+    # Each unique non-PortChannel member or PortChannel group = 1 interface
+    counter = 10  # global counter starts at 10
+    dut_counters = []  # list of counter values for dut's interfaces
+
+    for node_name in svi_nodes:
+        ncfg = cfg_dict[node_name]
+        l2vni = ncfg['l2vni']
+        # Count interfaces: unique orphan ports + unique port-channels
+        seen_ports = set()
+        seen_pcs = set()
+        if isinstance(l2vni, list):
+            for item in l2vni:
+                for member in item.get('members', []):
+                    if member.startswith('PortChannel'):
+                        pc_num = re.search(r'PortChannel(\d+)', member)
+                        if pc_num and pc_num.group(1) not in seen_pcs:
+                            seen_pcs.add(pc_num.group(1))
+                    else:
+                        # Extract port suffix (e.g., 'T1P1' -> 'P1')
+                        if member not in seen_ports:
+                            seen_ports.add(member)
+
+        num_interfaces = len(seen_ports) + len(seen_pcs)
+        if num_interfaces == 0:
+            num_interfaces = 1  # At least 1 interface
+
+        if node_name == dut:
+            for i in range(num_interfaces):
+                dut_counters.append(counter + i * 10)
+
+        counter += num_interfaces * 10
+
+    if not dut_counters:
+        st.log('Could not determine interface counters for {}'.format(dut))
+        return []
+
+    # Build expected ARP entries: one per (vlan, interface_counter)
+    expected = []
+    for vlan_id in sorted(vlan_list):
+        vlan_hex = format(vlan_id, '02x')
+        for ctr in dut_counters:
+            ctr_hex = format(ctr, '02x')
+            ip = '80.{}.0.{}'.format(vlan_id, ctr)
+            mac = '00:{}:00:00:04:{}'.format(vlan_hex, ctr_hex)
+            expected.append({
+                'ip': ip,
+                'mac': mac,
+                'vlan': str(vlan_id),
+            })
+
+    return expected
+
+
+def verify_mac_arp_entries_dci(dut):
+    """
+    Verify MAC and ARP table entries on a node for L3VNI DCI traffic.
+
+    Compares expected vs actual ARP entries using SAG host addressing data
+    from DCI_NORMAL_SAG_ADDRESSING.md.  Expected local ARP entries are derived
+    from generate_sag_hosts() addressing scheme:
+      - IP:  80.<vlan>.0.<counter>
+      - MAC: 00:<vlan_hex>:00:00:04:<counter_hex>
+
+    Also verifies MAC table has entries (count check).
+
+    Uses compare_exp_actual_data() for structured expected-vs-actual comparison.
+
+    Args:
+        dut: Node hostname to verify
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'mac_count': int,
+            'arp_count': int,
+            'arp_missing': int,
+            'details': str summary
+        }
+    """
+    result = {
+        'result': False,
+        'mac_count': 0,
+        'arp_count': 0,
+        'arp_missing': 0,
+        'details': ''
+    }
+
+    st.banner('Checking MAC and ARP entries on {}'.format(dut))
+
+    # Step 1: Check MAC table (count check)
+    try:
+        mac_output = st.show(dut, "show mac", skip_tmpl=True)
+        if mac_output:
+            mac_lines = [l for l in mac_output.splitlines()
+                         if ':' in l and ('dynamic' in l.lower() or 'static' in l.lower()
+                                          or 'Vlan' in l)]
+            result['mac_count'] = len(mac_lines)
+        st.log('MAC entries on {}: {}'.format(dut, result['mac_count']))
+    except Exception as err:
+        st.log('Failed to get MAC table on {}: {}'.format(dut, err))
+
+    # Step 2: Get actual ARP entries
+    actual_arp = {}  # keyed by IP -> {mac, vlan}
+    try:
+        arp_output = st.show(dut, "show arp", skip_tmpl=True)
+        if arp_output:
+            for line in arp_output.splitlines():
+                # Match ARP lines: IP  MAC  Iface  Vlan
+                # e.g. "80.11.0.10    00:0b:00:00:04:0a  Ethernet1_1   11"
+                m = re.search(
+                    r'(80\.\d+\.\d+\.\d+)\s+([\da-f:]+)\s+\S+\s+(\d+)', line)
+                if m:
+                    actual_arp[m.group(1)] = {
+                        'mac': m.group(2),
+                        'vlan': m.group(3),
+                    }
+        result['arp_count'] = len(actual_arp)
+        st.log('ARP entries on {}: {}'.format(dut, result['arp_count']))
+    except Exception as err:
+        st.log('Failed to get ARP table on {}: {}'.format(dut, err))
+
+    # Step 3: Build expected ARP entries from SAG host addressing
+    expected_arp = _get_expected_local_arp_entries(dut)
+    st.log('Expected local ARP entries on {}: {}'.format(dut, len(expected_arp)))
+
+    # Step 4: Compare expected vs actual ARP using structured comparison
+    exp_data = []
+    act_data = []
+    missing_count = 0
+
+    for exp_entry in expected_arp:
+        ip = exp_entry['ip']
+        exp_row = {
+            'ip': ip,
+            'mac': exp_entry['mac'],
+            'vlan': exp_entry['vlan'],
+            'present': 'yes',
+        }
+        exp_data.append(exp_row)
+
+        if ip in actual_arp:
+            act_row = {
+                'ip': ip,
+                'mac': actual_arp[ip]['mac'],
+                'vlan': actual_arp[ip]['vlan'],
+                'present': 'yes',
+            }
+        else:
+            act_row = {
+                'ip': ip,
+                'mac': '-',
+                'vlan': '-',
+                'present': 'no',
+            }
+            missing_count += 1
+        act_data.append(act_row)
+
+    result['arp_missing'] = missing_count
+
+    # Build summary
+    details_parts = []
+    details_parts.append('{} MAC entries'.format(result['mac_count']))
+    details_parts.append('{}/{} expected ARP entries found'.format(
+        len(expected_arp) - missing_count, len(expected_arp)))
+    if missing_count > 0:
+        details_parts.append('{} ARP entries missing'.format(missing_count))
+
+    result['details'] = '; '.join(details_parts)
+    st.log(result['details'])
+
+    # Pass if MAC entries exist and all expected ARP entries are present
+    result['result'] = (result['mac_count'] > 0 and missing_count == 0)
+
+    # Use compare_exp_actual_data for structured tabular output if mismatch
+    if not result['result'] and exp_data:
+        try:
+            compare_exp_actual_data(exp_data, act_data, ['ip'])
+        except (CompareFailed, CompareEmptyData):
+            pass  # Already captured in result
+
+    return result
 
 
 def report_result(result, tc_id='', rc_msg=''):
@@ -6189,6 +8077,436 @@ def collect_diags(tc_id=''):
                 st.config(dut, cmd, type='vtysh', skip_error_check=True)
             except Exception as err:
                 st.error('Error collecting : {}'.format(cmd))
+
+
+def verify_type5_route_presence_dci(dut, vlan_ids, expect_present=True):
+    """
+    Verify Type-5 route presence or absence for specific VLANs using comprehensive
+    Type-5 verification (get_expected_type5_routes + _parse_type5_routes_detailed).
+
+    When expect_present=True (re-advertisement check):
+      - Gets expected route data from get_expected_type5_routes(dut) for the given VLANs
+      - Parses actual Type-5 output and verifies each prefix exists with expected path count
+      - Uses structured expected-vs-actual comparison for detailed reporting
+
+    When expect_present=False (withdrawal check):
+      - Parses actual Type-5 output and verifies the VLAN prefixes are NOT present
+      - Both IPv4 (80.<vlan>.0.0/24) and IPv6 (8000:<vlan>::/64) prefixes are checked
+
+    Args:
+        dut: Node hostname (BGW or leaf) to verify
+        vlan_ids: list of VLAN IDs to check (e.g. [11] for Vlan11)
+        expect_present: True to verify routes exist, False to verify routes are withdrawn
+
+    Returns:
+        Boolean: True if verification passes
+    """
+    action = 'present' if expect_present else 'withdrawn'
+    st.banner('Verifying Type-5 routes {} for VLANs {} on {}'.format(
+        action, vlan_ids, dut))
+
+    # Build the set of prefixes to check (both IPv4 and IPv6 per VLAN)
+    target_prefixes = set()
+    for vlan_id in vlan_ids:
+        target_prefixes.add('80.{}.0.0/24'.format(vlan_id))
+        target_prefixes.add('8000:{}::/64'.format(vlan_id))
+
+    # Parse actual Type-5 output
+    try:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        st.log('Failed to get Type-5 routes on {}: {}'.format(dut, err))
+        return False
+
+    if not cli_output or not cli_output.strip():
+        if not expect_present:
+            st.log('No Type-5 route output on {} - routes are withdrawn'.format(dut))
+            return True
+        else:
+            st.log('No Type-5 route output on {} - routes not present yet'.format(dut))
+            return False
+
+    detailed = _parse_type5_routes_detailed(cli_output)
+    act_prefixes = set(detailed.keys())
+
+    if not expect_present:
+        # Withdrawal check: verify target prefixes are NOT in actual output
+        still_present = target_prefixes & act_prefixes
+        if still_present:
+            st.log('Type-5 routes still present for withdrawn VLANs on {}: {}'.format(
+                dut, still_present))
+            return False
+        st.log('Type-5 routes successfully withdrawn for VLANs {} on {}'.format(
+            vlan_ids, dut))
+        return True
+
+    # Re-advertisement / presence check: use comprehensive Type-5 verification
+    # Get full expected routes and filter to target VLANs
+    exp_routes = get_expected_type5_routes(dut)
+    filtered_exp = [r for r in exp_routes if r['prefix'] in target_prefixes]
+
+    if not filtered_exp:
+        st.log('No expected Type-5 routes generated for VLANs {} on {}'.format(
+            vlan_ids, dut))
+        return False
+
+    # Verify each expected prefix using unified boolean checks:
+    # present, has_best, has_rt, has_et, has_rmac
+    # (No strict checks: path_count, best_weight, best_nh, exact RD)
+    all_pass = True
+    for exp_route in filtered_exp:
+        prefix = exp_route['prefix']
+
+        if prefix not in detailed:
+            st.log('Type-5 prefix {} NOT found on {}'.format(prefix, dut))
+            all_pass = False
+            continue
+
+        info = detailed[prefix]
+        best_path = info.get('best_path')
+        has_rt = any(p.get('rt') for p in info['paths'])
+        has_et = any(p.get('et') for p in info['paths'])
+        has_rmac = any(p.get('rmac') for p in info['paths'])
+
+        if not best_path:
+            st.log('Type-5 prefix {} on {}: no best path'.format(prefix, dut))
+            all_pass = False
+        elif not (has_rt and has_et and has_rmac):
+            st.log('Type-5 prefix {} on {}: missing attributes '
+                   '(rt={}, et={}, rmac={})'.format(
+                       prefix, dut, has_rt, has_et, has_rmac))
+            all_pass = False
+        else:
+            st.log('Type-5 prefix {} on {}: Pass '
+                   '(present, best_path, rt/et/rmac ok)'.format(
+                       prefix, dut))
+
+    if all_pass:
+        st.log('Type-5 route presence verified for VLANs {} on {}'.format(
+            vlan_ids, dut))
+    else:
+        st.log('Type-5 route presence verification FAILED for VLANs {} on {}'.format(
+            vlan_ids, dut))
+
+    return all_pass
+
+
+def verify_vrf_vni_after_reload_dci(dut):
+    """
+    Verify VRF-VNI mappings are restored after config reload on a node.
+
+    Checks that L3VNI VRF-VNI bindings (Vrf101→10101, Vrf102→10102) are present
+    using 'show vxlan vrfvnimap'.
+
+    Args:
+        dut: Node hostname to verify
+
+    Returns:
+        Boolean: True if VRF-VNI mappings are restored
+    """
+    st.banner('Verifying VRF-VNI mappings restored on {} after reload'.format(dut))
+    return verify_vrfvnimap(dut)
+
+
+def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
+                                     src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
+                                     vlan_enabled='0', vlan_id='1'):
+    """
+    Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
+
+    This follows the bgp_ixia_dut.txt pattern for IXIA API calls:
+      1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
+      2. Configure BGP peer (eBGP session to leaf)
+      3. Advertise IPv6 prefixes over BGP
+
+    Args:
+        tg_handle: IXIA traffic generator handle
+        port_handle: IXIA port handle connected to leaf
+        ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
+        gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
+        netmask: Subnet mask (e.g. '255.255.255.0')
+        src_mac: IXIA source MAC address (e.g. '00:00:AA:BB:CC:01')
+        ixia_asn: IXIA BGP AS number (e.g. '65299')
+        leaf_asn: Leaf node BGP AS number (e.g. '65200')
+        ipv6_prefixes: List of dicts with keys: prefix, prefix_len, num_routes
+            e.g. [{'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5}]
+        vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
+        vlan_id: VLAN ID if vlan_enabled='1' (default '1')
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'interface_handle': IXIA interface handle,
+            'bgp_handle': BGP peer handle,
+            'route_handles': list of BGP route handles,
+            'details': str summary
+        }
+    """
+    result = {
+        'result': False,
+        'interface_handle': None,
+        'bgp_handle': None,
+        'route_handles': [],
+        'details': ''
+    }
+
+    # Step 1: Configure IXIA interface
+    st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
+    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+        ixia_ip, gateway, netmask, src_mac))
+
+    intf_args = {
+        'port_handle': port_handle,
+        'mode': 'config',
+        'intf_ip_addr': ixia_ip,
+        'gateway': gateway,
+        'netmask': netmask,
+        'src_mac_addr': src_mac,
+        'arp_send_req': '1',
+    }
+    if vlan_enabled == '1':
+        intf_args['vlan'] = '1'
+        intf_args['vlan_id'] = vlan_id
+        intf_args['vlan_id_count'] = '1'
+        intf_args['vlan_id_step'] = '1'
+
+    h1 = tg_handle.tg_interface_config(**intf_args)
+    st.log('Interface config result: {}'.format(h1))
+
+    if not h1 or not h1.get('handle'):
+        result['details'] = 'Failed to configure IXIA interface'
+        st.log(result['details'])
+        return result
+
+    interface_handle = h1['handle']
+    result['interface_handle'] = interface_handle
+    st.log('IXIA interface configured: handle={}'.format(interface_handle))
+
+    # Step 2: Configure BGP peer
+    st.banner('IXIA BGP: Configuring BGP peer (local_as={}, remote_as={})'.format(
+        ixia_asn, leaf_asn))
+
+    bgp_result = tg_handle.tg_emulation_bgp_config(
+        handle=interface_handle,
+        mode='enable',
+        active_connect_enable='1',
+        local_as=ixia_asn,
+        remote_as=leaf_asn,
+        remote_ip_addr=gateway,
+        enable_4_byte_as='1'
+    )
+    st.log('BGP config result: {}'.format(bgp_result))
+
+    if not bgp_result or not bgp_result.get('handle'):
+        result['details'] = 'Failed to configure BGP peer'
+        st.log(result['details'])
+        return result
+
+    bgp_handle = bgp_result['handle']
+    result['bgp_handle'] = bgp_handle
+    st.log('BGP peer configured: handle={}'.format(bgp_handle))
+
+    # Step 3: Advertise IPv6 prefixes
+    st.banner('IXIA BGP: Advertising {} IPv6 prefix group(s)'.format(len(ipv6_prefixes)))
+
+    for idx, prefix_cfg in enumerate(ipv6_prefixes):
+        prefix = prefix_cfg['prefix']
+        prefix_len = prefix_cfg.get('prefix_len', 64)
+        num_routes = prefix_cfg.get('num_routes', 1)
+        # Convert prefix_len to IPv6 netmask representation
+        # For BGP route config, use prefix_length parameter
+        st.log('  Prefix group {}: {} prefixes starting from {}/{}'.format(
+            idx + 1, num_routes, prefix, prefix_len))
+
+        route_result = tg_handle.tg_emulation_bgp_route_config(
+            handle=bgp_handle,
+            mode='add',
+            ip_version='6',
+            num_routes=str(num_routes),
+            prefix=prefix,
+            prefix_length=str(prefix_len),
+            prefix_step=1,
+            as_path='as_seq:1'
+        )
+        st.log('Route config result: {}'.format(route_result))
+
+        if route_result:
+            result['route_handles'].append(route_result)
+
+    result['result'] = True
+    result['details'] = 'IXIA BGP configured: {} IPv6 prefix groups advertised'.format(
+        len(ipv6_prefixes))
+    st.log(result['details'])
+    return result
+
+
+def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
+                                     src_mac, ixia_asn, leaf_asn, ipv4_prefixes,
+                                     vlan_enabled='0', vlan_id='1'):
+    """
+    Configure IXIA BGP session to advertise IPv4 prefixes to a DUT leaf node.
+
+    This follows the bgp_ixia_dut.txt pattern for IXIA API calls:
+      1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
+      2. Configure BGP peer (eBGP session to leaf)
+      3. Advertise IPv4 prefixes over BGP
+
+    Args:
+        tg_handle: IXIA traffic generator handle
+        port_handle: IXIA port handle connected to leaf
+        ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
+        gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
+        netmask: Subnet mask (e.g. '255.255.255.0')
+        src_mac: IXIA source MAC address (e.g. '00:00:AA:BB:CC:01')
+        ixia_asn: IXIA BGP AS number (e.g. '65299')
+        leaf_asn: Leaf node BGP AS number (e.g. '65200')
+        ipv4_prefixes: List of dicts with keys: prefix, prefix_len, num_routes
+            e.g. [{'prefix': '10.1.0.0', 'prefix_len': 24, 'num_routes': 5}]
+        vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
+        vlan_id: VLAN ID if vlan_enabled='1' (default '1')
+
+    Returns:
+        dict: {
+            'result': True/False,
+            'interface_handle': IXIA interface handle,
+            'bgp_handle': BGP peer handle,
+            'route_handles': list of BGP route handles,
+            'details': str summary
+        }
+    """
+    result = {
+        'result': False,
+        'interface_handle': None,
+        'bgp_handle': None,
+        'route_handles': [],
+        'details': ''
+    }
+
+    # Step 1: Configure IXIA interface
+    st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
+    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+        ixia_ip, gateway, netmask, src_mac))
+
+    intf_args = {
+        'port_handle': port_handle,
+        'mode': 'config',
+        'intf_ip_addr': ixia_ip,
+        'gateway': gateway,
+        'netmask': netmask,
+        'src_mac_addr': src_mac,
+        'arp_send_req': '1',
+    }
+    if vlan_enabled == '1':
+        intf_args['vlan'] = '1'
+        intf_args['vlan_id'] = vlan_id
+        intf_args['vlan_id_count'] = '1'
+        intf_args['vlan_id_step'] = '1'
+
+    h1 = tg_handle.tg_interface_config(**intf_args)
+    st.log('Interface config result: {}'.format(h1))
+
+    if not h1 or not h1.get('handle'):
+        result['details'] = 'Failed to configure IXIA interface'
+        st.log(result['details'])
+        return result
+
+    interface_handle = h1['handle']
+    result['interface_handle'] = interface_handle
+    st.log('IXIA interface configured: handle={}'.format(interface_handle))
+
+    # Step 2: Configure BGP peer
+    st.banner('IXIA BGP: Configuring BGP peer (local_as={}, remote_as={})'.format(
+        ixia_asn, leaf_asn))
+
+    bgp_result = tg_handle.tg_emulation_bgp_config(
+        handle=interface_handle,
+        mode='enable',
+        active_connect_enable='1',
+        local_as=ixia_asn,
+        remote_as=leaf_asn,
+        remote_ip_addr=gateway,
+        enable_4_byte_as='1'
+    )
+    st.log('BGP config result: {}'.format(bgp_result))
+
+    if not bgp_result or not bgp_result.get('handle'):
+        result['details'] = 'Failed to configure BGP peer'
+        st.log(result['details'])
+        return result
+
+    bgp_handle = bgp_result['handle']
+    result['bgp_handle'] = bgp_handle
+    st.log('BGP peer configured: handle={}'.format(bgp_handle))
+
+    # Step 3: Advertise IPv4 prefixes
+    st.banner('IXIA BGP: Advertising {} IPv4 prefix group(s)'.format(len(ipv4_prefixes)))
+
+    for idx, prefix_cfg in enumerate(ipv4_prefixes):
+        prefix = prefix_cfg['prefix']
+        prefix_len = prefix_cfg.get('prefix_len', 24)
+        num_routes = prefix_cfg.get('num_routes', 1)
+        # Convert prefix_len to IPv4 netmask for tg_emulation_bgp_route_config
+        prefix_netmask = _prefix_len_to_ipv4_netmask(prefix_len)
+        st.log('  Prefix group {}: {} prefixes starting from {}/{} (netmask {})'.format(
+            idx + 1, num_routes, prefix, prefix_len, prefix_netmask))
+
+        route_result = tg_handle.tg_emulation_bgp_route_config(
+            handle=bgp_handle,
+            mode='add',
+            num_routes=str(num_routes),
+            prefix=prefix,
+            netmask=prefix_netmask,
+            prefix_step=1,
+            as_path='as_seq:1'
+        )
+        st.log('Route config result: {}'.format(route_result))
+
+        if route_result:
+            result['route_handles'].append(route_result)
+
+    result['result'] = True
+    result['details'] = 'IXIA BGP configured: {} IPv4 prefix groups advertised'.format(
+        len(ipv4_prefixes))
+    st.log(result['details'])
+    return result
+
+
+def _prefix_len_to_ipv4_netmask(prefix_len):
+    """Convert prefix length (e.g. 24) to IPv4 netmask (e.g. '255.255.255.0')."""
+    prefix_len = int(prefix_len)
+    mask = (0xFFFFFFFF << (32 - prefix_len)) & 0xFFFFFFFF
+    return '{}.{}.{}.{}'.format(
+        (mask >> 24) & 0xFF,
+        (mask >> 16) & 0xFF,
+        (mask >> 8) & 0xFF,
+        mask & 0xFF
+    )
+
+
+def cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle):
+    """
+    Clean up IXIA BGP session and interface configuration.
+
+    Args:
+        tg_handle: IXIA traffic generator handle
+        bgp_handle: BGP peer handle to remove
+        interface_handle: IXIA interface handle to remove
+    """
+    st.banner('IXIA BGP: Cleaning up BGP session and interface')
+    try:
+        if bgp_handle:
+            tg_handle.tg_emulation_bgp_config(handle=bgp_handle, mode='disable')
+            st.log('BGP session disabled: {}'.format(bgp_handle))
+    except Exception as e:
+        st.log('Warning: Failed to disable BGP session: {}'.format(e))
+
+    try:
+        if interface_handle:
+            tg_handle.tg_interface_config(handle=interface_handle, mode='destroy')
+            st.log('IXIA interface destroyed: {}'.format(interface_handle))
+    except Exception as e:
+        st.log('Warning: Failed to destroy IXIA interface: {}'.format(e))
 
 
 def get_tc_params(tc_id):

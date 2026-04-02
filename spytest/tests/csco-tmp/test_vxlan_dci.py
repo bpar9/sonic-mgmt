@@ -1411,90 +1411,25 @@ def tgen_preconfig(**kwargs):
 
     # ============================================================
     # Continuous cross-DC L2 (IPv4/IPv6) for DCI link flap/shut tests
-    # Same pattern as MH DF/NDF: create_traffic_item(..., transmit_mode='continuous')
-    # Used by TestVxlanInterfaceTriggers.test_dci_link_trigger via
-    # check_traffic(action='start' / 'check' / 'stop')
-    # Only created when dci_enabled=True (BGW nodes present in topology).
+    # These are NOT created here; they are created on-demand by
+    # _create_dci_fc_streams() when test_dci_link_trigger actually runs.
+    # This avoids UNAPPLIED traffic items in IXIA for tests that don't
+    # need them.  We only store the endpoint data and device handles
+    # needed for lazy creation.
     # ============================================================
     stream_handles['dci_flap_continuous'] = {}
-    _dci_fc_key = 1
-    _fc_rate = test_cfg['global'].get('bum', {}).get('rate_percent', 0.1)
-    _fc_ppb = test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000)
-
-    def _dci_merge_flap_continuous(dest, created, start_key):
-        k = start_key
-        if not created:
-            return k
-        for _idx, sinfo in created.items():
-            if isinstance(sinfo, dict) and sinfo.get('stream_id'):
-                dest[k] = sinfo
-                k += 1
-        return k
-
-    if not dci_enabled:
-        st.log("NOTE: DCI not enabled (no BGW nodes). Skipping continuous cross-DC L2 streams.")
     if dci_enabled and (l2_orphan_cross or l2_pc_cross):
-        st.banner("DCI: continuous L2 cross-DC streams for link flap tests (parallel to burst L2-CROSS)")
-    if dci_enabled and l2_orphan_cross:
-        _h_fc = vxlan_obj.create_traffic_item(
-            device_handles=v4_device_handles,
-            endpoints=l2_orphan_cross,
-            topo_handles=topo_handles,
-            multi_dst='vlan',
-            name_prfx='DCI-FC-L2-SH-X',
-            transmit_mode='continuous',
-            rate_percent=_fc_rate,
-            pkts_per_burst=_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if dci_enabled and l2_pc_cross:
-        for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
-            _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
-            if not _eps_fc:
-                continue
-            _h_fc = vxlan_obj.create_traffic_item(
-                device_handles=v4_device_handles,
-                endpoints=_eps_fc,
-                topo_handles=topo_handles,
-                multi_dst='vlan',
-                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
-                transmit_mode='continuous',
-                rate_percent=_fc_rate,
-                pkts_per_burst=_fc_ppb,
-            )
-            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if dci_enabled and l2_orphan_cross:
-        _h_fc = vxlan_obj.create_traffic_item(
-            device_handles=v6_device_handles,
-            endpoints=l2_orphan_cross,
-            topo_handles=topo_handles,
-            version='ipv6',
-            multi_dst='vlan',
-            name_prfx='DCI-FC-L2-SH-X',
-            transmit_mode='continuous',
-            rate_percent=_fc_rate,
-            pkts_per_burst=_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if dci_enabled and l2_pc_cross:
-        for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
-            _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
-            if not _eps_fc:
-                continue
-            _h_fc = vxlan_obj.create_traffic_item(
-                device_handles=v6_device_handles,
-                endpoints=_eps_fc,
-                topo_handles=topo_handles,
-                version='ipv6',
-                multi_dst='vlan',
-                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
-                transmit_mode='continuous',
-                rate_percent=_fc_rate,
-                pkts_per_burst=_fc_ppb,
-            )
-            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if stream_handles['dci_flap_continuous']:
-        st.log("DCI flap continuous: {} stream(s) created".format(len(stream_handles['dci_flap_continuous'])))
+        stream_handles['_dci_fc_lazy'] = {
+            'l2_orphan_cross': l2_orphan_cross,
+            'l2_pc_cross': l2_pc_cross,
+            'v4_device_handles': v4_device_handles,
+            'v6_device_handles': v6_device_handles,
+            'rate_percent': test_cfg['global'].get('bum', {}).get('rate_percent', 0.1),
+            'pkts_per_burst': test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000),
+        }
+        st.log("DCI flap continuous: deferred (endpoints saved for on-demand creation)")
+    else:
+        st.log("NOTE: No cross-DC L2 endpoints for DCI flap continuous streams.")
 
     st.banner(f"Creating L3 IPv6 traffic items: {len(l3_traffic_endpoints)} endpoints "
               f"({len(l3_within_dc_endpoints)} within-DC [{len(l3_within_sh)} SH + {len(l3_within_mh)} MH] "
@@ -3926,6 +3861,89 @@ class TestVxlanBGPTriggers():
             report_result(False, tc_id, result_str)
 
 
+def _create_dci_fc_streams(handles):
+    """
+    On-demand creation of DCI flap continuous L2 cross-DC streams.
+    Called only by test_dci_link_trigger when the test actually runs,
+    so that IXIA does not carry UNAPPLIED traffic items for other tests.
+
+    Args:
+        handles: tgen_handles dict (must contain '_dci_fc_lazy' from tgen_preconfig)
+
+    Returns:
+        dict: The populated dci_flap_continuous streams, or empty dict if nothing to create.
+    """
+    # Already created in a previous parametrize iteration?
+    fc = handles.get('dci_flap_continuous')
+    if isinstance(fc, dict) and len(fc) > 0:
+        return fc
+
+    lazy = handles.get('_dci_fc_lazy')
+    if not lazy:
+        st.log("_create_dci_fc_streams: no deferred endpoint data – nothing to create")
+        return {}
+
+    l2_orphan_cross = lazy['l2_orphan_cross']
+    l2_pc_cross = lazy['l2_pc_cross']
+    v4_dh = lazy['v4_device_handles']
+    v6_dh = lazy['v6_device_handles']
+    fc_rate = lazy['rate_percent']
+    fc_ppb = lazy['pkts_per_burst']
+
+    dest = {}
+    key = 1
+
+    def _merge(created, start_key):
+        k = start_key
+        if not created:
+            return k
+        for _idx, sinfo in created.items():
+            if isinstance(sinfo, dict) and sinfo.get('stream_id'):
+                dest[k] = sinfo
+                k += 1
+        return k
+
+    st.banner("DCI: creating continuous L2 cross-DC streams on-demand for link flap tests")
+
+    # IPv4 SH
+    if l2_orphan_cross:
+        key = _merge(vxlan_obj.create_traffic_item(
+            device_handles=v4_dh, endpoints=l2_orphan_cross, topo_handles=topo_handles,
+            multi_dst='vlan', name_prfx='DCI-FC-L2-SH-X',
+            transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
+
+    # IPv4 MH (per-VLAN)
+    if l2_pc_cross:
+        for vlan in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
+            eps = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == vlan}
+            if eps:
+                key = _merge(vxlan_obj.create_traffic_item(
+                    device_handles=v4_dh, endpoints=eps, topo_handles=topo_handles,
+                    multi_dst='vlan', name_prfx='DCI-FC-L2-MH-X-v{}'.format(vlan),
+                    transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
+
+    # IPv6 SH
+    if l2_orphan_cross:
+        key = _merge(vxlan_obj.create_traffic_item(
+            device_handles=v6_dh, endpoints=l2_orphan_cross, topo_handles=topo_handles,
+            version='ipv6', multi_dst='vlan', name_prfx='DCI-FC-L2-SH-X',
+            transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
+
+    # IPv6 MH (per-VLAN)
+    if l2_pc_cross:
+        for vlan in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
+            eps = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == vlan}
+            if eps:
+                key = _merge(vxlan_obj.create_traffic_item(
+                    device_handles=v6_dh, endpoints=eps, topo_handles=topo_handles,
+                    version='ipv6', multi_dst='vlan', name_prfx='DCI-FC-L2-MH-X-v{}'.format(vlan),
+                    transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
+
+    handles['dci_flap_continuous'] = dest
+    st.log("DCI flap continuous: {} stream(s) created on-demand".format(len(dest)))
+    return dest
+
+
 # ============================================================================
 # INTERFACE TRIGGER TEST CLASS (DCI link flap/shut + leaf interface shut/noshut)
 # ============================================================================
@@ -4210,7 +4228,10 @@ class TestVxlanInterfaceTriggers():
         shut_time = tc_cfg.get('shut_time', 20 if scope == "single" else 30)
         stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
-        fc_streams = tgen_handles.get('dci_flap_continuous')
+        # On-demand creation of DCI flap continuous streams (lazy pattern).
+        # Streams are only created when this test actually runs, avoiding
+        # UNAPPLIED traffic items in IXIA for other tests in the same session.
+        fc_streams = _create_dci_fc_streams(tgen_handles)
         use_fc = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
         # Get DCI interface mapping

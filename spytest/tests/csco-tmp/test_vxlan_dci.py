@@ -1061,9 +1061,11 @@ def tgen_preconfig(**kwargs):
     WITHIN_DC_VLANS = [12, 17]  # VRF 101: VLAN 12, 17 (within-DC) - keeps existing behavior
     CROSS_DC_VLANS = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]  # All VLANs for cross-DC (vxlan-wan)
 
-    # L3VNI across DCI: Enable cross-DC L3 stream generation.
-    # Set to False to disable cross-DC L3VNI traffic streams if unsupported.
-    ENABLE_L3_ACROSS_DCI = True
+    # L3VNI across DCI: Enable cross-DC L3 stream generation only when
+    # BGW nodes are present in the topology (i.e., DCI is enabled).
+    # When dci_enabled is False, no cross-DC L3 traffic items are created.
+    dci_enabled = bool(test_cfg['nodes'].get('l2l3vni_bgw'))
+    ENABLE_L3_ACROSS_DCI = dci_enabled
     
     def filter_endpoints_by_vlan_and_scope(endpoints, allowed_vlans_within, allowed_vlans_cross):
         """
@@ -1412,6 +1414,7 @@ def tgen_preconfig(**kwargs):
     # Same pattern as MH DF/NDF: create_traffic_item(..., transmit_mode='continuous')
     # Used by TestVxlanInterfaceTriggers.test_dci_link_trigger via
     # check_traffic(action='start' / 'check' / 'stop')
+    # Only created when dci_enabled=True (BGW nodes present in topology).
     # ============================================================
     stream_handles['dci_flap_continuous'] = {}
     _dci_fc_key = 1
@@ -1428,9 +1431,11 @@ def tgen_preconfig(**kwargs):
                 k += 1
         return k
 
-    if l2_orphan_cross or l2_pc_cross:
+    if not dci_enabled:
+        st.log("NOTE: DCI not enabled (no BGW nodes). Skipping continuous cross-DC L2 streams.")
+    if dci_enabled and (l2_orphan_cross or l2_pc_cross):
         st.banner("DCI: continuous L2 cross-DC streams for link flap tests (parallel to burst L2-CROSS)")
-    if l2_orphan_cross:
+    if dci_enabled and l2_orphan_cross:
         _h_fc = vxlan_obj.create_traffic_item(
             device_handles=v4_device_handles,
             endpoints=l2_orphan_cross,
@@ -1442,7 +1447,7 @@ def tgen_preconfig(**kwargs):
             pkts_per_burst=_fc_ppb,
         )
         _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if l2_pc_cross:
+    if dci_enabled and l2_pc_cross:
         for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
             _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
             if not _eps_fc:
@@ -1458,7 +1463,7 @@ def tgen_preconfig(**kwargs):
                 pkts_per_burst=_fc_ppb,
             )
             _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if l2_orphan_cross:
+    if dci_enabled and l2_orphan_cross:
         _h_fc = vxlan_obj.create_traffic_item(
             device_handles=v6_device_handles,
             endpoints=l2_orphan_cross,
@@ -1471,7 +1476,7 @@ def tgen_preconfig(**kwargs):
             pkts_per_burst=_fc_ppb,
         )
         _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if l2_pc_cross:
+    if dci_enabled and l2_pc_cross:
         for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
             _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
             if not _eps_fc:

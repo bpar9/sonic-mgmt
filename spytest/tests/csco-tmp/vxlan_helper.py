@@ -8472,6 +8472,65 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
     return result
 
 
+def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip, vrf_name='Vrf101'):
+    """
+    Configure DUT leaf BGP neighbor to accept IXIA BGP peer.
+
+    Adds an eBGP neighbor under the specified VRF on the DUT leaf node so
+    that the IXIA-initiated BGP session is accepted and routes are imported.
+
+    FRR config applied via vtysh:
+        router bgp <leaf_asn> vrf <vrf_name>
+         neighbor <ixia_ip> remote-as <ixia_asn>
+         address-family ipv4 unicast
+          neighbor <ixia_ip> activate
+         exit-address-family
+         address-family ipv6 unicast
+          neighbor <ixia_ip> activate
+         exit-address-family
+
+    Args:
+        dut: DUT node name (e.g. leaf0_dc1)
+        leaf_asn: DUT leaf BGP AS number (e.g. '65200')
+        ixia_asn: IXIA BGP AS number (e.g. '65299')
+        ixia_ip: IXIA interface IPv4 address (e.g. '80.99.0.100')
+        vrf_name: VRF under which to configure the neighbor (default 'Vrf101')
+    """
+    st.banner('DUT BGP: Configuring neighbor {} (AS {}) on {} vrf {}'.format(
+        ixia_ip, ixia_asn, dut, vrf_name))
+    cmd = 'router bgp {} vrf {}\n'.format(leaf_asn, vrf_name)
+    cmd += 'neighbor {} remote-as {}\n'.format(ixia_ip, ixia_asn)
+    cmd += 'address-family ipv4 unicast\n'
+    cmd += 'neighbor {} activate\n'.format(ixia_ip)
+    cmd += 'exit-address-family\n'
+    cmd += 'address-family ipv6 unicast\n'
+    cmd += 'neighbor {} activate\n'.format(ixia_ip)
+    cmd += 'exit-address-family\n'
+    cmd += 'end\n'
+    cmd += 'exit\n'
+    st.config(dut, cmd, type='vtysh', skip_error_check=True)
+    st.log('DUT BGP neighbor {} configured on {} vrf {}'.format(ixia_ip, dut, vrf_name))
+
+
+def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip, vrf_name='Vrf101'):
+    """
+    Remove DUT leaf BGP neighbor for IXIA peer (cleanup).
+
+    Args:
+        dut: DUT node name
+        leaf_asn: DUT leaf BGP AS number
+        ixia_ip: IXIA interface IPv4 address
+        vrf_name: VRF name (default 'Vrf101')
+    """
+    st.banner('DUT BGP: Removing neighbor {} on {} vrf {}'.format(ixia_ip, dut, vrf_name))
+    cmd = 'router bgp {} vrf {}\n'.format(leaf_asn, vrf_name)
+    cmd += 'no neighbor {}\n'.format(ixia_ip)
+    cmd += 'end\n'
+    cmd += 'exit\n'
+    st.config(dut, cmd, type='vtysh', skip_error_check=True)
+    st.log('DUT BGP neighbor {} removed from {} vrf {}'.format(ixia_ip, dut, vrf_name))
+
+
 def _prefix_len_to_ipv4_netmask(prefix_len):
     """Convert prefix length (e.g. 24) to IPv4 netmask (e.g. '255.255.255.0')."""
     prefix_len = int(prefix_len)

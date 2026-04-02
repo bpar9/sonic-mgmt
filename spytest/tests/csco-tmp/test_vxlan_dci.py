@@ -5315,8 +5315,14 @@ class TestVxlanDCIBase():
         st.log('IPv6 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv6_prefixes]))
         
-        # --- Step 3: Configure IXIA BGP session and advertise IPv6 prefixes ---
-        st.banner('Step 3: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
+        # --- Step 3a: Configure DUT-side BGP neighbor for IXIA peer ---
+        st.banner('Step 3a: Configure DUT BGP neighbor for IXIA peer on {}'.format(leaf_node))
+        vxlan_obj.configure_dut_bgp_for_ixia(
+            dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
+            ixia_ip=ixia_ip, vrf_name='Vrf101')
+        
+        # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
+        st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
@@ -5358,8 +5364,8 @@ class TestVxlanDCIBase():
             summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv6 prefix advertisement\n'
             result = False
         
-        # --- Step 6: Cleanup IXIA BGP session ---
-        st.banner('Step 6: Cleanup IXIA BGP session')
+        # --- Step 6: Cleanup IXIA BGP session and DUT BGP neighbor ---
+        st.banner('Step 6: Cleanup IXIA BGP session and DUT BGP neighbor')
         try:
             tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
             st.log('BGP protocol stopped on IXIA')
@@ -5367,6 +5373,8 @@ class TestVxlanDCIBase():
             st.log('Warning: BGP protocol stop returned: {}'.format(e))
         
         vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+        vxlan_obj.remove_dut_bgp_for_ixia(
+            dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         report_result(result, tc_id, summ)
     
@@ -5470,8 +5478,14 @@ class TestVxlanDCIBase():
         st.log('IPv4 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv4_prefixes]))
         
-        # --- Step 3: Configure IXIA BGP session and advertise IPv4 prefixes ---
-        st.banner('Step 3: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
+        # --- Step 3a: Configure DUT-side BGP neighbor for IXIA peer ---
+        st.banner('Step 3a: Configure DUT BGP neighbor for IXIA peer on {}'.format(leaf_node))
+        vxlan_obj.configure_dut_bgp_for_ixia(
+            dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
+            ixia_ip=ixia_ip, vrf_name='Vrf101')
+        
+        # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
+        st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
@@ -5513,8 +5527,8 @@ class TestVxlanDCIBase():
             summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
             result = False
         
-        # --- Step 6: Cleanup IXIA BGP session ---
-        st.banner('Step 6: Cleanup IXIA BGP session')
+        # --- Step 6: Cleanup IXIA BGP session and DUT BGP neighbor ---
+        st.banner('Step 6: Cleanup IXIA BGP session and DUT BGP neighbor')
         try:
             tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
             st.log('BGP protocol stopped on IXIA')
@@ -5522,6 +5536,8 @@ class TestVxlanDCIBase():
             st.log('Warning: BGP protocol stop returned: {}'.format(e))
         
         vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+        vxlan_obj.remove_dut_bgp_for_ixia(
+            dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         report_result(result, tc_id, summ)
     

@@ -8272,6 +8272,16 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
         # then add ethernet + IPv4 stacks — same pattern as create_device_groups().
         st.log('Using existing topology_handle: {}'.format(topology_handle))
 
+        # Register this topology in tg.py's topo_handle dict so that
+        # tg_emulation_bgp_route_config can find it when it calls
+        # trgen_adjust_mismatch_params (which does
+        # list(self.topo_handle.values()).index(topo)).
+        # Without this, bare topologies from create_topology_handles()
+        # cause ValueError because they were never registered.
+        tg_handle.topo_handle[port_handle] = topology_handle
+        st.log('Registered topology_handle {} for port {} in tg.topo_handle'.format(
+            topology_handle, port_handle))
+
         # 1a. Create device group on existing topology
         dg = tg_handle.tg_topology_config(
             topology_handle=topology_handle,
@@ -8471,6 +8481,16 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
         # no device groups.  Create a device group on the existing topology,
         # then add ethernet + IPv4 stacks — same pattern as create_device_groups().
         st.log('Using existing topology_handle: {}'.format(topology_handle))
+
+        # Register this topology in tg.py's topo_handle dict so that
+        # tg_emulation_bgp_route_config can find it when it calls
+        # trgen_adjust_mismatch_params (which does
+        # list(self.topo_handle.values()).index(topo)).
+        # Without this, bare topologies from create_topology_handles()
+        # cause ValueError because they were never registered.
+        tg_handle.topo_handle[port_handle] = topology_handle
+        st.log('Registered topology_handle {} for port {} in tg.topo_handle'.format(
+            topology_handle, port_handle))
 
         # 1a. Create device group on existing topology
         dg = tg_handle.tg_topology_config(

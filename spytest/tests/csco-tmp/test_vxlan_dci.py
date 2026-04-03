@@ -5350,13 +5350,14 @@ class TestVxlanDCIBase():
             ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
-        # Do NOT pass device_handle (topology_handle) here.  The bare topology
-        # handle from create_topology_handles() is not registered in tg.py's
-        # topo_handle dict, so tg_emulation_bgp_route_config's internal
-        # stop_all_protocols lookup would fail with ValueError.  Instead let
-        # the helper call tg_interface_config which creates a fresh, properly
-        # registered topology+deviceGroup stack for the BGP session.
+        # Pass topology_handle from create_topology_handles() so the helper
+        # registers it in tg.py's topo_handle dict before calling
+        # tg_interface_config.  This lets tg_interface_config reuse the
+        # existing topology (avoids Error 6502: Port already used) and
+        # ensures tg_emulation_bgp_route_config's stop_all_protocols can
+        # find the topology (avoids ValueError).
         st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
+        topo_handle = leaf_ports[port_key].get('topology_handle')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
@@ -5366,7 +5367,8 @@ class TestVxlanDCIBase():
             src_mac=ixia_mac,
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
-            ipv6_prefixes=ipv6_prefixes
+            ipv6_prefixes=ipv6_prefixes,
+            topology_handle=topo_handle
         )
         
         if not ixia_result['result']:
@@ -5528,10 +5530,10 @@ class TestVxlanDCIBase():
             ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
-        # Do NOT pass device_handle (topology_handle) here.  See IPv6 test
-        # case comment for details on why the bare topology_handle cannot be
-        # reused for BGP route config.
+        # Pass topology_handle so helper reuses existing topology.
+        # See IPv6 test case comment for details on Error 6502 / ValueError fix.
         st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
+        topo_handle = leaf_ports[port_key].get('topology_handle')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
@@ -5541,7 +5543,8 @@ class TestVxlanDCIBase():
             src_mac=ixia_mac,
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
-            ipv4_prefixes=ipv4_prefixes
+            ipv4_prefixes=ipv4_prefixes,
+            topology_handle=topo_handle
         )
         
         if not ixia_result['result']:

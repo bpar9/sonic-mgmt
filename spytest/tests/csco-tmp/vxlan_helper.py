@@ -8211,6 +8211,7 @@ def verify_vrf_vni_after_reload_dci(dut):
 
 def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
+                                     topology_handle=None,
                                      vlan_enabled='0', vlan_id='1'):
     """
     Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
@@ -8220,14 +8221,15 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
       2. Configure BGP peer (eBGP session to leaf)
       3. Advertise IPv6 prefixes over BGP
 
-    IMPORTANT: The caller must provide a port_handle for a dedicated IXIA port
-    that does NOT already have a topology from create_topology_handles().
-    Use tgapi.get_handle_byname() with an unused port to avoid Error 6502
-    (Port already used).  See bgp_ixia.txt for the reference pattern.
+    When topology_handle is provided, the port already has an IXIA topology
+    from create_topology_handles() but no device groups.  The function creates
+    a device group on the existing topology (following the create_device_groups
+    pattern) instead of calling tg_interface_config(port_handle=...) which
+    would fail with Error 6502: Port already used.
 
     Args:
         tg_handle: IXIA traffic generator handle
-        port_handle: IXIA port handle for a dedicated BGP port (no existing topology)
+        port_handle: IXIA port handle
         ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
         gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
         netmask: Subnet mask (e.g. '255.255.255.0')
@@ -8236,6 +8238,9 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
         leaf_asn: Leaf node BGP AS number (e.g. '65200')
         ipv6_prefixes: List of dicts with keys: prefix, prefix_len, num_routes
             e.g. [{'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5}]
+        topology_handle: Existing IXIA topology handle (e.g. '/topology:3').
+            When provided, a device group is created on this topology instead
+            of creating a new topology via tg_interface_config.
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
 
@@ -8256,37 +8261,94 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
         'details': ''
     }
 
-    # Step 1: Configure IXIA interface via tg_interface_config
-    # The port_handle must be for a dedicated port with no existing topology.
-    # tg_interface_config will create a fresh topology on this clean port.
+    # Step 1: Configure IXIA interface
     st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
     st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
         ixia_ip, gateway, netmask, src_mac))
 
-    intf_args = {
-        'port_handle': port_handle,
-        'mode': 'config',
-        'intf_ip_addr': ixia_ip,
-        'gateway': gateway,
-        'netmask': netmask,
-        'src_mac_addr': src_mac,
-        'arp_send_req': '1',
-    }
-    if vlan_enabled == '1':
-        intf_args['vlan'] = '1'
-        intf_args['vlan_id'] = vlan_id
-        intf_args['vlan_id_count'] = '1'
-        intf_args['vlan_id_step'] = '1'
+    if topology_handle:
+        # Port already has an IXIA topology from create_topology_handles() but
+        # no device groups.  Create a device group on the existing topology,
+        # then add ethernet + IPv4 stacks — same pattern as create_device_groups().
+        st.log('Using existing topology_handle: {}'.format(topology_handle))
 
-    h1 = tg_handle.tg_interface_config(**intf_args)
-    st.log('Interface config result: {}'.format(h1))
+        # 1a. Create device group on existing topology
+        dg = tg_handle.tg_topology_config(
+            topology_handle=topology_handle,
+            device_group_name='BGP IPv6 Device Group',
+            device_group_multiplier='1',
+            device_group_enabled='1'
+        )
+        st.log('Device group result: {}'.format(dg))
+        if not dg or not dg.get('device_group_handle'):
+            result['details'] = 'Failed to create device group on existing topology'
+            st.log(result['details'])
+            return result
+        device_group_handle = dg['device_group_handle']
 
-    if not h1 or not h1.get('handle'):
-        result['details'] = 'Failed to configure IXIA interface'
-        st.log(result['details'])
-        return result
+        # 1b. Create ethernet stack on device group
+        eth_args = {
+            'protocol_name': 'BGP IPv6 Ethernet',
+            'protocol_handle': device_group_handle,
+            'mtu': '1500',
+            'src_mac_addr': src_mac,
+            'src_mac_addr_step': '00.00.00.00.00.01',
+        }
+        if vlan_enabled == '1':
+            eth_args['vlan'] = '1'
+            eth_args['vlan_id'] = vlan_id
+            eth_args['vlan_id_step'] = '1'
+            eth_args['vlan_id_count'] = '1'
+        l2_protocol = tg_handle.tg_interface_config(**eth_args)
+        st.log('Ethernet config result: {}'.format(l2_protocol))
+        if not l2_protocol or not l2_protocol.get('ethernet_handle'):
+            result['details'] = 'Failed to create ethernet stack on device group'
+            st.log(result['details'])
+            return result
+        ethernet_handle = l2_protocol['ethernet_handle']
 
-    interface_handle = h1['handle']
+        # 1c. Create IPv4 stack on ethernet
+        l3_protocol = tg_handle.tg_interface_config(
+            protocol_name='BGP IPv6 IPv4 Stack',
+            protocol_handle=ethernet_handle,
+            ipv4_resolve_gateway='1',
+            gateway=gateway,
+            gateway_step='0.0.0.0',
+            intf_ip_addr=ixia_ip,
+            intf_ip_addr_step='0.0.0.1'
+        )
+        st.log('IPv4 config result: {}'.format(l3_protocol))
+        if not l3_protocol or not l3_protocol.get('ipv4_handle'):
+            result['details'] = 'Failed to create IPv4 stack on ethernet'
+            st.log(result['details'])
+            return result
+        interface_handle = l3_protocol['ipv4_handle']
+    else:
+        # No existing topology — create fresh via tg_interface_config(port_handle=...)
+        intf_args = {
+            'port_handle': port_handle,
+            'mode': 'config',
+            'intf_ip_addr': ixia_ip,
+            'gateway': gateway,
+            'netmask': netmask,
+            'src_mac_addr': src_mac,
+            'arp_send_req': '1',
+        }
+        if vlan_enabled == '1':
+            intf_args['vlan'] = '1'
+            intf_args['vlan_id'] = vlan_id
+            intf_args['vlan_id_count'] = '1'
+            intf_args['vlan_id_step'] = '1'
+
+        h1 = tg_handle.tg_interface_config(**intf_args)
+        st.log('Interface config result: {}'.format(h1))
+
+        if not h1 or not h1.get('handle'):
+            result['details'] = 'Failed to configure IXIA interface'
+            st.log(result['details'])
+            return result
+        interface_handle = h1['handle']
+
     result['interface_handle'] = interface_handle
     st.log('IXIA interface handle: {}'.format(interface_handle))
 
@@ -8349,6 +8411,7 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
 
 def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv4_prefixes,
+                                     topology_handle=None,
                                      vlan_enabled='0', vlan_id='1'):
     """
     Configure IXIA BGP session to advertise IPv4 prefixes to a DUT leaf node.
@@ -8358,14 +8421,15 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
       2. Configure BGP peer (eBGP session to leaf)
       3. Advertise IPv4 prefixes over BGP
 
-    IMPORTANT: The caller must provide a port_handle for a dedicated IXIA port
-    that does NOT already have a topology from create_topology_handles().
-    Use tgapi.get_handle_byname() with an unused port to avoid Error 6502
-    (Port already used).  See bgp_ixia.txt for the reference pattern.
+    When topology_handle is provided, the port already has an IXIA topology
+    from create_topology_handles() but no device groups.  The function creates
+    a device group on the existing topology (following the create_device_groups
+    pattern) instead of calling tg_interface_config(port_handle=...) which
+    would fail with Error 6502: Port already used.
 
     Args:
         tg_handle: IXIA traffic generator handle
-        port_handle: IXIA port handle for a dedicated BGP port (no existing topology)
+        port_handle: IXIA port handle
         ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
         gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
         netmask: Subnet mask (e.g. '255.255.255.0')
@@ -8374,6 +8438,9 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
         leaf_asn: Leaf node BGP AS number (e.g. '65200')
         ipv4_prefixes: List of dicts with keys: prefix, prefix_len, num_routes
             e.g. [{'prefix': '10.1.0.0', 'prefix_len': 24, 'num_routes': 5}]
+        topology_handle: Existing IXIA topology handle (e.g. '/topology:3').
+            When provided, a device group is created on this topology instead
+            of creating a new topology via tg_interface_config.
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
 
@@ -8394,37 +8461,94 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
         'details': ''
     }
 
-    # Step 1: Configure IXIA interface via tg_interface_config
-    # The port_handle must be for a dedicated port with no existing topology.
-    # tg_interface_config will create a fresh topology on this clean port.
+    # Step 1: Configure IXIA interface
     st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
     st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
         ixia_ip, gateway, netmask, src_mac))
 
-    intf_args = {
-        'port_handle': port_handle,
-        'mode': 'config',
-        'intf_ip_addr': ixia_ip,
-        'gateway': gateway,
-        'netmask': netmask,
-        'src_mac_addr': src_mac,
-        'arp_send_req': '1',
-    }
-    if vlan_enabled == '1':
-        intf_args['vlan'] = '1'
-        intf_args['vlan_id'] = vlan_id
-        intf_args['vlan_id_count'] = '1'
-        intf_args['vlan_id_step'] = '1'
+    if topology_handle:
+        # Port already has an IXIA topology from create_topology_handles() but
+        # no device groups.  Create a device group on the existing topology,
+        # then add ethernet + IPv4 stacks — same pattern as create_device_groups().
+        st.log('Using existing topology_handle: {}'.format(topology_handle))
 
-    h1 = tg_handle.tg_interface_config(**intf_args)
-    st.log('Interface config result: {}'.format(h1))
+        # 1a. Create device group on existing topology
+        dg = tg_handle.tg_topology_config(
+            topology_handle=topology_handle,
+            device_group_name='BGP IPv4 Device Group',
+            device_group_multiplier='1',
+            device_group_enabled='1'
+        )
+        st.log('Device group result: {}'.format(dg))
+        if not dg or not dg.get('device_group_handle'):
+            result['details'] = 'Failed to create device group on existing topology'
+            st.log(result['details'])
+            return result
+        device_group_handle = dg['device_group_handle']
 
-    if not h1 or not h1.get('handle'):
-        result['details'] = 'Failed to configure IXIA interface'
-        st.log(result['details'])
-        return result
+        # 1b. Create ethernet stack on device group
+        eth_args = {
+            'protocol_name': 'BGP IPv4 Ethernet',
+            'protocol_handle': device_group_handle,
+            'mtu': '1500',
+            'src_mac_addr': src_mac,
+            'src_mac_addr_step': '00.00.00.00.00.01',
+        }
+        if vlan_enabled == '1':
+            eth_args['vlan'] = '1'
+            eth_args['vlan_id'] = vlan_id
+            eth_args['vlan_id_step'] = '1'
+            eth_args['vlan_id_count'] = '1'
+        l2_protocol = tg_handle.tg_interface_config(**eth_args)
+        st.log('Ethernet config result: {}'.format(l2_protocol))
+        if not l2_protocol or not l2_protocol.get('ethernet_handle'):
+            result['details'] = 'Failed to create ethernet stack on device group'
+            st.log(result['details'])
+            return result
+        ethernet_handle = l2_protocol['ethernet_handle']
 
-    interface_handle = h1['handle']
+        # 1c. Create IPv4 stack on ethernet
+        l3_protocol = tg_handle.tg_interface_config(
+            protocol_name='BGP IPv4 Stack',
+            protocol_handle=ethernet_handle,
+            ipv4_resolve_gateway='1',
+            gateway=gateway,
+            gateway_step='0.0.0.0',
+            intf_ip_addr=ixia_ip,
+            intf_ip_addr_step='0.0.0.1'
+        )
+        st.log('IPv4 config result: {}'.format(l3_protocol))
+        if not l3_protocol or not l3_protocol.get('ipv4_handle'):
+            result['details'] = 'Failed to create IPv4 stack on ethernet'
+            st.log(result['details'])
+            return result
+        interface_handle = l3_protocol['ipv4_handle']
+    else:
+        # No existing topology — create fresh via tg_interface_config(port_handle=...)
+        intf_args = {
+            'port_handle': port_handle,
+            'mode': 'config',
+            'intf_ip_addr': ixia_ip,
+            'gateway': gateway,
+            'netmask': netmask,
+            'src_mac_addr': src_mac,
+            'arp_send_req': '1',
+        }
+        if vlan_enabled == '1':
+            intf_args['vlan'] = '1'
+            intf_args['vlan_id'] = vlan_id
+            intf_args['vlan_id_count'] = '1'
+            intf_args['vlan_id_step'] = '1'
+
+        h1 = tg_handle.tg_interface_config(**intf_args)
+        st.log('Interface config result: {}'.format(h1))
+
+        if not h1 or not h1.get('handle'):
+            result['details'] = 'Failed to configure IXIA interface'
+            st.log(result['details'])
+            return result
+        interface_handle = h1['handle']
+
     result['interface_handle'] = interface_handle
     st.log('IXIA interface handle: {}'.format(interface_handle))
 

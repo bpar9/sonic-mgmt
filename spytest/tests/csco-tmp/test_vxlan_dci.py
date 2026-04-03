@@ -5279,13 +5279,13 @@ class TestVxlanDCIBase():
         summ = ''
         
         # --- Step 1: Get TGEN handles for leaf0_dc1 ---
-        # Use a dedicated IXIA port for BGP that does NOT already have a topology
-        # from create_topology_handles().  Ports in topo_handles already have IXIA
-        # topologies; calling tg_interface_config on them creates a duplicate and
-        # fails with Error 6502: Port already used.
-        # Following the bgp_ixia.txt pattern: use tgapi.get_handle_byname() on an
-        # unused port to get a fresh (tg_handle, port_handle) pair.
-        st.banner('Step 1: Get dedicated IXIA BGP port for leaf0_dc1')
+        # Use a port from topo_handles that already has a topology but NO device
+        # groups (e.g. T1D5P3).  All ports already have topologies created by
+        # create_topology_handles(), so we cannot create a fresh topology (Error
+        # 6502).  Instead we pick the last single (non-PortChannel) port, pass
+        # its existing topology_handle to the helper, and let the helper create
+        # a device group on it — following the create_device_groups() pattern.
+        st.banner('Step 1: Get IXIA BGP port for leaf0_dc1 (existing topology, no device groups)')
         topo_handles = tgen_handles.get('topo_handles', {})
         
         # Find leaf0_dc1 in topo_handles
@@ -5303,41 +5303,26 @@ class TestVxlanDCIBase():
         
         st.log('Using leaf node: {}'.format(leaf_node))
         
-        # Find a TGEN port NOT used by L2VNI traffic (no existing topology).
-        # Collect ports already consumed by create_topology_handles / l2vni_intf_dict.
+        # Pick a non-PortChannel port from topo_handles that has a topology but
+        # no device groups created on it (e.g. T1D5P3).  Use the last single
+        # port in sorted order so we don't collide with the primary L2VNI port.
         leaf_topo_ports = topo_handles.get(leaf_node, {})
-        used_ports = set(leaf_topo_ports.keys())
-        l2vni_intf = test_cfg.get('l2vni_intf_dict', {}).get(leaf_node, [])
-        for entry in l2vni_intf:
-            if isinstance(entry, dict):
-                for p in entry.get('ports', []):
-                    used_ports.add(p)
-            else:
-                used_ports.add(entry)
+        single_ports = sorted(
+            [k for k in leaf_topo_ports if 'portchannel' not in k.lower()])
+        st.log('Available single TGEN ports for {}: {}'.format(leaf_node, single_ports))
         
-        # Enumerate all TGEN ports for this leaf from testbed vars
-        dut_id = vars.dut_ids.get(leaf_node, '')
-        all_tgen_ports = sorted(
-            [k for k, v in vars.items()
-             if isinstance(k, str) and k.startswith('T1' + dut_id + 'P')])
-        st.log('All TGEN ports for {}: {}'.format(leaf_node, all_tgen_ports))
-        st.log('Ports already used by L2VNI topologies: {}'.format(used_ports))
-        
-        bgp_port_name = None
-        for p in all_tgen_ports:
-            if p not in used_ports:
-                bgp_port_name = p
-                break
-        
-        if not bgp_port_name:
-            summ += 'No unused TGEN port available for BGP on {}\n'.format(leaf_node)
+        if not single_ports:
+            summ += 'No single TGEN port available for BGP on {}\n'.format(leaf_node)
             report_result(False, tc_id, summ)
             return
         
-        st.log('Using dedicated BGP port: {} (not used by traffic topologies)'.format(
-            bgp_port_name))
-        tg_handle, port_handle = tgapi.get_handle_byname(bgp_port_name)
-        st.log('BGP port_handle: {}'.format(port_handle))
+        bgp_port_name = single_ports[-1]  # last port, e.g. T1D5P3
+        port_info = leaf_topo_ports[bgp_port_name]
+        tg_handle = port_info['tg_handle']
+        port_handle = port_info['port_handle']
+        topo_handle = port_info.get('topology_handle')
+        st.log('Using BGP port: {} (topology_handle={})'.format(
+            bgp_port_name, topo_handle))
         
         # --- Step 2: Get leaf ASN from BGP underlay info ---
         st.banner('Step 2: Get leaf ASN and configure IXIA BGP session')
@@ -5385,12 +5370,13 @@ class TestVxlanDCIBase():
             ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
-        # Using a dedicated unused port avoids Error 6502 (no existing topology)
-        # and ValueError (tg_interface_config creates a fresh registered topology).
+        # Pass the existing topology_handle so the helper creates a device group
+        # on the existing topology instead of creating a new one (Error 6502).
         st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
+            topology_handle=topo_handle,
             ixia_ip=ixia_ip,
             gateway=ixia_gateway,
             netmask=ixia_netmask,
@@ -5488,9 +5474,9 @@ class TestVxlanDCIBase():
         summ = ''
         
         # --- Step 1: Get TGEN handles for leaf0_dc1 ---
-        # Use a dedicated IXIA port for BGP (same approach as IPv6 test case).
-        # See L3VNI_dci:8 for detailed explanation of Error 6502 fix.
-        st.banner('Step 1: Get dedicated IXIA BGP port for leaf0_dc1')
+        # Same approach as L3VNI_dci:8: use a port with an existing topology but
+        # no device groups (e.g. T1D5P3).  Pass topology_handle to helper.
+        st.banner('Step 1: Get IXIA BGP port for leaf0_dc1 (existing topology, no device groups)')
         topo_handles = tgen_handles.get('topo_handles', {})
         
         # Find leaf0_dc1 in topo_handles
@@ -5508,39 +5494,24 @@ class TestVxlanDCIBase():
         
         st.log('Using leaf node: {}'.format(leaf_node))
         
-        # Find a TGEN port NOT used by L2VNI traffic (no existing topology).
+        # Pick the last non-PortChannel port from topo_handles (has topology, no device groups)
         leaf_topo_ports = topo_handles.get(leaf_node, {})
-        used_ports = set(leaf_topo_ports.keys())
-        l2vni_intf = test_cfg.get('l2vni_intf_dict', {}).get(leaf_node, [])
-        for entry in l2vni_intf:
-            if isinstance(entry, dict):
-                for p in entry.get('ports', []):
-                    used_ports.add(p)
-            else:
-                used_ports.add(entry)
+        single_ports = sorted(
+            [k for k in leaf_topo_ports if 'portchannel' not in k.lower()])
+        st.log('Available single TGEN ports for {}: {}'.format(leaf_node, single_ports))
         
-        dut_id = vars.dut_ids.get(leaf_node, '')
-        all_tgen_ports = sorted(
-            [k for k, v in vars.items()
-             if isinstance(k, str) and k.startswith('T1' + dut_id + 'P')])
-        st.log('All TGEN ports for {}: {}'.format(leaf_node, all_tgen_ports))
-        st.log('Ports already used by L2VNI topologies: {}'.format(used_ports))
-        
-        bgp_port_name = None
-        for p in all_tgen_ports:
-            if p not in used_ports:
-                bgp_port_name = p
-                break
-        
-        if not bgp_port_name:
-            summ += 'No unused TGEN port available for BGP on {}\n'.format(leaf_node)
+        if not single_ports:
+            summ += 'No single TGEN port available for BGP on {}\n'.format(leaf_node)
             report_result(False, tc_id, summ)
             return
         
-        st.log('Using dedicated BGP port: {} (not used by traffic topologies)'.format(
-            bgp_port_name))
-        tg_handle, port_handle = tgapi.get_handle_byname(bgp_port_name)
-        st.log('BGP port_handle: {}'.format(port_handle))
+        bgp_port_name = single_ports[-1]  # last port, e.g. T1D5P3
+        port_info = leaf_topo_ports[bgp_port_name]
+        tg_handle = port_info['tg_handle']
+        port_handle = port_info['port_handle']
+        topo_handle = port_info.get('topology_handle')
+        st.log('Using BGP port: {} (topology_handle={})'.format(
+            bgp_port_name, topo_handle))
         
         # --- Step 2: Get leaf ASN from BGP underlay info ---
         st.banner('Step 2: Get leaf ASN and configure IXIA BGP session')
@@ -5588,12 +5559,13 @@ class TestVxlanDCIBase():
             ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
-        # Using a dedicated unused port avoids Error 6502 (no existing topology)
-        # and ValueError (tg_interface_config creates a fresh registered topology).
+        # Pass the existing topology_handle so the helper creates a device group
+        # on the existing topology instead of creating a new one (Error 6502).
         st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
+            topology_handle=topo_handle,
             ixia_ip=ixia_ip,
             gateway=ixia_gateway,
             netmask=ixia_netmask,

@@ -8211,26 +8211,23 @@ def verify_vrf_vni_after_reload_dci(dut):
 
 def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
-                                     vlan_enabled='0', vlan_id='1',
-                                     topology_handle=None):
+                                     vlan_enabled='0', vlan_id='1'):
     """
     Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
 
-    This follows the bgp_ixia_dut.txt pattern for IXIA API calls:
+    This follows the bgp_ixia.txt pattern for IXIA API calls:
       1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
       2. Configure BGP peer (eBGP session to leaf)
       3. Advertise IPv6 prefixes over BGP
 
-    If topology_handle is provided (from create_topology_handles()), it is
-    registered in tg.py's topo_handle dict before calling tg_interface_config.
-    This allows tg_interface_config to reuse the existing topology instead of
-    creating a new one (which would fail with Error 6502: Port already used).
-    Registration also ensures tg_emulation_bgp_route_config's internal
-    stop_all_protocols can find the topology (avoiding ValueError).
+    IMPORTANT: The caller must provide a port_handle for a dedicated IXIA port
+    that does NOT already have a topology from create_topology_handles().
+    Use tgapi.get_handle_byname() with an unused port to avoid Error 6502
+    (Port already used).  See bgp_ixia.txt for the reference pattern.
 
     Args:
         tg_handle: IXIA traffic generator handle
-        port_handle: IXIA port handle connected to leaf
+        port_handle: IXIA port handle for a dedicated BGP port (no existing topology)
         ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
         gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
         netmask: Subnet mask (e.g. '255.255.255.0')
@@ -8241,7 +8238,6 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             e.g. [{'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5}]
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
-        topology_handle: Existing IXIA topology handle to reuse (default None)
 
     Returns:
         dict: {
@@ -8261,17 +8257,11 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
     }
 
     # Step 1: Configure IXIA interface via tg_interface_config
-    # If topology_handle is provided, register it in tg.py's topo_handle dict
-    # so tg_interface_config reuses the existing topology (avoids Error 6502)
-    # and tg_emulation_bgp_route_config can find it (avoids ValueError).
+    # The port_handle must be for a dedicated port with no existing topology.
+    # tg_interface_config will create a fresh topology on this clean port.
     st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
     st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
         ixia_ip, gateway, netmask, src_mac))
-
-    if topology_handle:
-        st.log('  Registering existing topology_handle={} in topo_handle dict'.format(
-            topology_handle))
-        tg_handle.topo_handle[port_handle] = topology_handle
 
     intf_args = {
         'port_handle': port_handle,
@@ -8359,26 +8349,23 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
 
 def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv4_prefixes,
-                                     vlan_enabled='0', vlan_id='1',
-                                     topology_handle=None):
+                                     vlan_enabled='0', vlan_id='1'):
     """
     Configure IXIA BGP session to advertise IPv4 prefixes to a DUT leaf node.
 
-    This follows the bgp_ixia_dut.txt pattern for IXIA API calls:
+    This follows the bgp_ixia.txt pattern for IXIA API calls:
       1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
       2. Configure BGP peer (eBGP session to leaf)
       3. Advertise IPv4 prefixes over BGP
 
-    If topology_handle is provided (from create_topology_handles()), it is
-    registered in tg.py's topo_handle dict before calling tg_interface_config.
-    This allows tg_interface_config to reuse the existing topology instead of
-    creating a new one (which would fail with Error 6502: Port already used).
-    Registration also ensures tg_emulation_bgp_route_config's internal
-    stop_all_protocols can find the topology (avoiding ValueError).
+    IMPORTANT: The caller must provide a port_handle for a dedicated IXIA port
+    that does NOT already have a topology from create_topology_handles().
+    Use tgapi.get_handle_byname() with an unused port to avoid Error 6502
+    (Port already used).  See bgp_ixia.txt for the reference pattern.
 
     Args:
         tg_handle: IXIA traffic generator handle
-        port_handle: IXIA port handle connected to leaf
+        port_handle: IXIA port handle for a dedicated BGP port (no existing topology)
         ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
         gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
         netmask: Subnet mask (e.g. '255.255.255.0')
@@ -8389,7 +8376,6 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
             e.g. [{'prefix': '10.1.0.0', 'prefix_len': 24, 'num_routes': 5}]
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
-        topology_handle: Existing IXIA topology handle to reuse (default None)
 
     Returns:
         dict: {
@@ -8409,17 +8395,11 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
     }
 
     # Step 1: Configure IXIA interface via tg_interface_config
-    # If topology_handle is provided, register it in tg.py's topo_handle dict
-    # so tg_interface_config reuses the existing topology (avoids Error 6502)
-    # and tg_emulation_bgp_route_config can find it (avoids ValueError).
+    # The port_handle must be for a dedicated port with no existing topology.
+    # tg_interface_config will create a fresh topology on this clean port.
     st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
     st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
         ixia_ip, gateway, netmask, src_mac))
-
-    if topology_handle:
-        st.log('  Registering existing topology_handle={} in topo_handle dict'.format(
-            topology_handle))
-        tg_handle.topo_handle[port_handle] = topology_handle
 
     intf_args = {
         'port_handle': port_handle,

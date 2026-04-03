@@ -8211,7 +8211,8 @@ def verify_vrf_vni_after_reload_dci(dut):
 
 def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
-                                     vlan_enabled='0', vlan_id='1'):
+                                     vlan_enabled='0', vlan_id='1',
+                                     device_handle=None):
     """
     Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
 
@@ -8233,6 +8234,8 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             e.g. [{'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5}]
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
+        device_handle: Existing IXIA device/topology handle to reuse (avoids
+            'Port already used' Error 6502). If None, creates a new topology.
 
     Returns:
         dict: {
@@ -8251,37 +8254,44 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
         'details': ''
     }
 
-    # Step 1: Configure IXIA interface
-    st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
-    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
-        ixia_ip, gateway, netmask, src_mac))
+    # Step 1: Configure IXIA interface (or reuse existing device handle)
+    if device_handle:
+        st.banner('IXIA BGP: Reusing existing device handle on port {}'.format(port_handle))
+        st.log('  device_handle={}, IXIA IP: {}, Gateway: {}'.format(
+            device_handle, ixia_ip, gateway))
+        interface_handle = device_handle
+    else:
+        st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
+        st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+            ixia_ip, gateway, netmask, src_mac))
 
-    intf_args = {
-        'port_handle': port_handle,
-        'mode': 'config',
-        'intf_ip_addr': ixia_ip,
-        'gateway': gateway,
-        'netmask': netmask,
-        'src_mac_addr': src_mac,
-        'arp_send_req': '1',
-    }
-    if vlan_enabled == '1':
-        intf_args['vlan'] = '1'
-        intf_args['vlan_id'] = vlan_id
-        intf_args['vlan_id_count'] = '1'
-        intf_args['vlan_id_step'] = '1'
+        intf_args = {
+            'port_handle': port_handle,
+            'mode': 'config',
+            'intf_ip_addr': ixia_ip,
+            'gateway': gateway,
+            'netmask': netmask,
+            'src_mac_addr': src_mac,
+            'arp_send_req': '1',
+        }
+        if vlan_enabled == '1':
+            intf_args['vlan'] = '1'
+            intf_args['vlan_id'] = vlan_id
+            intf_args['vlan_id_count'] = '1'
+            intf_args['vlan_id_step'] = '1'
 
-    h1 = tg_handle.tg_interface_config(**intf_args)
-    st.log('Interface config result: {}'.format(h1))
+        h1 = tg_handle.tg_interface_config(**intf_args)
+        st.log('Interface config result: {}'.format(h1))
 
-    if not h1 or not h1.get('handle'):
-        result['details'] = 'Failed to configure IXIA interface'
-        st.log(result['details'])
-        return result
+        if not h1 or not h1.get('handle'):
+            result['details'] = 'Failed to configure IXIA interface'
+            st.log(result['details'])
+            return result
 
-    interface_handle = h1['handle']
+        interface_handle = h1['handle']
+
     result['interface_handle'] = interface_handle
-    st.log('IXIA interface configured: handle={}'.format(interface_handle))
+    st.log('IXIA interface handle: {}'.format(interface_handle))
 
     # Step 2: Configure BGP peer
     st.banner('IXIA BGP: Configuring BGP peer (local_as={}, remote_as={})'.format(
@@ -8308,14 +8318,15 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
     st.log('BGP peer configured: handle={}'.format(bgp_handle))
 
     # Step 3: Advertise IPv6 prefixes
+    # Note: For IPv6, do NOT pass prefix_length — it is not a valid attribute
+    # for tg_emulation_bgp_route_config.  Only ip_version and prefix are needed
+    # (consistent with existing spytest usage in test_crm.py, test_ip.py, etc.).
     st.banner('IXIA BGP: Advertising {} IPv6 prefix group(s)'.format(len(ipv6_prefixes)))
 
     for idx, prefix_cfg in enumerate(ipv6_prefixes):
         prefix = prefix_cfg['prefix']
         prefix_len = prefix_cfg.get('prefix_len', 64)
         num_routes = prefix_cfg.get('num_routes', 1)
-        # Convert prefix_len to IPv6 netmask representation
-        # For BGP route config, use prefix_length parameter
         st.log('  Prefix group {}: {} prefixes starting from {}/{}'.format(
             idx + 1, num_routes, prefix, prefix_len))
 
@@ -8325,8 +8336,6 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             ip_version='6',
             num_routes=str(num_routes),
             prefix=prefix,
-            prefix_length=str(prefix_len),
-            prefix_step=1,
             as_path='as_seq:1'
         )
         st.log('Route config result: {}'.format(route_result))
@@ -8343,7 +8352,8 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
 
 def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv4_prefixes,
-                                     vlan_enabled='0', vlan_id='1'):
+                                     vlan_enabled='0', vlan_id='1',
+                                     device_handle=None):
     """
     Configure IXIA BGP session to advertise IPv4 prefixes to a DUT leaf node.
 
@@ -8365,6 +8375,8 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
             e.g. [{'prefix': '10.1.0.0', 'prefix_len': 24, 'num_routes': 5}]
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
+        device_handle: Existing IXIA device/topology handle to reuse (avoids
+            'Port already used' Error 6502). If None, creates a new topology.
 
     Returns:
         dict: {
@@ -8383,37 +8395,44 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
         'details': ''
     }
 
-    # Step 1: Configure IXIA interface
-    st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
-    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
-        ixia_ip, gateway, netmask, src_mac))
+    # Step 1: Configure IXIA interface (or reuse existing device handle)
+    if device_handle:
+        st.banner('IXIA BGP: Reusing existing device handle on port {}'.format(port_handle))
+        st.log('  device_handle={}, IXIA IP: {}, Gateway: {}'.format(
+            device_handle, ixia_ip, gateway))
+        interface_handle = device_handle
+    else:
+        st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
+        st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+            ixia_ip, gateway, netmask, src_mac))
 
-    intf_args = {
-        'port_handle': port_handle,
-        'mode': 'config',
-        'intf_ip_addr': ixia_ip,
-        'gateway': gateway,
-        'netmask': netmask,
-        'src_mac_addr': src_mac,
-        'arp_send_req': '1',
-    }
-    if vlan_enabled == '1':
-        intf_args['vlan'] = '1'
-        intf_args['vlan_id'] = vlan_id
-        intf_args['vlan_id_count'] = '1'
-        intf_args['vlan_id_step'] = '1'
+        intf_args = {
+            'port_handle': port_handle,
+            'mode': 'config',
+            'intf_ip_addr': ixia_ip,
+            'gateway': gateway,
+            'netmask': netmask,
+            'src_mac_addr': src_mac,
+            'arp_send_req': '1',
+        }
+        if vlan_enabled == '1':
+            intf_args['vlan'] = '1'
+            intf_args['vlan_id'] = vlan_id
+            intf_args['vlan_id_count'] = '1'
+            intf_args['vlan_id_step'] = '1'
 
-    h1 = tg_handle.tg_interface_config(**intf_args)
-    st.log('Interface config result: {}'.format(h1))
+        h1 = tg_handle.tg_interface_config(**intf_args)
+        st.log('Interface config result: {}'.format(h1))
 
-    if not h1 or not h1.get('handle'):
-        result['details'] = 'Failed to configure IXIA interface'
-        st.log(result['details'])
-        return result
+        if not h1 or not h1.get('handle'):
+            result['details'] = 'Failed to configure IXIA interface'
+            st.log(result['details'])
+            return result
 
-    interface_handle = h1['handle']
+        interface_handle = h1['handle']
+
     result['interface_handle'] = interface_handle
-    st.log('IXIA interface configured: handle={}'.format(interface_handle))
+    st.log('IXIA interface handle: {}'.format(interface_handle))
 
     # Step 2: Configure BGP peer
     st.banner('IXIA BGP: Configuring BGP peer (local_as={}, remote_as={})'.format(
@@ -8470,6 +8489,60 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
         len(ipv4_prefixes))
     st.log(result['details'])
     return result
+
+
+def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24'):
+    """
+    Configure DUT-side VLAN, VRF binding, and SVI IP address for IXIA peer.
+
+    Creates the L3 interface on the DUT leaf so the IXIA BGP peer can reach
+    the gateway.  SONiC CLI commands:
+        config vlan add <vlan_id>
+        config interface vrf bind Vlan<vlan_id> <vrf_name>
+        config interface ip add Vlan<vlan_id> <svi_ip>/<svi_mask>
+
+    Args:
+        dut: DUT node name (e.g. leaf0_dc1)
+        vlan_id: VLAN ID to create (e.g. '99')
+        vrf_name: VRF to bind the VLAN SVI to (e.g. 'Vrf101')
+        svi_ip: IP address for the SVI (e.g. '80.99.0.1')
+        svi_mask: Prefix length (default '24')
+    """
+    st.banner('DUT L3 INTF: Configuring Vlan{} vrf={} ip={}/{} on {}'.format(
+        vlan_id, vrf_name, svi_ip, svi_mask, dut))
+    cmds = [
+        'config vlan add {}'.format(vlan_id),
+        'config interface vrf bind Vlan{} {}'.format(vlan_id, vrf_name),
+        'config interface ip add Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
+    ]
+    for cmd in cmds:
+        st.config(dut, cmd, skip_error_check=True)
+        st.log('  Applied: {}'.format(cmd))
+    st.log('DUT L3 interface Vlan{} configured on {}'.format(vlan_id, dut))
+
+
+def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
+                            svi_ip='80.99.0.1', svi_mask='24'):
+    """
+    Remove DUT-side VLAN/VRF/SVI configuration for IXIA peer (cleanup).
+
+    Args:
+        dut: DUT node name
+        vlan_id: VLAN ID to remove
+        vrf_name: VRF name (default 'Vrf101')
+        svi_ip: SVI IP address to remove (default '80.99.0.1')
+        svi_mask: Prefix length (default '24')
+    """
+    st.banner('DUT L3 INTF: Removing Vlan{} on {}'.format(vlan_id, dut))
+    cmds = [
+        'config interface ip remove Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
+        'config interface vrf unbind Vlan{}'.format(vlan_id),
+        'config vlan del {}'.format(vlan_id),
+    ]
+    for cmd in cmds:
+        st.config(dut, cmd, skip_error_check=True)
+        st.log('  Applied: {}'.format(cmd))
+    st.log('DUT L3 interface Vlan{} removed from {}'.format(vlan_id, dut))
 
 
 def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip, vrf_name='Vrf101'):

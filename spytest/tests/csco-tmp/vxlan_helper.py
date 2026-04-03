@@ -8211,8 +8211,7 @@ def verify_vrf_vni_after_reload_dci(dut):
 
 def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
-                                     vlan_enabled='0', vlan_id='1',
-                                     device_handle=None):
+                                     vlan_enabled='0', vlan_id='1'):
     """
     Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
 
@@ -8220,6 +8219,12 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
       1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
       2. Configure BGP peer (eBGP session to leaf)
       3. Advertise IPv6 prefixes over BGP
+
+    Note: Always creates a new topology via tg_interface_config so that the
+    topology is registered in tg.py's topo_handle dict.  Do NOT pass a bare
+    topology_handle from create_topology_handles() — those are not registered
+    and will cause ValueError in tg_emulation_bgp_route_config's internal
+    stop_all_protocols lookup.
 
     Args:
         tg_handle: IXIA traffic generator handle
@@ -8234,8 +8239,6 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             e.g. [{'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5}]
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
-        device_handle: Existing IXIA device/topology handle to reuse (avoids
-            'Port already used' Error 6502). If None, creates a new topology.
 
     Returns:
         dict: {
@@ -8254,42 +8257,37 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
         'details': ''
     }
 
-    # Step 1: Configure IXIA interface (or reuse existing device handle)
-    if device_handle:
-        st.banner('IXIA BGP: Reusing existing device handle on port {}'.format(port_handle))
-        st.log('  device_handle={}, IXIA IP: {}, Gateway: {}'.format(
-            device_handle, ixia_ip, gateway))
-        interface_handle = device_handle
-    else:
-        st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
-        st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
-            ixia_ip, gateway, netmask, src_mac))
+    # Step 1: Configure IXIA interface via tg_interface_config
+    # This creates a new topology registered in tg.py's topo_handle dict,
+    # which is required for tg_emulation_bgp_route_config to work.
+    st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
+    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+        ixia_ip, gateway, netmask, src_mac))
 
-        intf_args = {
-            'port_handle': port_handle,
-            'mode': 'config',
-            'intf_ip_addr': ixia_ip,
-            'gateway': gateway,
-            'netmask': netmask,
-            'src_mac_addr': src_mac,
-            'arp_send_req': '1',
-        }
-        if vlan_enabled == '1':
-            intf_args['vlan'] = '1'
-            intf_args['vlan_id'] = vlan_id
-            intf_args['vlan_id_count'] = '1'
-            intf_args['vlan_id_step'] = '1'
+    intf_args = {
+        'port_handle': port_handle,
+        'mode': 'config',
+        'intf_ip_addr': ixia_ip,
+        'gateway': gateway,
+        'netmask': netmask,
+        'src_mac_addr': src_mac,
+        'arp_send_req': '1',
+    }
+    if vlan_enabled == '1':
+        intf_args['vlan'] = '1'
+        intf_args['vlan_id'] = vlan_id
+        intf_args['vlan_id_count'] = '1'
+        intf_args['vlan_id_step'] = '1'
 
-        h1 = tg_handle.tg_interface_config(**intf_args)
-        st.log('Interface config result: {}'.format(h1))
+    h1 = tg_handle.tg_interface_config(**intf_args)
+    st.log('Interface config result: {}'.format(h1))
 
-        if not h1 or not h1.get('handle'):
-            result['details'] = 'Failed to configure IXIA interface'
-            st.log(result['details'])
-            return result
+    if not h1 or not h1.get('handle'):
+        result['details'] = 'Failed to configure IXIA interface'
+        st.log(result['details'])
+        return result
 
-        interface_handle = h1['handle']
-
+    interface_handle = h1['handle']
     result['interface_handle'] = interface_handle
     st.log('IXIA interface handle: {}'.format(interface_handle))
 
@@ -8352,8 +8350,7 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
 
 def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv4_prefixes,
-                                     vlan_enabled='0', vlan_id='1',
-                                     device_handle=None):
+                                     vlan_enabled='0', vlan_id='1'):
     """
     Configure IXIA BGP session to advertise IPv4 prefixes to a DUT leaf node.
 
@@ -8361,6 +8358,12 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
       1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
       2. Configure BGP peer (eBGP session to leaf)
       3. Advertise IPv4 prefixes over BGP
+
+    Note: Always creates a new topology via tg_interface_config so that the
+    topology is registered in tg.py's topo_handle dict.  Do NOT pass a bare
+    topology_handle from create_topology_handles() — those are not registered
+    and will cause ValueError in tg_emulation_bgp_route_config's internal
+    stop_all_protocols lookup.
 
     Args:
         tg_handle: IXIA traffic generator handle
@@ -8375,8 +8378,6 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
             e.g. [{'prefix': '10.1.0.0', 'prefix_len': 24, 'num_routes': 5}]
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
-        device_handle: Existing IXIA device/topology handle to reuse (avoids
-            'Port already used' Error 6502). If None, creates a new topology.
 
     Returns:
         dict: {
@@ -8395,42 +8396,37 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
         'details': ''
     }
 
-    # Step 1: Configure IXIA interface (or reuse existing device handle)
-    if device_handle:
-        st.banner('IXIA BGP: Reusing existing device handle on port {}'.format(port_handle))
-        st.log('  device_handle={}, IXIA IP: {}, Gateway: {}'.format(
-            device_handle, ixia_ip, gateway))
-        interface_handle = device_handle
-    else:
-        st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
-        st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
-            ixia_ip, gateway, netmask, src_mac))
+    # Step 1: Configure IXIA interface via tg_interface_config
+    # This creates a new topology registered in tg.py's topo_handle dict,
+    # which is required for tg_emulation_bgp_route_config to work.
+    st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
+    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+        ixia_ip, gateway, netmask, src_mac))
 
-        intf_args = {
-            'port_handle': port_handle,
-            'mode': 'config',
-            'intf_ip_addr': ixia_ip,
-            'gateway': gateway,
-            'netmask': netmask,
-            'src_mac_addr': src_mac,
-            'arp_send_req': '1',
-        }
-        if vlan_enabled == '1':
-            intf_args['vlan'] = '1'
-            intf_args['vlan_id'] = vlan_id
-            intf_args['vlan_id_count'] = '1'
-            intf_args['vlan_id_step'] = '1'
+    intf_args = {
+        'port_handle': port_handle,
+        'mode': 'config',
+        'intf_ip_addr': ixia_ip,
+        'gateway': gateway,
+        'netmask': netmask,
+        'src_mac_addr': src_mac,
+        'arp_send_req': '1',
+    }
+    if vlan_enabled == '1':
+        intf_args['vlan'] = '1'
+        intf_args['vlan_id'] = vlan_id
+        intf_args['vlan_id_count'] = '1'
+        intf_args['vlan_id_step'] = '1'
 
-        h1 = tg_handle.tg_interface_config(**intf_args)
-        st.log('Interface config result: {}'.format(h1))
+    h1 = tg_handle.tg_interface_config(**intf_args)
+    st.log('Interface config result: {}'.format(h1))
 
-        if not h1 or not h1.get('handle'):
-            result['details'] = 'Failed to configure IXIA interface'
-            st.log(result['details'])
-            return result
+    if not h1 or not h1.get('handle'):
+        result['details'] = 'Failed to configure IXIA interface'
+        st.log(result['details'])
+        return result
 
-        interface_handle = h1['handle']
-
+    interface_handle = h1['handle']
     result['interface_handle'] = interface_handle
     st.log('IXIA interface handle: {}'.format(interface_handle))
 

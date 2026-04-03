@@ -5350,11 +5350,13 @@ class TestVxlanDCIBase():
             ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
-        # Reuse the existing IXIA device handle from topo_handles to avoid
-        # 'Port already used' error (Error 6502).  We pass the device_handle
-        # so the helper skips topology_config / interface_config entirely.
+        # Do NOT pass device_handle (topology_handle) here.  The bare topology
+        # handle from create_topology_handles() is not registered in tg.py's
+        # topo_handle dict, so tg_emulation_bgp_route_config's internal
+        # stop_all_protocols lookup would fail with ValueError.  Instead let
+        # the helper call tg_interface_config which creates a fresh, properly
+        # registered topology+deviceGroup stack for the BGP session.
         st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
-        device_handle = leaf_ports[port_key].get('topology_handle')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
@@ -5364,8 +5366,7 @@ class TestVxlanDCIBase():
             src_mac=ixia_mac,
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
-            ipv6_prefixes=ipv6_prefixes,
-            device_handle=device_handle
+            ipv6_prefixes=ipv6_prefixes
         )
         
         if not ixia_result['result']:
@@ -5527,10 +5528,10 @@ class TestVxlanDCIBase():
             ixia_ip=ixia_ip, vrf_name='Vrf101')
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
-        # Reuse the existing IXIA device handle from topo_handles to avoid
-        # 'Port already used' error (Error 6502).
+        # Do NOT pass device_handle (topology_handle) here.  See IPv6 test
+        # case comment for details on why the bare topology_handle cannot be
+        # reused for BGP route config.
         st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
-        device_handle = leaf_ports[port_key].get('topology_handle')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
@@ -5540,8 +5541,7 @@ class TestVxlanDCIBase():
             src_mac=ixia_mac,
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
-            ipv4_prefixes=ipv4_prefixes,
-            device_handle=device_handle
+            ipv4_prefixes=ipv4_prefixes
         )
         
         if not ixia_result['result']:

@@ -5383,7 +5383,9 @@ class TestVxlanDCIBase():
             src_mac=ixia_mac,
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
-            ipv6_prefixes=ipv6_prefixes
+            ipv6_prefixes=ipv6_prefixes,
+            vlan_enabled='1',
+            vlan_id='99'
         )
         
         if not ixia_result['result']:
@@ -5572,7 +5574,9 @@ class TestVxlanDCIBase():
             src_mac=ixia_mac,
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
-            ipv4_prefixes=ipv4_prefixes
+            ipv4_prefixes=ipv4_prefixes,
+            vlan_enabled='1',
+            vlan_id='99'
         )
         
         if not ixia_result['result']:

@@ -5324,6 +5324,18 @@ class TestVxlanDCIBase():
         st.log('Using BGP port: {} (topology_handle={})'.format(
             bgp_port_name, topo_handle))
         
+        # Resolve DUT physical interface from TGEN port name.
+        # TGEN port 'T1D<n>P<m>' maps to DUT port key 'D<n>T1P<m>' in vars.
+        m = re.match(r'T1(D\d+)(P\d+)', bgp_port_name)
+        dut_intf = None
+        if m:
+            dut_port_key = '{}T1{}'.format(m.group(1), m.group(2))
+            dut_intf = vars.get(dut_port_key)
+            st.log('TGEN port {} -> DUT port key {} -> interface {}'.format(
+                bgp_port_name, dut_port_key, dut_intf))
+        if not dut_intf:
+            st.log('WARNING: Could not resolve DUT interface for TGEN port {}'.format(bgp_port_name))
+        
         # --- Step 2: Get leaf ASN from BGP underlay info ---
         st.banner('Step 2: Get leaf ASN and configure IXIA BGP session')
         bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
@@ -5371,7 +5383,8 @@ class TestVxlanDCIBase():
         vxlan_obj.configure_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
             svi_ip=ixia_gateway, svi_mask='24',
-            svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64')
+            svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64',
+            dut_intf=dut_intf)
         vxlan_obj.configure_dut_bgp_for_ixia(
             dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
             ixia_ip=ixia_ip, vrf_name='Vrf101',
@@ -5405,7 +5418,8 @@ class TestVxlanDCIBase():
             vxlan_obj.remove_dut_bgp_for_ixia(
                 dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
             vxlan_obj.remove_dut_ixia_l3_intf(
-                dut=leaf_node, vlan_id='99', vrf_name='Vrf101')
+                dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                dut_intf=dut_intf)
             report_result(False, tc_id, summ)
             return
         
@@ -5426,6 +5440,18 @@ class TestVxlanDCIBase():
             st.wait(30)
         except Exception as e:
             st.log('Warning: BGP protocol start returned: {}'.format(e))
+        
+        # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
+        st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
+        expected_ipv6_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                  for p in ipv6_prefixes]
+        bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
+            dut=leaf_node, vrf_name='Vrf101', ixia_ip=ixia_ip,
+            expected_prefixes=expected_ipv6_prefixes,
+            ixia_ipv6=ixia_ipv6, addr_family='ipv6')
+        if not bgp_verify['result']:
+            summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
+            result = False
         
         # --- Step 5: Verify Type-5 routes on BGW nodes ---
         st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv6 prefixes on BGW nodes')
@@ -5450,7 +5476,8 @@ class TestVxlanDCIBase():
             ixia_ipv6=ixia_ipv6)
         vxlan_obj.remove_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6)
+            svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
+            dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)
     
@@ -5531,6 +5558,18 @@ class TestVxlanDCIBase():
         st.log('Using BGP port: {} (topology_handle={})'.format(
             bgp_port_name, topo_handle))
         
+        # Resolve DUT physical interface from TGEN port name.
+        # TGEN port 'T1D<n>P<m>' maps to DUT port key 'D<n>T1P<m>' in vars.
+        m = re.match(r'T1(D\d+)(P\d+)', bgp_port_name)
+        dut_intf = None
+        if m:
+            dut_port_key = '{}T1{}'.format(m.group(1), m.group(2))
+            dut_intf = vars.get(dut_port_key)
+            st.log('TGEN port {} -> DUT port key {} -> interface {}'.format(
+                bgp_port_name, dut_port_key, dut_intf))
+        if not dut_intf:
+            st.log('WARNING: Could not resolve DUT interface for TGEN port {}'.format(bgp_port_name))
+        
         # --- Step 2: Get leaf ASN from BGP underlay info ---
         st.banner('Step 2: Get leaf ASN and configure IXIA BGP session')
         bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
@@ -5571,7 +5610,8 @@ class TestVxlanDCIBase():
         st.banner('Step 3a: Configure DUT VLAN/VRF/SVI and BGP neighbor for IXIA peer on {}'.format(leaf_node))
         vxlan_obj.configure_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_mask='24')
+            svi_ip=ixia_gateway, svi_mask='24',
+            dut_intf=dut_intf)
         vxlan_obj.configure_dut_bgp_for_ixia(
             dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
             ixia_ip=ixia_ip, vrf_name='Vrf101')
@@ -5601,7 +5641,8 @@ class TestVxlanDCIBase():
             vxlan_obj.remove_dut_bgp_for_ixia(
                 dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
             vxlan_obj.remove_dut_ixia_l3_intf(
-                dut=leaf_node, vlan_id='99', vrf_name='Vrf101')
+                dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                dut_intf=dut_intf)
             report_result(False, tc_id, summ)
             return
         
@@ -5622,6 +5663,18 @@ class TestVxlanDCIBase():
             st.wait(30)
         except Exception as e:
             st.log('Warning: BGP protocol start returned: {}'.format(e))
+        
+        # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
+        st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
+        expected_ipv4_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                  for p in ipv4_prefixes]
+        bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
+            dut=leaf_node, vrf_name='Vrf101', ixia_ip=ixia_ip,
+            expected_prefixes=expected_ipv4_prefixes,
+            addr_family='ipv4')
+        if not bgp_verify['result']:
+            summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
+            result = False
         
         # --- Step 5: Verify Type-5 routes on BGW nodes ---
         st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes')
@@ -5645,7 +5698,8 @@ class TestVxlanDCIBase():
             dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
         vxlan_obj.remove_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway)
+            svi_ip=ixia_gateway,
+            dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)
     

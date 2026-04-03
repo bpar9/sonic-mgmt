@@ -8674,13 +8674,15 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
 
 
 def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24',
-                               svi_ipv6=None, svi_ipv6_mask='64'):
+                               svi_ipv6=None, svi_ipv6_mask='64',
+                               dut_intf=None):
     """
-    Configure DUT-side VLAN, VRF binding, and SVI IP address for IXIA peer.
+    Configure DUT-side VLAN, VRF binding, SVI IP, and VLAN member for IXIA peer.
 
     Creates the L3 interface on the DUT leaf so the IXIA BGP peer can reach
     the gateway.  SONiC CLI commands:
         config vlan add <vlan_id>
+        config vlan member add <vlan_id> <dut_intf>       (if dut_intf provided)
         config interface vrf bind Vlan<vlan_id> <vrf_name>
         config interface ip add Vlan<vlan_id> <svi_ip>/<svi_mask>
         config interface ip add Vlan<vlan_id> <svi_ipv6>/<svi_ipv6_mask>  (if svi_ipv6 provided)
@@ -8693,14 +8695,20 @@ def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24',
         svi_mask: IPv4 prefix length (default '24')
         svi_ipv6: IPv6 address for the SVI (e.g. '2099::1'), None to skip
         svi_ipv6_mask: IPv6 prefix length (default '64')
+        dut_intf: DUT physical interface to add as VLAN member (e.g. 'Ethernet224'), None to skip
     """
     st.banner('DUT L3 INTF: Configuring Vlan{} vrf={} ip={}/{} on {}'.format(
         vlan_id, vrf_name, svi_ip, svi_mask, dut))
     cmds = [
         'config vlan add {}'.format(vlan_id),
+    ]
+    if dut_intf:
+        cmds.append('config vlan member add {} {}'.format(vlan_id, dut_intf))
+        st.log('DUT L3 INTF: Adding {} as member of Vlan{}'.format(dut_intf, vlan_id))
+    cmds.extend([
         'config interface vrf bind Vlan{} {}'.format(vlan_id, vrf_name),
         'config interface ip add Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
-    ]
+    ])
     if svi_ipv6:
         cmds.append('config interface ip add Vlan{} {}/{}'.format(
             vlan_id, svi_ipv6, svi_ipv6_mask))
@@ -8712,7 +8720,8 @@ def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24',
 
 def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
                             svi_ip='80.99.0.1', svi_mask='24',
-                            svi_ipv6=None, svi_ipv6_mask='64'):
+                            svi_ipv6=None, svi_ipv6_mask='64',
+                            dut_intf=None):
     """
     Remove DUT-side VLAN/VRF/SVI configuration for IXIA peer (cleanup).
 
@@ -8724,6 +8733,7 @@ def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
         svi_mask: IPv4 prefix length (default '24')
         svi_ipv6: SVI IPv6 address to remove (None to skip)
         svi_ipv6_mask: IPv6 prefix length (default '64')
+        dut_intf: DUT physical interface to remove from VLAN (e.g. 'Ethernet224'), None to skip
     """
     st.banner('DUT L3 INTF: Removing Vlan{} on {}'.format(vlan_id, dut))
     cmds = []
@@ -8733,8 +8743,10 @@ def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
     cmds.extend([
         'config interface ip remove Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
         'config interface vrf unbind Vlan{}'.format(vlan_id),
-        'config vlan del {}'.format(vlan_id),
     ])
+    if dut_intf:
+        cmds.append('config vlan member del {} {}'.format(vlan_id, dut_intf))
+    cmds.append('config vlan del {}'.format(vlan_id))
     for cmd in cmds:
         st.config(dut, cmd, skip_error_check=True)
         st.log('  Applied: {}'.format(cmd))
@@ -8813,6 +8825,96 @@ def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip, vrf_name='Vrf101',
     cmd += 'exit\n'
     st.config(dut, cmd, type='vtysh', skip_error_check=True)
     st.log('DUT BGP neighbor {} removed from {} vrf {}'.format(ixia_ip, dut, vrf_name))
+
+
+def verify_dut_bgp_ixia_session(dut, vrf_name, ixia_ip, expected_prefixes=None,
+                                ixia_ipv6=None, addr_family='ipv4'):
+    """
+    Verify BGP neighborship between DUT and IXIA, and check received routes.
+
+    Verifies:
+      1) BGP neighbor state is 'Established' (via 'show bgp vrf <vrf> summary')
+      2) Routes received from IXIA match expected_prefixes (via 'show bgp vrf <vrf> <afi>')
+
+    Args:
+        dut: DUT node name (e.g. leaf0_dc1)
+        vrf_name: VRF name (e.g. 'Vrf101')
+        ixia_ip: IXIA IPv4 neighbor address (e.g. '80.99.0.100')
+        expected_prefixes: list of prefix strings to verify (e.g. ['10.100.0.0/24'])
+        ixia_ipv6: IXIA IPv6 neighbor address (e.g. '2099::100'), None if IPv4-only
+        addr_family: 'ipv4' or 'ipv6' — address family for route verification
+    Returns:
+        dict: {'result': True/False, 'details': str}
+    """
+    st.banner('VERIFY BGP IXIA: Checking neighborship and routes on {} vrf {}'.format(
+        dut, vrf_name))
+    details = ''
+    result = True
+
+    # --- Check 1: BGP neighbor state ---
+    # Use the IPv6 neighbor if provided (IPv6 peering), else IPv4
+    neighbor_ip = ixia_ipv6 if ixia_ipv6 else ixia_ip
+    cmd = 'show bgp vrf {} summary'.format(vrf_name)
+    st.log('Running: {} on {}'.format(cmd, dut))
+    output = st.show(dut, cmd, type='vtysh', skip_error_check=True)
+    st.log('BGP summary output: {}'.format(output))
+
+    # output may be a list of dicts (parsed) or raw string
+    neighbor_established = False
+    if isinstance(output, list):
+        for entry in output:
+            nbr = entry.get('neighbor', entry.get('neighbourip', ''))
+            state = str(entry.get('state', entry.get('bgpstatus', '')))
+            if nbr == neighbor_ip:
+                st.log('Found neighbor {} with state: {}'.format(nbr, state))
+                # State is 'Established' or a numeric PfxRcd count (means established)
+                if 'established' in state.lower() or state.isdigit():
+                    neighbor_established = True
+                break
+    else:
+        # Raw string output — search for neighbor IP followed by Established or PfxRcd
+        raw = str(output)
+        if neighbor_ip in raw and ('Established' in raw or 'established' in raw):
+            neighbor_established = True
+        # Also check if neighbor IP appears with a numeric prefix count (means up)
+        pattern = r'{}.*?(\d+)\s*$'.format(re.escape(neighbor_ip))
+        if re.search(pattern, raw, re.MULTILINE):
+            neighbor_established = True
+
+    if neighbor_established:
+        st.log('BGP neighbor {} is Established on {} vrf {}'.format(
+            neighbor_ip, dut, vrf_name))
+    else:
+        details += 'BGP neighbor {} NOT Established on {} vrf {}\n'.format(
+            neighbor_ip, dut, vrf_name)
+        result = False
+
+    # --- Check 2: Verify routes received from IXIA ---
+    if expected_prefixes:
+        if addr_family == 'ipv6':
+            route_cmd = 'show bgp vrf {} ipv6 unicast'.format(vrf_name)
+        else:
+            route_cmd = 'show bgp vrf {} ipv4 unicast'.format(vrf_name)
+        st.log('Running: {} on {}'.format(route_cmd, dut))
+        route_output = st.show(dut, route_cmd, type='vtysh', skip_error_check=True)
+        route_str = str(route_output)
+        st.log('Route output (first 2000 chars): {}'.format(route_str[:2000]))
+
+        for prefix in expected_prefixes:
+            # Strip prefix length for flexible matching (e.g. '10.100.0.0' from '10.100.0.0/24')
+            prefix_network = prefix.split('/')[0]
+            if prefix_network in route_str:
+                st.log('Route {} found in {} on {}'.format(prefix, addr_family, dut))
+            else:
+                details += 'Route {} NOT found in {} table on {} vrf {}\n'.format(
+                    prefix, addr_family, dut, vrf_name)
+                result = False
+
+    if result:
+        st.log('VERIFY BGP IXIA: All checks passed on {} vrf {}'.format(dut, vrf_name))
+    else:
+        st.log('VERIFY BGP IXIA: FAILED - {}'.format(details))
+    return {'result': result, 'details': details}
 
 
 def _prefix_len_to_ipv4_netmask(prefix_len):

@@ -5339,12 +5339,15 @@ class TestVxlanDCIBase():
         
         st.log('Leaf {} ASN: {}'.format(leaf_node, leaf_asn))
         
-        # IXIA BGP parameters
+        # IXIA BGP parameters — IPv4 for connectivity, IPv6 for BGP peering
         ixia_asn = '65299'
         ixia_ip = '80.99.0.100'
         ixia_gateway = '80.99.0.1'
         ixia_netmask = '255.255.255.0'
         ixia_mac = '00:00:AA:BB:CC:08'
+        # IPv6 addresses for Vlan99 SVI and IXIA peer (IPv6 BGP session)
+        ixia_ipv6 = '2099::100'
+        ixia_gateway_ipv6 = '2099::1'
         
         # IPv6 prefixes to advertise from IXIA
         ipv6_prefixes = [
@@ -5357,21 +5360,27 @@ class TestVxlanDCIBase():
         
         st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
             ixia_asn, leaf_asn, ixia_ip, ixia_gateway))
+        st.log('IXIA BGP IPv6: ipv6={}, gw_ipv6={}'.format(ixia_ipv6, ixia_gateway_ipv6))
         st.log('IPv6 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv6_prefixes]))
         
         # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
-        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI and BGP neighbor for IXIA peer on {}'.format(leaf_node))
+        # Configure both IPv4 and IPv6 addresses on Vlan99 SVI, and both
+        # IPv4 + IPv6 BGP neighbors so IXIA can peer over IPv6.
+        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (v4+v6) and BGP neighbor for IXIA peer on {}'.format(leaf_node))
         vxlan_obj.configure_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_mask='24')
+            svi_ip=ixia_gateway, svi_mask='24',
+            svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64')
         vxlan_obj.configure_dut_bgp_for_ixia(
             dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
-            ixia_ip=ixia_ip, vrf_name='Vrf101')
+            ixia_ip=ixia_ip, vrf_name='Vrf101',
+            ixia_ipv6=ixia_ipv6)
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
         # Pass the existing topology_handle so the helper creates a device group
         # on the existing topology instead of creating a new one (Error 6502).
+        # Pass IPv6 addresses so the helper creates an IPv6 stack and IPv6 BGP peer.
         st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
             tg_handle=tg_handle,
@@ -5385,7 +5394,9 @@ class TestVxlanDCIBase():
             leaf_asn=leaf_asn,
             ipv6_prefixes=ipv6_prefixes,
             vlan_enabled='1',
-            vlan_id='99'
+            vlan_id='99',
+            ixia_ipv6=ixia_ipv6,
+            gateway_ipv6=ixia_gateway_ipv6
         )
         
         if not ixia_result['result']:
@@ -5405,6 +5416,9 @@ class TestVxlanDCIBase():
         
         # --- Step 4: Start BGP protocol on IXIA ---
         st.banner('Step 4: Start BGP protocol on IXIA')
+        st.log('Applying changes for IXIA before starting BGP')
+        tg_handle.tg_test_control(action='apply_on_the_fly_changes')
+        st.wait(10)
         try:
             tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
             st.log('BGP protocol started on IXIA')
@@ -5418,7 +5432,7 @@ class TestVxlanDCIBase():
         bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
         st.log('BGW nodes to verify: {}'.format(bgw_nodes))
         
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5']):
+        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
             summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv6 prefix advertisement\n'
             result = False
         
@@ -5432,9 +5446,11 @@ class TestVxlanDCIBase():
         
         vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
         vxlan_obj.remove_dut_bgp_for_ixia(
-            dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
+            dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101',
+            ixia_ipv6=ixia_ipv6)
         vxlan_obj.remove_dut_ixia_l3_intf(
-            dut=leaf_node, vlan_id='99', vrf_name='Vrf101')
+            dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+            svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6)
         
         report_result(result, tc_id, summ)
     
@@ -5596,6 +5612,9 @@ class TestVxlanDCIBase():
         
         # --- Step 4: Start BGP protocol on IXIA ---
         st.banner('Step 4: Start BGP protocol on IXIA')
+        st.log('Applying changes for IXIA before starting BGP')
+        tg_handle.tg_test_control(action='apply_on_the_fly_changes')
+        st.wait(10)
         try:
             tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
             st.log('BGP protocol started on IXIA')
@@ -5609,7 +5628,7 @@ class TestVxlanDCIBase():
         bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
         st.log('BGW nodes to verify: {}'.format(bgw_nodes))
         
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5']):
+        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
             summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
             result = False
         
@@ -5625,7 +5644,8 @@ class TestVxlanDCIBase():
         vxlan_obj.remove_dut_bgp_for_ixia(
             dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
         vxlan_obj.remove_dut_ixia_l3_intf(
-            dut=leaf_node, vlan_id='99', vrf_name='Vrf101')
+            dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+            svi_ip=ixia_gateway)
         
         report_result(result, tc_id, summ)
     

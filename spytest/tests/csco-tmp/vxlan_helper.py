@@ -8212,14 +8212,15 @@ def verify_vrf_vni_after_reload_dci(dut):
 def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
                                      src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
                                      topology_handle=None,
-                                     vlan_enabled='0', vlan_id='1'):
+                                     vlan_enabled='0', vlan_id='1',
+                                     ixia_ipv6=None, gateway_ipv6=None):
     """
     Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
 
     This follows the bgp_ixia.txt pattern for IXIA API calls:
-      1. Configure IXIA interface (IPv4 connectivity to leaf SVI)
-      2. Configure BGP peer (eBGP session to leaf)
-      3. Advertise IPv6 prefixes over BGP
+      1. Configure IXIA interface (IPv4 + IPv6 connectivity to leaf SVI)
+      2. Configure BGP peers (eBGP IPv4 session + IPv6 session if ixia_ipv6 provided)
+      3. Advertise IPv6 prefixes over the IPv6 BGP session (or IPv4 session as fallback)
 
     When topology_handle is provided, the port already has an IXIA topology
     from create_topology_handles() but no device groups.  The function creates
@@ -8230,8 +8231,8 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
     Args:
         tg_handle: IXIA traffic generator handle
         port_handle: IXIA port handle
-        ixia_ip: IXIA interface IPv4 address (e.g. '80.11.0.100')
-        gateway: Leaf SVI gateway IPv4 address (e.g. '80.11.0.1')
+        ixia_ip: IXIA interface IPv4 address (e.g. '80.99.0.100')
+        gateway: Leaf SVI gateway IPv4 address (e.g. '80.99.0.1')
         netmask: Subnet mask (e.g. '255.255.255.0')
         src_mac: IXIA source MAC address (e.g. '00:00:AA:BB:CC:01')
         ixia_asn: IXIA BGP AS number (e.g. '65299')
@@ -8243,12 +8244,18 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             of creating a new topology via tg_interface_config.
         vlan_enabled: '1' to enable VLAN tagging, '0' for untagged (default '0')
         vlan_id: VLAN ID if vlan_enabled='1' (default '1')
+        ixia_ipv6: IXIA interface IPv6 address (e.g. '2099::100').
+            When provided, an IPv6 stack is added on the ethernet and an IPv6
+            BGP peer is created for advertising IPv6 prefixes under IPv6 AF.
+        gateway_ipv6: Leaf SVI gateway IPv6 address (e.g. '2099::1').
+            Required when ixia_ipv6 is provided.
 
     Returns:
         dict: {
             'result': True/False,
-            'interface_handle': IXIA interface handle,
-            'bgp_handle': BGP peer handle,
+            'interface_handle': IXIA IPv4 interface handle,
+            'ipv6_handle': IXIA IPv6 interface handle (if ixia_ipv6 provided),
+            'bgp_handle': BGP peer handle (IPv6 peer if ixia_ipv6, else IPv4 peer),
             'route_handles': list of BGP route handles,
             'details': str summary
         }
@@ -8256,6 +8263,7 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
     result = {
         'result': False,
         'interface_handle': None,
+        'ipv6_handle': None,
         'bgp_handle': None,
         'route_handles': [],
         'details': ''
@@ -8265,11 +8273,13 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
     st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
     st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
         ixia_ip, gateway, netmask, src_mac))
+    if ixia_ipv6:
+        st.log('  IXIA IPv6: {}, Gateway IPv6: {}'.format(ixia_ipv6, gateway_ipv6))
 
     if topology_handle:
         # Port already has an IXIA topology from create_topology_handles() but
         # no device groups.  Create a device group on the existing topology,
-        # then add ethernet + IPv4 stacks — same pattern as create_device_groups().
+        # then add ethernet + IPv4 + IPv6 stacks — same pattern as create_device_groups().
         st.log('Using existing topology_handle: {}'.format(topology_handle))
 
         # Register this topology in tg.py's topo_handle dict so that
@@ -8333,6 +8343,26 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             st.log(result['details'])
             return result
         interface_handle = l3_protocol['ipv4_handle']
+
+        # 1d. Create IPv6 stack on ethernet (if IPv6 peering requested)
+        ipv6_handle = None
+        if ixia_ipv6 and gateway_ipv6:
+            l3v6_protocol = tg_handle.tg_interface_config(
+                protocol_name='BGP IPv6 IPv6 Stack',
+                protocol_handle=ethernet_handle,
+                ipv6_resolve_gateway='1',
+                ipv6_gateway=gateway_ipv6,
+                ipv6_gateway_step='0:0:0:0:0:0:0:0',
+                ipv6_intf_addr=ixia_ipv6,
+                ipv6_intf_addr_step='0:0:0:0:0:0:0:1'
+            )
+            st.log('IPv6 config result: {}'.format(l3v6_protocol))
+            if not l3v6_protocol or not l3v6_protocol.get('ipv6_handle'):
+                result['details'] = 'Failed to create IPv6 stack on ethernet'
+                st.log(result['details'])
+                return result
+            ipv6_handle = l3v6_protocol['ipv6_handle']
+            st.log('IXIA IPv6 handle: {}'.format(ipv6_handle))
     else:
         # No existing topology — create fresh via tg_interface_config(port_handle=...)
         intf_args = {
@@ -8358,23 +8388,40 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             st.log(result['details'])
             return result
         interface_handle = h1['handle']
+        ipv6_handle = None
 
     result['interface_handle'] = interface_handle
+    result['ipv6_handle'] = ipv6_handle
     st.log('IXIA interface handle: {}'.format(interface_handle))
 
     # Step 2: Configure BGP peer
-    st.banner('IXIA BGP: Configuring BGP peer (local_as={}, remote_as={})'.format(
-        ixia_asn, leaf_asn))
-
-    bgp_result = tg_handle.tg_emulation_bgp_config(
-        handle=interface_handle,
-        mode='enable',
-        active_connect_enable='1',
-        local_as=ixia_asn,
-        remote_as=leaf_asn,
-        remote_ip_addr=gateway,
-        enable_4_byte_as='1'
-    )
+    # If IPv6 peering is requested, configure BGP on the IPv6 handle so that
+    # IPv6 prefixes are advertised under the IPv6 address-family.
+    if ipv6_handle:
+        st.banner('IXIA BGP: Configuring IPv6 BGP peer (local_as={}, remote_as={})'.format(
+            ixia_asn, leaf_asn))
+        bgp_result = tg_handle.tg_emulation_bgp_config(
+            handle=ipv6_handle,
+            mode='enable',
+            ip_version='6',
+            active_connect_enable='1',
+            local_as=ixia_asn,
+            remote_as=leaf_asn,
+            remote_ipv6_addr=gateway_ipv6,
+            enable_4_byte_as='1'
+        )
+    else:
+        st.banner('IXIA BGP: Configuring IPv4 BGP peer (local_as={}, remote_as={})'.format(
+            ixia_asn, leaf_asn))
+        bgp_result = tg_handle.tg_emulation_bgp_config(
+            handle=interface_handle,
+            mode='enable',
+            active_connect_enable='1',
+            local_as=ixia_asn,
+            remote_as=leaf_asn,
+            remote_ip_addr=gateway,
+            enable_4_byte_as='1'
+        )
     st.log('BGP config result: {}'.format(bgp_result))
 
     if not bgp_result or not bgp_result.get('handle'):
@@ -8387,9 +8434,6 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
     st.log('BGP peer configured: handle={}'.format(bgp_handle))
 
     # Step 3: Advertise IPv6 prefixes
-    # Note: For IPv6, do NOT pass prefix_length — it is not a valid attribute
-    # for tg_emulation_bgp_route_config.  Only ip_version and prefix are needed
-    # (consistent with existing spytest usage in test_crm.py, test_ip.py, etc.).
     st.banner('IXIA BGP: Advertising {} IPv6 prefix group(s)'.format(len(ipv6_prefixes)))
 
     for idx, prefix_cfg in enumerate(ipv6_prefixes):
@@ -8629,7 +8673,8 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
     return result
 
 
-def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24'):
+def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24',
+                               svi_ipv6=None, svi_ipv6_mask='64'):
     """
     Configure DUT-side VLAN, VRF binding, and SVI IP address for IXIA peer.
 
@@ -8638,13 +8683,16 @@ def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24'):
         config vlan add <vlan_id>
         config interface vrf bind Vlan<vlan_id> <vrf_name>
         config interface ip add Vlan<vlan_id> <svi_ip>/<svi_mask>
+        config interface ip add Vlan<vlan_id> <svi_ipv6>/<svi_ipv6_mask>  (if svi_ipv6 provided)
 
     Args:
         dut: DUT node name (e.g. leaf0_dc1)
         vlan_id: VLAN ID to create (e.g. '99')
         vrf_name: VRF to bind the VLAN SVI to (e.g. 'Vrf101')
-        svi_ip: IP address for the SVI (e.g. '80.99.0.1')
-        svi_mask: Prefix length (default '24')
+        svi_ip: IPv4 address for the SVI (e.g. '80.99.0.1')
+        svi_mask: IPv4 prefix length (default '24')
+        svi_ipv6: IPv6 address for the SVI (e.g. '2099::1'), None to skip
+        svi_ipv6_mask: IPv6 prefix length (default '64')
     """
     st.banner('DUT L3 INTF: Configuring Vlan{} vrf={} ip={}/{} on {}'.format(
         vlan_id, vrf_name, svi_ip, svi_mask, dut))
@@ -8653,6 +8701,9 @@ def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24'):
         'config interface vrf bind Vlan{} {}'.format(vlan_id, vrf_name),
         'config interface ip add Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
     ]
+    if svi_ipv6:
+        cmds.append('config interface ip add Vlan{} {}/{}'.format(
+            vlan_id, svi_ipv6, svi_ipv6_mask))
     for cmd in cmds:
         st.config(dut, cmd, skip_error_check=True)
         st.log('  Applied: {}'.format(cmd))
@@ -8660,7 +8711,8 @@ def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24'):
 
 
 def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
-                            svi_ip='80.99.0.1', svi_mask='24'):
+                            svi_ip='80.99.0.1', svi_mask='24',
+                            svi_ipv6=None, svi_ipv6_mask='64'):
     """
     Remove DUT-side VLAN/VRF/SVI configuration for IXIA peer (cleanup).
 
@@ -8668,36 +8720,46 @@ def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
         dut: DUT node name
         vlan_id: VLAN ID to remove
         vrf_name: VRF name (default 'Vrf101')
-        svi_ip: SVI IP address to remove (default '80.99.0.1')
-        svi_mask: Prefix length (default '24')
+        svi_ip: SVI IPv4 address to remove (default '80.99.0.1')
+        svi_mask: IPv4 prefix length (default '24')
+        svi_ipv6: SVI IPv6 address to remove (None to skip)
+        svi_ipv6_mask: IPv6 prefix length (default '64')
     """
     st.banner('DUT L3 INTF: Removing Vlan{} on {}'.format(vlan_id, dut))
-    cmds = [
+    cmds = []
+    if svi_ipv6:
+        cmds.append('config interface ip remove Vlan{} {}/{}'.format(
+            vlan_id, svi_ipv6, svi_ipv6_mask))
+    cmds.extend([
         'config interface ip remove Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
         'config interface vrf unbind Vlan{}'.format(vlan_id),
         'config vlan del {}'.format(vlan_id),
-    ]
+    ])
     for cmd in cmds:
         st.config(dut, cmd, skip_error_check=True)
         st.log('  Applied: {}'.format(cmd))
     st.log('DUT L3 interface Vlan{} removed from {}'.format(vlan_id, dut))
 
 
-def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip, vrf_name='Vrf101'):
+def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip, vrf_name='Vrf101',
+                               ixia_ipv6=None):
     """
     Configure DUT leaf BGP neighbor to accept IXIA BGP peer.
 
-    Adds an eBGP neighbor under the specified VRF on the DUT leaf node so
-    that the IXIA-initiated BGP session is accepted and routes are imported.
+    Adds an eBGP neighbor (IPv4 and optionally IPv6) under the specified VRF
+    on the DUT leaf node so that the IXIA-initiated BGP session is accepted
+    and routes are imported.
 
     FRR config applied via vtysh:
         router bgp <leaf_asn> vrf <vrf_name>
          neighbor <ixia_ip> remote-as <ixia_asn>
+         neighbor <ixia_ipv6> remote-as <ixia_asn>   (if ixia_ipv6 provided)
          address-family ipv4 unicast
           neighbor <ixia_ip> activate
          exit-address-family
          address-family ipv6 unicast
           neighbor <ixia_ip> activate
+          neighbor <ixia_ipv6> activate              (if ixia_ipv6 provided)
          exit-address-family
 
     Args:
@@ -8706,24 +8768,32 @@ def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip, vrf_name='Vrf10
         ixia_asn: IXIA BGP AS number (e.g. '65299')
         ixia_ip: IXIA interface IPv4 address (e.g. '80.99.0.100')
         vrf_name: VRF under which to configure the neighbor (default 'Vrf101')
+        ixia_ipv6: IXIA interface IPv6 address (e.g. '2099::100'), None to skip
     """
     st.banner('DUT BGP: Configuring neighbor {} (AS {}) on {} vrf {}'.format(
         ixia_ip, ixia_asn, dut, vrf_name))
     cmd = 'router bgp {} vrf {}\n'.format(leaf_asn, vrf_name)
     cmd += 'neighbor {} remote-as {}\n'.format(ixia_ip, ixia_asn)
+    if ixia_ipv6:
+        cmd += 'neighbor {} remote-as {}\n'.format(ixia_ipv6, ixia_asn)
     cmd += 'address-family ipv4 unicast\n'
     cmd += 'neighbor {} activate\n'.format(ixia_ip)
     cmd += 'exit-address-family\n'
     cmd += 'address-family ipv6 unicast\n'
     cmd += 'neighbor {} activate\n'.format(ixia_ip)
+    if ixia_ipv6:
+        cmd += 'neighbor {} activate\n'.format(ixia_ipv6)
     cmd += 'exit-address-family\n'
     cmd += 'end\n'
     cmd += 'exit\n'
     st.config(dut, cmd, type='vtysh', skip_error_check=True)
     st.log('DUT BGP neighbor {} configured on {} vrf {}'.format(ixia_ip, dut, vrf_name))
+    if ixia_ipv6:
+        st.log('DUT BGP IPv6 neighbor {} also configured'.format(ixia_ipv6))
 
 
-def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip, vrf_name='Vrf101'):
+def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip, vrf_name='Vrf101',
+                            ixia_ipv6=None):
     """
     Remove DUT leaf BGP neighbor for IXIA peer (cleanup).
 
@@ -8732,9 +8802,12 @@ def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip, vrf_name='Vrf101'):
         leaf_asn: DUT leaf BGP AS number
         ixia_ip: IXIA interface IPv4 address
         vrf_name: VRF name (default 'Vrf101')
+        ixia_ipv6: IXIA IPv6 address to remove (None to skip)
     """
     st.banner('DUT BGP: Removing neighbor {} on {} vrf {}'.format(ixia_ip, dut, vrf_name))
     cmd = 'router bgp {} vrf {}\n'.format(leaf_asn, vrf_name)
+    if ixia_ipv6:
+        cmd += 'no neighbor {}\n'.format(ixia_ipv6)
     cmd += 'no neighbor {}\n'.format(ixia_ip)
     cmd += 'end\n'
     cmd += 'exit\n'

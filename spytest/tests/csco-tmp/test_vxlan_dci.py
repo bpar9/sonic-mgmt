@@ -5454,6 +5454,8 @@ class TestVxlanDCIBase():
             result = False
         
         # --- Step 5: Verify Type-5 routes on BGW nodes ---
+        # First verify base Type-5 routes (comprehensive check), then verify
+        # the specific IXIA-advertised prefixes appear as Type-5 routes.
         st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv6 prefixes on BGW nodes')
         bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
         st.log('BGW nodes to verify: {}'.format(bgw_nodes))
@@ -5461,6 +5463,18 @@ class TestVxlanDCIBase():
         if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
             summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv6 prefix advertisement\n'
             result = False
+        
+        # Step 5b: Verify IXIA-advertised IPv6 prefixes specifically as Type-5 routes
+        st.banner('Step 5b: Verify IXIA IPv6 prefixes present as Type-5 routes on BGW nodes')
+        ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                            for p in ipv6_prefixes]
+        for bgw_node in bgw_nodes:
+            if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
+                             bgw_node, ixia_prefix_strs, expect_present=True):
+                summ += 'IXIA IPv6 Type-5 routes not found on {}\n'.format(bgw_node)
+                result = False
+            else:
+                st.log('IXIA IPv6 Type-5 routes verified on {}'.format(bgw_node))
         
         # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
         st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
@@ -5677,6 +5691,8 @@ class TestVxlanDCIBase():
             result = False
         
         # --- Step 5: Verify Type-5 routes on BGW nodes ---
+        # First verify base Type-5 routes (comprehensive check), then verify
+        # the specific IXIA-advertised prefixes appear as Type-5 routes.
         st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes')
         bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
         st.log('BGW nodes to verify: {}'.format(bgw_nodes))
@@ -5684,6 +5700,18 @@ class TestVxlanDCIBase():
         if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
             summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
             result = False
+        
+        # Step 5b: Verify IXIA-advertised IPv4 prefixes specifically as Type-5 routes
+        st.banner('Step 5b: Verify IXIA IPv4 prefixes present as Type-5 routes on BGW nodes')
+        ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                            for p in ipv4_prefixes]
+        for bgw_node in bgw_nodes:
+            if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
+                             bgw_node, ixia_prefix_strs, expect_present=True):
+                summ += 'IXIA IPv4 Type-5 routes not found on {}\n'.format(bgw_node)
+                result = False
+            else:
+                st.log('IXIA IPv4 Type-5 routes verified on {}'.format(bgw_node))
         
         # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
         st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
@@ -6266,19 +6294,19 @@ class TestVxlanDCIBase():
         
         Description:
             1) Base profile bring up with L3VNI
-            2) Verify Type-5 routes are advertised on BGW nodes
-            3) Shutdown a VLAN interface (Vlan11) on a leaf node (DC1-L0)
-            4) Verify Type-5 route for the shutdown VLAN is withdrawn
-            5) Bring up the VLAN interface
-            6) Verify Type-5 route is re-advertised
+            2) Verify Type-5 routes are advertised on all nodes
+            3) Remove VLAN member on a leaf node (like test_remove_add_vlan_members)
+            4) Verify Type-5 route and IP route for the VLAN are deleted on all nodes
+            5) Re-add the VLAN member
+            6) Verify Type-5 route and IP route are present again on all nodes
             7) Verify traffic resumes with no drops
             
         Steps:
-            1. Verify base setup and Type-5 routes present
-            2. Shutdown Vlan11 interface on DC1 leaf0
-            3. Wait and verify Type-5 route for VLAN 11 is withdrawn on BGW
-            4. Bring up Vlan11 interface on DC1 leaf0
-            5. Wait and verify Type-5 route for VLAN 11 is re-advertised on BGW
+            1. Verify base setup and Type-5 routes present on all nodes
+            2. Remove VLAN 11 member on DC1 leaf0
+            3. Verify Type-5 route and IP route withdrawn on all nodes
+            4. Re-add VLAN 11 member on DC1 leaf0
+            5. Verify Type-5 route and IP route re-advertised on all nodes
             6. Verify L3VNI traffic still works
         """
         tc_id = "test_base_dci_l3vni_type5_route_withdrawal"
@@ -6289,76 +6317,122 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        # Use first DC1 leaf as the target node, first DC1 BGW to verify routes
+        # Use first DC1 leaf as the target node; verify on all nodes
         leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         dc1_leafs = [n for n in leaf_nodes if 'dc1' in n.lower()]
-        dc1_bgws = test_cfg['nodes']['dc1_bgw']
+        all_verify_nodes = test_cfg['nodes']['l2l3vni_bgw']
         
         if not dc1_leafs:
             summ += 'No DC1 leaf nodes found for route withdrawal test\n'
             report_result(False, tc_id, summ)
             return
-        if not dc1_bgws:
-            summ += 'No DC1 BGW nodes found for route withdrawal verification\n'
-            report_result(False, tc_id, summ)
-            return
         
         target_leaf = dc1_leafs[0]
-        verify_bgw = dc1_bgws[0]
-        target_vlan = 'Vlan11'
         target_vlan_id = 11
+        target_vlan = str(target_vlan_id)
         
-        # Step 1: Verify Type-5 routes present before withdrawal test
-        # Note: VRF-VNI already verified in test_base_dci_bringup; only re-check Type-5
-        # routes as pre-condition to confirm they exist before shutdown.
-        st.banner('Step 1: Verify Type-5 routes present on all nodes before withdrawal test')
-        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
-                                     checks=['evpn_type5_comprehensive']):
-            summ += 'Type-5 route verification failed (pre-withdrawal check)\n'
-            result = False
+        # Resolve VLAN member interface for the target leaf
+        test_member = None
+        if test_cfg.get('vlan_config') and test_cfg['vlan_config'].get(target_leaf):
+            vlan_info = test_cfg['vlan_config'][target_leaf]
+            members = vlan_info.get(target_vlan)
+            if members:
+                test_member = members[0] if isinstance(members, list) else members
         
-        # Step 2: Shutdown Vlan11 interface on target leaf
-        # Note: SONiC CLI 'config interface shutdown' does not support VLAN
-        # interfaces.  Use FRR vtysh to admin-shutdown the SVI instead.
-        st.banner('Step 2: Shutdown {} on {} to trigger Type-5 route withdrawal'.format(
-            target_vlan, target_leaf))
-        st.config(target_leaf, 'interface {}\n shutdown'.format(target_vlan), type='vtysh')
-        st.wait(10, 'Waiting for Type-5 route withdrawal after {} shutdown'.format(target_vlan))
+        if not test_member:
+            st.log('WARNING: No VLAN member found for VLAN {} on {}, '
+                   'will delete/re-create VLAN instead'.format(target_vlan, target_leaf))
         
-        # Step 3: Verify Type-5 route for VLAN 11 is withdrawn on BGW
-        st.banner('Step 3: Verify Type-5 route for VLAN {} withdrawn on {}'.format(
-            target_vlan_id, verify_bgw))
-        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
-                         verify_bgw, [target_vlan_id], expect_present=False):
-            summ += 'Type-5 route for VLAN {} not withdrawn on {} after shutdown\n'.format(
-                target_vlan_id, verify_bgw)
-            result = False
-        else:
-            st.log('Type-5 route withdrawal verified on {}'.format(verify_bgw))
+        try:
+            # Step 1: Verify Type-5 routes present on all nodes before withdrawal
+            st.banner('Step 1: Verify Type-5 routes present on all nodes before withdrawal test')
+            if not verify_base_setup_bgw(all_verify_nodes,
+                                         checks=['evpn_type5_comprehensive']):
+                summ += 'Type-5 route verification failed (pre-withdrawal check)\n'
+                result = False
+            
+            # Step 2: Remove VLAN member on target leaf (like test_remove_add_vlan_members)
+            st.banner('Step 2: Remove VLAN {} member on {} to trigger route withdrawal'.format(
+                target_vlan, target_leaf))
+            if test_member:
+                vlan_obj.delete_vlan_member(target_leaf, target_vlan, test_member)
+                st.log('Removed member {} from VLAN {} on {}'.format(
+                    test_member, target_vlan, target_leaf))
+            else:
+                vlan_obj.delete_vlan(target_leaf, target_vlan)
+                st.log('Deleted VLAN {} on {}'.format(target_vlan, target_leaf))
+            st.wait(15, 'Waiting for route withdrawal after VLAN {} removal'.format(target_vlan))
+            
+            # Step 3: Verify Type-5 route and IP route withdrawn on all nodes
+            st.banner('Step 3: Verify Type-5 and IP routes withdrawn on all nodes')
+            for node in all_verify_nodes:
+                if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
+                                 node, [target_vlan_id], expect_present=False):
+                    summ += 'Type-5 route for VLAN {} not withdrawn on {}\n'.format(
+                        target_vlan_id, node)
+                    result = False
+                else:
+                    st.log('Type-5 route withdrawal verified on {}'.format(node))
+                
+                if not poll_wait(vxlan_obj.verify_ip_route_vrf_dci, 30,
+                                 node, [target_vlan_id], vrf_name='Vrf101',
+                                 expect_present=False):
+                    summ += 'IP route for VLAN {} not withdrawn in Vrf101 on {}\n'.format(
+                        target_vlan_id, node)
+                    result = False
+                else:
+                    st.log('IP route withdrawal verified on {}'.format(node))
+            
+            # Step 4: Re-add VLAN member on target leaf
+            st.banner('Step 4: Re-add VLAN {} member on {} to trigger route re-advertisement'.format(
+                target_vlan, target_leaf))
+            if test_member:
+                vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
+                st.log('Re-added member {} to VLAN {} on {}'.format(
+                    test_member, target_vlan, target_leaf))
+            else:
+                vlan_obj.create_vlan(target_leaf, target_vlan)
+                st.log('Re-created VLAN {} on {}'.format(target_vlan, target_leaf))
+            st.wait(15, 'Waiting for route re-advertisement after VLAN {} re-add'.format(target_vlan))
+            
+            # Step 5: Verify Type-5 route and IP route re-advertised on all nodes
+            st.banner('Step 5: Verify Type-5 and IP routes re-advertised on all nodes')
+            for node in all_verify_nodes:
+                if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
+                                 node, [target_vlan_id], expect_present=True):
+                    summ += 'Type-5 route for VLAN {} not re-advertised on {}\n'.format(
+                        target_vlan_id, node)
+                    result = False
+                else:
+                    st.log('Type-5 route re-advertisement verified on {}'.format(node))
+                
+                if not poll_wait(vxlan_obj.verify_ip_route_vrf_dci, 30,
+                                 node, [target_vlan_id], vrf_name='Vrf101',
+                                 expect_present=True):
+                    summ += 'IP route for VLAN {} not re-advertised in Vrf101 on {}\n'.format(
+                        target_vlan_id, node)
+                    result = False
+                else:
+                    st.log('IP route re-advertisement verified on {}'.format(node))
+            
+            # Step 6: Verify L3VNI traffic still works
+            st.banner('Step 6: Verify L3VNI traffic after route recovery')
+            if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+                st.log('L3VNI IPv4 traffic after route withdrawal/recovery: Pass')
+            else:
+                summ += 'L3VNI IPv4 traffic failed after route withdrawal/recovery\n'
+                result = False
         
-        # Step 4: Bring up Vlan11 interface on target leaf
-        st.banner('Step 4: Bring up {} on {} to trigger Type-5 route re-advertisement'.format(
-            target_vlan, target_leaf))
-        st.config(target_leaf, 'interface {}\n no shutdown'.format(target_vlan), type='vtysh')
-        st.wait(15, 'Waiting for Type-5 route re-advertisement after {} startup'.format(target_vlan))
-        
-        # Step 5: Verify Type-5 route for VLAN 11 is re-advertised on BGW
-        st.banner('Step 5: Verify Type-5 route for VLAN {} re-advertised on {}'.format(
-            target_vlan_id, verify_bgw))
-        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
-                         verify_bgw, [target_vlan_id], expect_present=True):
-            summ += 'Type-5 route for VLAN {} not re-advertised on {} after startup\n'.format(
-                target_vlan_id, verify_bgw)
-            result = False
-        else:
-            st.log('Type-5 route re-advertisement verified on {}'.format(verify_bgw))
-        
-        # Step 6: Verify L3VNI traffic still works
-        st.banner('Step 6: Verify L3VNI traffic after route recovery')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
-            st.log('L3VNI IPv4 traffic after route withdrawal/recovery: Pass')
-        else:
-            summ += 'L3VNI IPv4 traffic failed after route withdrawal/recovery\n'
+        except Exception as e:
+            summ += 'Exception: {}\n'.format(e)
+            # Try to restore VLAN member
+            try:
+                if test_member:
+                    vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
+                else:
+                    vlan_obj.create_vlan(target_leaf, target_vlan)
+            except Exception:
+                pass
             result = False
         
         report_result(result, tc_id, summ)

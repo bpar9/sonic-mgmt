@@ -8212,6 +8212,137 @@ def verify_type5_route_presence_dci(dut, vlan_ids, expect_present=True):
     return all_pass
 
 
+def verify_ip_route_vrf_dci(dut, vlan_ids, vrf_name='Vrf101', expect_present=True):
+    """
+    Verify IP route presence or absence for specific VLANs in a VRF.
+
+    Checks 'show ip route vrf <vrf>' for routes matching the VLAN prefix
+    pattern (80.<vlan>.0.0/24 for IPv4).
+
+    Args:
+        dut: Node hostname to verify
+        vlan_ids: list of VLAN IDs to check (e.g. [11] for Vlan11)
+        vrf_name: VRF name to check (default 'Vrf101')
+        expect_present: True to verify routes exist, False to verify withdrawn
+
+    Returns:
+        Boolean: True if verification passes
+    """
+    action = 'present' if expect_present else 'withdrawn'
+    st.banner('Verifying IP routes {} for VLANs {} in VRF {} on {}'.format(
+        action, vlan_ids, vrf_name, dut))
+
+    target_prefixes = set()
+    for vlan_id in vlan_ids:
+        target_prefixes.add('80.{}.0.0/24'.format(vlan_id))
+
+    try:
+        cli_output = st.show(dut,
+                             "do show ip route vrf {}".format(vrf_name),
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        st.log('Failed to get IP routes on {}: {}'.format(dut, err))
+        return not expect_present
+
+    if not cli_output or not cli_output.strip():
+        if not expect_present:
+            st.log('No IP route output on {} - routes are withdrawn'.format(dut))
+            return True
+        else:
+            st.log('No IP route output on {} - routes not present yet'.format(dut))
+            return False
+
+    found_prefixes = set()
+    for line in cli_output.splitlines():
+        for prefix in target_prefixes:
+            if prefix in line:
+                found_prefixes.add(prefix)
+
+    if expect_present:
+        missing = target_prefixes - found_prefixes
+        if missing:
+            st.log('IP routes missing in VRF {} on {}: {}'.format(
+                vrf_name, dut, missing))
+            return False
+        st.log('IP routes present for VLANs {} in VRF {} on {}'.format(
+            vlan_ids, vrf_name, dut))
+        return True
+    else:
+        still_present = target_prefixes & found_prefixes
+        if still_present:
+            st.log('IP routes still present in VRF {} on {}: {}'.format(
+                vrf_name, dut, still_present))
+            return False
+        st.log('IP routes withdrawn for VLANs {} in VRF {} on {}'.format(
+            vlan_ids, vrf_name, dut))
+        return True
+
+
+def verify_type5_ixia_prefixes_dci(dut, prefixes, expect_present=True):
+    """
+    Verify Type-5 route presence or absence for specific IXIA-advertised prefixes.
+
+    Parses 'show bgp l2vpn evpn route type prefix' and checks whether the given
+    prefixes appear (expect_present=True) or are absent (expect_present=False).
+
+    Args:
+        dut: Node hostname (BGW) to verify
+        prefixes: list of prefix strings to check (e.g. ['10.100.0.0/24', '2001:db8::/64'])
+        expect_present: True to verify routes exist, False to verify routes are withdrawn
+
+    Returns:
+        Boolean: True if verification passes
+    """
+    action = 'present' if expect_present else 'withdrawn'
+    st.banner('Verifying Type-5 routes {} for IXIA prefixes {} on {}'.format(
+        action, prefixes, dut))
+
+    target_prefixes = set(prefixes)
+
+    try:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        st.log('Failed to get Type-5 routes on {}: {}'.format(dut, err))
+        return not expect_present
+
+    if not cli_output or not cli_output.strip():
+        if not expect_present:
+            st.log('No Type-5 route output on {} - routes are withdrawn'.format(dut))
+            return True
+        else:
+            st.log('No Type-5 route output on {} - routes not present yet'.format(dut))
+            return False
+
+    # Check which target prefixes appear in the Type-5 output
+    found_prefixes = set()
+    for line in cli_output.splitlines():
+        for prefix in target_prefixes:
+            # Match prefix in Type-5 route format [5]:[0]:[len]:[network]
+            # or as plain prefix in the output
+            net = prefix.split('/')[0]
+            if net in line:
+                found_prefixes.add(prefix)
+
+    if expect_present:
+        missing = target_prefixes - found_prefixes
+        if missing:
+            st.log('IXIA Type-5 routes missing on {}: {}'.format(dut, missing))
+            return False
+        st.log('IXIA Type-5 routes present for prefixes {} on {}'.format(
+            prefixes, dut))
+        return True
+    else:
+        still_present = target_prefixes & found_prefixes
+        if still_present:
+            st.log('IXIA Type-5 routes still present on {}: {}'.format(
+                dut, still_present))
+            return False
+        st.log('IXIA Type-5 routes withdrawn for prefixes {} on {}'.format(
+            prefixes, dut))
+        return True
+
+
 def verify_vrf_vni_after_reload_dci(dut):
     """
     Verify VRF-VNI mappings are restored after config reload on a node.

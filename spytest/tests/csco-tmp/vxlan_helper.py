@@ -1754,7 +1754,7 @@ def find_endpoint_pair(intf_dict,vni = None):
 
     return output
 
-def verify_vtep (nodes):
+def verify_vtep (nodes, dci_enabled=False):
     '''
     Author:Ramsiddarth Ragurajan (rraguraj@cisco.com)
     remote_vtep_dict ={'leaf1': {'2000:1::2': ['2000:1::1', '2000:1::4']}, 
@@ -1764,7 +1764,7 @@ def verify_vtep (nodes):
     get_vtep_info(nodes)[1] = {'leaf1': ['2000:1::2'], 'leaf0': ['2000:1::1'], 'leaf3': ['2000:1::4'], 'leaf2': ['2000:1::3']}
     '''
     flag = True
-    remote_vtep_dict = get_expected_remote_vteps()
+    remote_vtep_dict = get_expected_remote_vteps(dci_enabled=dci_enabled)
     for i in range (len(nodes)):
         cli_output = st.show(nodes[i], "show vxlan remotevtep", skip_tmpl=True)
         '''
@@ -3773,7 +3773,7 @@ def get_bgw_nodes_info(bgw_nodes, node_info, loopback_ipv4_wan_overlay,
     return out
 
 
-def get_expected_remote_vteps():
+def get_expected_remote_vteps(dci_enabled=False):
     '''
     Author:Ramsiddarth Ragurajan (rraguraj@cisco.com)
 
@@ -3783,6 +3783,7 @@ def get_expected_remote_vteps():
     'leaf2': ['2000:1::1', '2000:1::4'], 
     'leaf3': ['2000:1::1', '2000:1::2', '2000:1::3']}
 
+    When dci_enabled=True, also adds the local DC's BGW VIP (e.g. 4000:1::1) to each leaf's expected list.
     '''
     expected_vteps = {}
     vlan_range = {}
@@ -3807,6 +3808,25 @@ def get_expected_remote_vteps():
                 if len(out_list) !=0:
                     temp_list.append(loopback_ip[node2])
         expected_vteps[node1][loopback_ip[node1]] = temp_list
+
+    # DCI only: leaves also have a remote VTEP to the local DC's BGW (DC VIP, e.g. 4000:1::1)
+    if dci_enabled:
+        try:
+            (loopback_ipv6_dc_vip, _, _, _) = generate_dci_vip_maps()
+            if loopback_ipv6_dc_vip:
+                for node1 in expected_vteps:
+                    dc_match = re.search(r'_(dc\d+)', node1)
+                    if dc_match:
+                        my_dc = dc_match.group(1)
+                        for bgw_node, dc_vip in loopback_ipv6_dc_vip.items():
+                            if my_dc in bgw_node:
+                                for src_vtep in expected_vteps[node1]:
+                                    if dc_vip not in expected_vteps[node1][src_vtep]:
+                                        expected_vteps[node1][src_vtep].append(dc_vip)
+                                break
+        except Exception:
+            pass
+
     return expected_vteps
 
 def find_matching_elements(list1, list2):

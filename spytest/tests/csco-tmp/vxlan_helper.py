@@ -8824,42 +8824,51 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
     return result
 
 
-def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24',
+def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip=None, svi_mask='24',
                                svi_ipv6=None, svi_ipv6_mask='64',
                                dut_intf=None):
     """
     Configure DUT-side VLAN, VRF binding, SVI IP, and VLAN member for IXIA peer.
 
     Creates the L3 interface on the DUT leaf so the IXIA BGP peer can reach
-    the gateway.  SONiC CLI commands:
+    the gateway.  Supports IPv4-only, IPv6-only, or dual-stack SVI.
+
+    SONiC CLI commands:
         config vlan add <vlan_id>
         config vlan member add <vlan_id> <dut_intf>       (if dut_intf provided)
         config interface vrf bind Vlan<vlan_id> <vrf_name>
-        config interface ip add Vlan<vlan_id> <svi_ip>/<svi_mask>
+        config interface ip add Vlan<vlan_id> <svi_ip>/<svi_mask>          (if svi_ip provided)
         config interface ip add Vlan<vlan_id> <svi_ipv6>/<svi_ipv6_mask>  (if svi_ipv6 provided)
 
     Args:
         dut: DUT node name (e.g. leaf0_dc1)
         vlan_id: VLAN ID to create (e.g. '99')
         vrf_name: VRF to bind the VLAN SVI to (e.g. 'Vrf101')
-        svi_ip: IPv4 address for the SVI (e.g. '80.99.0.1')
+        svi_ip: IPv4 address for the SVI (e.g. '80.99.0.1'), None to skip
         svi_mask: IPv4 prefix length (default '24')
         svi_ipv6: IPv6 address for the SVI (e.g. '2099::1'), None to skip
         svi_ipv6_mask: IPv6 prefix length (default '64')
         dut_intf: DUT physical interface to add as VLAN member (e.g. 'Ethernet224'), None to skip
     """
-    st.banner('DUT L3 INTF: Configuring Vlan{} vrf={} ip={}/{} on {}'.format(
-        vlan_id, vrf_name, svi_ip, svi_mask, dut))
+    ip_desc = ''
+    if svi_ip:
+        ip_desc += 'ip={}/{}'.format(svi_ip, svi_mask)
+    if svi_ipv6:
+        if ip_desc:
+            ip_desc += ' '
+        ip_desc += 'ipv6={}/{}'.format(svi_ipv6, svi_ipv6_mask)
+    st.banner('DUT L3 INTF: Configuring Vlan{} vrf={} {} on {}'.format(
+        vlan_id, vrf_name, ip_desc, dut))
     cmds = [
         'config vlan add {}'.format(vlan_id),
     ]
     if dut_intf:
         cmds.append('config vlan member add {} {}'.format(vlan_id, dut_intf))
         st.log('DUT L3 INTF: Adding {} as member of Vlan{}'.format(dut_intf, vlan_id))
-    cmds.extend([
-        'config interface vrf bind Vlan{} {}'.format(vlan_id, vrf_name),
-        'config interface ip add Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
-    ])
+    cmds.append('config interface vrf bind Vlan{} {}'.format(vlan_id, vrf_name))
+    if svi_ip:
+        cmds.append('config interface ip add Vlan{} {}/{}'.format(
+            vlan_id, svi_ip, svi_mask))
     if svi_ipv6:
         cmds.append('config interface ip add Vlan{} {}/{}'.format(
             vlan_id, svi_ipv6, svi_ipv6_mask))
@@ -8870,7 +8879,7 @@ def configure_dut_ixia_l3_intf(dut, vlan_id, vrf_name, svi_ip, svi_mask='24',
 
 
 def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
-                            svi_ip='80.99.0.1', svi_mask='24',
+                            svi_ip=None, svi_mask='24',
                             svi_ipv6=None, svi_ipv6_mask='64',
                             dut_intf=None):
     """
@@ -8880,7 +8889,7 @@ def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
         dut: DUT node name
         vlan_id: VLAN ID to remove
         vrf_name: VRF name (default 'Vrf101')
-        svi_ip: SVI IPv4 address to remove (default '80.99.0.1')
+        svi_ip: SVI IPv4 address to remove (None to skip)
         svi_mask: IPv4 prefix length (default '24')
         svi_ipv6: SVI IPv6 address to remove (None to skip)
         svi_ipv6_mask: IPv6 prefix length (default '64')
@@ -8891,10 +8900,10 @@ def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
     if svi_ipv6:
         cmds.append('config interface ip remove Vlan{} {}/{}'.format(
             vlan_id, svi_ipv6, svi_ipv6_mask))
-    cmds.extend([
-        'config interface ip remove Vlan{} {}/{}'.format(vlan_id, svi_ip, svi_mask),
-        'config interface vrf unbind Vlan{}'.format(vlan_id),
-    ])
+    if svi_ip:
+        cmds.append('config interface ip remove Vlan{} {}/{}'.format(
+            vlan_id, svi_ip, svi_mask))
+    cmds.append('config interface vrf unbind Vlan{}'.format(vlan_id))
     if dut_intf:
         cmds.append('config vlan member del {} {}'.format(vlan_id, dut_intf))
     cmds.append('config vlan del {}'.format(vlan_id))
@@ -8904,58 +8913,61 @@ def remove_dut_ixia_l3_intf(dut, vlan_id, vrf_name='Vrf101',
     st.log('DUT L3 interface Vlan{} removed from {}'.format(vlan_id, dut))
 
 
-def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip, vrf_name='Vrf101',
+def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip=None, vrf_name='Vrf101',
                                ixia_ipv6=None):
     """
     Configure DUT leaf BGP neighbor to accept IXIA BGP peer.
 
-    Adds an eBGP neighbor (IPv4 and optionally IPv6) under the specified VRF
-    on the DUT leaf node so that the IXIA-initiated BGP session is accepted
-    and routes are imported.
+    Adds an eBGP neighbor under the specified VRF on the DUT leaf node.
+    Supports IPv4-only, IPv6-only, or dual-stack BGP neighbors.
 
     FRR config applied via vtysh:
         router bgp <leaf_asn> vrf <vrf_name>
-         neighbor <ixia_ip> remote-as <ixia_asn>
+         neighbor <ixia_ip> remote-as <ixia_asn>     (if ixia_ip provided)
          neighbor <ixia_ipv6> remote-as <ixia_asn>   (if ixia_ipv6 provided)
-         address-family ipv4 unicast
+         address-family ipv4 unicast                 (if ixia_ip provided)
           neighbor <ixia_ip> activate
          exit-address-family
-         address-family ipv6 unicast
-          neighbor <ixia_ip> activate
-          neighbor <ixia_ipv6> activate              (if ixia_ipv6 provided)
+         address-family ipv6 unicast                 (if ixia_ipv6 provided)
+          neighbor <ixia_ipv6> activate
          exit-address-family
 
     Args:
         dut: DUT node name (e.g. leaf0_dc1)
         leaf_asn: DUT leaf BGP AS number (e.g. '65200')
         ixia_asn: IXIA BGP AS number (e.g. '65299')
-        ixia_ip: IXIA interface IPv4 address (e.g. '80.99.0.100')
+        ixia_ip: IXIA interface IPv4 address (e.g. '80.99.0.100'), None for IPv6-only
         vrf_name: VRF under which to configure the neighbor (default 'Vrf101')
-        ixia_ipv6: IXIA interface IPv6 address (e.g. '2099::100'), None to skip
+        ixia_ipv6: IXIA interface IPv6 address (e.g. '2099::100'), None for IPv4-only
     """
+    nbr_desc = ixia_ip if ixia_ip else ixia_ipv6
     st.banner('DUT BGP: Configuring neighbor {} (AS {}) on {} vrf {}'.format(
-        ixia_ip, ixia_asn, dut, vrf_name))
+        nbr_desc, ixia_asn, dut, vrf_name))
     cmd = 'router bgp {} vrf {}\n'.format(leaf_asn, vrf_name)
-    cmd += 'neighbor {} remote-as {}\n'.format(ixia_ip, ixia_asn)
+    if ixia_ip:
+        cmd += 'neighbor {} remote-as {}\n'.format(ixia_ip, ixia_asn)
     if ixia_ipv6:
         cmd += 'neighbor {} remote-as {}\n'.format(ixia_ipv6, ixia_asn)
-    cmd += 'address-family ipv4 unicast\n'
-    cmd += 'neighbor {} activate\n'.format(ixia_ip)
-    cmd += 'exit-address-family\n'
-    cmd += 'address-family ipv6 unicast\n'
-    cmd += 'neighbor {} activate\n'.format(ixia_ip)
+    if ixia_ip:
+        cmd += 'address-family ipv4 unicast\n'
+        cmd += 'neighbor {} activate\n'.format(ixia_ip)
+        cmd += 'exit-address-family\n'
     if ixia_ipv6:
+        cmd += 'address-family ipv6 unicast\n'
         cmd += 'neighbor {} activate\n'.format(ixia_ipv6)
-    cmd += 'exit-address-family\n'
+        cmd += 'exit-address-family\n'
     cmd += 'end\n'
     cmd += 'exit\n'
     st.config(dut, cmd, type='vtysh', skip_error_check=True)
-    st.log('DUT BGP neighbor {} configured on {} vrf {}'.format(ixia_ip, dut, vrf_name))
+    if ixia_ip:
+        st.log('DUT BGP IPv4 neighbor {} configured on {} vrf {}'.format(
+            ixia_ip, dut, vrf_name))
     if ixia_ipv6:
-        st.log('DUT BGP IPv6 neighbor {} also configured'.format(ixia_ipv6))
+        st.log('DUT BGP IPv6 neighbor {} configured on {} vrf {}'.format(
+            ixia_ipv6, dut, vrf_name))
 
 
-def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip, vrf_name='Vrf101',
+def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip=None, vrf_name='Vrf101',
                             ixia_ipv6=None):
     """
     Remove DUT leaf BGP neighbor for IXIA peer (cleanup).
@@ -8963,19 +8975,21 @@ def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip, vrf_name='Vrf101',
     Args:
         dut: DUT node name
         leaf_asn: DUT leaf BGP AS number
-        ixia_ip: IXIA interface IPv4 address
+        ixia_ip: IXIA interface IPv4 address (None to skip)
         vrf_name: VRF name (default 'Vrf101')
         ixia_ipv6: IXIA IPv6 address to remove (None to skip)
     """
-    st.banner('DUT BGP: Removing neighbor {} on {} vrf {}'.format(ixia_ip, dut, vrf_name))
+    nbr_desc = ixia_ip if ixia_ip else ixia_ipv6
+    st.banner('DUT BGP: Removing neighbor {} on {} vrf {}'.format(nbr_desc, dut, vrf_name))
     cmd = 'router bgp {} vrf {}\n'.format(leaf_asn, vrf_name)
     if ixia_ipv6:
         cmd += 'no neighbor {}\n'.format(ixia_ipv6)
-    cmd += 'no neighbor {}\n'.format(ixia_ip)
+    if ixia_ip:
+        cmd += 'no neighbor {}\n'.format(ixia_ip)
     cmd += 'end\n'
     cmd += 'exit\n'
     st.config(dut, cmd, type='vtysh', skip_error_check=True)
-    st.log('DUT BGP neighbor {} removed from {} vrf {}'.format(ixia_ip, dut, vrf_name))
+    st.log('DUT BGP neighbor(s) removed from {} vrf {}'.format(dut, vrf_name))
 
 
 def verify_dut_bgp_ixia_session(dut, vrf_name, ixia_ip, expected_prefixes=None,

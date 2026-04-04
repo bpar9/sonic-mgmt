@@ -5351,13 +5351,9 @@ class TestVxlanDCIBase():
         
         st.log('Leaf {} ASN: {}'.format(leaf_node, leaf_asn))
         
-        # IXIA BGP parameters — IPv4 for connectivity, IPv6 for BGP peering
+        # IXIA BGP parameters — IPv6 only for this test case
         ixia_asn = '65299'
-        ixia_ip = '80.99.0.100'
-        ixia_gateway = '80.99.0.1'
-        ixia_netmask = '255.255.255.0'
         ixia_mac = '00:00:AA:BB:CC:08'
-        # IPv6 addresses for Vlan99 SVI and IXIA peer (IPv6 BGP session)
         ixia_ipv6 = '2099::100'
         ixia_gateway_ipv6 = '2099::1'
         
@@ -5370,38 +5366,31 @@ class TestVxlanDCIBase():
             {'prefix': '2001:db8:4::', 'prefix_len': 64, 'num_routes': 1},
         ]
         
-        st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
-            ixia_asn, leaf_asn, ixia_ip, ixia_gateway))
-        st.log('IXIA BGP IPv6: ipv6={}, gw_ipv6={}'.format(ixia_ipv6, ixia_gateway_ipv6))
+        st.log('IXIA BGP IPv6: local_as={}, remote_as={}, ipv6={}, gw_ipv6={}'.format(
+            ixia_asn, leaf_asn, ixia_ipv6, ixia_gateway_ipv6))
         st.log('IPv6 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv6_prefixes]))
         
         # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
-        # Configure both IPv4 and IPv6 addresses on Vlan99 SVI, and both
-        # IPv4 + IPv6 BGP neighbors so IXIA can peer over IPv6.
-        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (v4+v6) and BGP neighbor for IXIA peer on {}'.format(leaf_node))
+        # IPv6-only: configure only IPv6 SVI and IPv6 BGP neighbor.
+        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (IPv6) and BGP neighbor for IXIA peer on {}'.format(leaf_node))
         vxlan_obj.configure_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_mask='24',
             svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64',
             dut_intf=dut_intf)
         vxlan_obj.configure_dut_bgp_for_ixia(
             dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
-            ixia_ip=ixia_ip, vrf_name='Vrf101',
-            ixia_ipv6=ixia_ipv6)
+            vrf_name='Vrf101', ixia_ipv6=ixia_ipv6)
         
         # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
         # Pass the existing topology_handle so the helper creates a device group
         # on the existing topology instead of creating a new one (Error 6502).
-        # Pass IPv6 addresses so the helper creates an IPv6 stack and IPv6 BGP peer.
-        st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
+        # IPv6-only: pass only IPv6 addresses for IXIA BGP peer.
+        st.banner('Step 3b: Configure IXIA BGP IPv6 session per bgp_ixia.txt pattern')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
             tg_handle=tg_handle,
             port_handle=port_handle,
             topology_handle=topo_handle,
-            ixia_ip=ixia_ip,
-            gateway=ixia_gateway,
-            netmask=ixia_netmask,
             src_mac=ixia_mac,
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
@@ -5416,9 +5405,11 @@ class TestVxlanDCIBase():
             summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
             # Cleanup DUT config on failure
             vxlan_obj.remove_dut_bgp_for_ixia(
-                dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
+                dut=leaf_node, leaf_asn=leaf_asn, vrf_name='Vrf101',
+                ixia_ipv6=ixia_ipv6)
             vxlan_obj.remove_dut_ixia_l3_intf(
                 dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                svi_ipv6=ixia_gateway_ipv6,
                 dut_intf=dut_intf)
             report_result(False, tc_id, summ)
             return
@@ -5446,7 +5437,7 @@ class TestVxlanDCIBase():
         expected_ipv6_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
                                   for p in ipv6_prefixes]
         bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
-            dut=leaf_node, vrf_name='Vrf101', ixia_ip=ixia_ip,
+            dut=leaf_node, vrf_name='Vrf101',
             expected_prefixes=expected_ipv6_prefixes,
             ixia_ipv6=ixia_ipv6, addr_family='ipv6')
         if not bgp_verify['result']:
@@ -5486,11 +5477,11 @@ class TestVxlanDCIBase():
         
         vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
         vxlan_obj.remove_dut_bgp_for_ixia(
-            dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101',
+            dut=leaf_node, leaf_asn=leaf_asn, vrf_name='Vrf101',
             ixia_ipv6=ixia_ipv6)
         vxlan_obj.remove_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
+            svi_ipv6=ixia_gateway_ipv6,
             dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)

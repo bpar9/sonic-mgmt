@@ -8360,18 +8360,18 @@ def verify_vrf_vni_after_reload_dci(dut):
     return verify_vrfvnimap(dut)
 
 
-def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, netmask,
-                                     src_mac, ixia_asn, leaf_asn, ipv6_prefixes,
+def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, src_mac, ixia_asn,
+                                     leaf_asn, ipv6_prefixes,
+                                     ixia_ip=None, gateway=None, netmask=None,
                                      topology_handle=None,
                                      vlan_enabled='0', vlan_id='1',
                                      ixia_ipv6=None, gateway_ipv6=None):
     """
     Configure IXIA BGP session to advertise IPv6 prefixes to a DUT leaf node.
 
-    This follows the bgp_ixia.txt pattern for IXIA API calls:
-      1. Configure IXIA interface (IPv4 + IPv6 connectivity to leaf SVI)
-      2. Configure BGP peers (eBGP IPv4 session + IPv6 session if ixia_ipv6 provided)
-      3. Advertise IPv6 prefixes over the IPv6 BGP session (or IPv4 session as fallback)
+    This follows the bgp_ixia.txt pattern for IXIA API calls.
+    Supports IPv6-only mode (only ixia_ipv6/gateway_ipv6), IPv4+IPv6 dual-stack,
+    or IPv4-only fallback.
 
     When topology_handle is provided, the port already has an IXIA topology
     from create_topology_handles() but no device groups.  The function creates
@@ -8382,14 +8382,14 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
     Args:
         tg_handle: IXIA traffic generator handle
         port_handle: IXIA port handle
-        ixia_ip: IXIA interface IPv4 address (e.g. '80.99.0.100')
-        gateway: Leaf SVI gateway IPv4 address (e.g. '80.99.0.1')
-        netmask: Subnet mask (e.g. '255.255.255.0')
         src_mac: IXIA source MAC address (e.g. '00:00:AA:BB:CC:01')
         ixia_asn: IXIA BGP AS number (e.g. '65299')
         leaf_asn: Leaf node BGP AS number (e.g. '65200')
         ipv6_prefixes: List of dicts with keys: prefix, prefix_len, num_routes
             e.g. [{'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5}]
+        ixia_ip: IXIA interface IPv4 address (e.g. '80.99.0.100'), None for IPv6-only
+        gateway: Leaf SVI gateway IPv4 address (e.g. '80.99.0.1'), None for IPv6-only
+        netmask: Subnet mask (e.g. '255.255.255.0'), None for IPv6-only
         topology_handle: Existing IXIA topology handle (e.g. '/topology:3').
             When provided, a device group is created on this topology instead
             of creating a new topology via tg_interface_config.
@@ -8422,8 +8422,9 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
 
     # Step 1: Configure IXIA interface
     st.banner('IXIA BGP: Configuring interface on port {}'.format(port_handle))
-    st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
-        ixia_ip, gateway, netmask, src_mac))
+    if ixia_ip:
+        st.log('  IXIA IP: {}, Gateway: {}, Netmask: {}, MAC: {}'.format(
+            ixia_ip, gateway, netmask, src_mac))
     if ixia_ipv6:
         st.log('  IXIA IPv6: {}, Gateway IPv6: {}'.format(ixia_ipv6, gateway_ipv6))
 
@@ -8478,22 +8479,24 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             return result
         ethernet_handle = l2_protocol['ethernet_handle']
 
-        # 1c. Create IPv4 stack on ethernet
-        l3_protocol = tg_handle.tg_interface_config(
-            protocol_name='BGP IPv6 IPv4 Stack',
-            protocol_handle=ethernet_handle,
-            ipv4_resolve_gateway='1',
-            gateway=gateway,
-            gateway_step='0.0.0.0',
-            intf_ip_addr=ixia_ip,
-            intf_ip_addr_step='0.0.0.1'
-        )
-        st.log('IPv4 config result: {}'.format(l3_protocol))
-        if not l3_protocol or not l3_protocol.get('ipv4_handle'):
-            result['details'] = 'Failed to create IPv4 stack on ethernet'
-            st.log(result['details'])
-            return result
-        interface_handle = l3_protocol['ipv4_handle']
+        # 1c. Create IPv4 stack on ethernet (if IPv4 connectivity requested)
+        interface_handle = None
+        if ixia_ip and gateway:
+            l3_protocol = tg_handle.tg_interface_config(
+                protocol_name='BGP IPv6 IPv4 Stack',
+                protocol_handle=ethernet_handle,
+                ipv4_resolve_gateway='1',
+                gateway=gateway,
+                gateway_step='0.0.0.0',
+                intf_ip_addr=ixia_ip,
+                intf_ip_addr_step='0.0.0.1'
+            )
+            st.log('IPv4 config result: {}'.format(l3_protocol))
+            if not l3_protocol or not l3_protocol.get('ipv4_handle'):
+                result['details'] = 'Failed to create IPv4 stack on ethernet'
+                st.log(result['details'])
+                return result
+            interface_handle = l3_protocol['ipv4_handle']
 
         # 1d. Create IPv6 stack on ethernet (if IPv6 peering requested)
         ipv6_handle = None
@@ -8516,6 +8519,10 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
             st.log('IXIA IPv6 handle: {}'.format(ipv6_handle))
     else:
         # No existing topology — create fresh via tg_interface_config(port_handle=...)
+        if not ixia_ip or not gateway or not netmask:
+            result['details'] = 'IPv4 params (ixia_ip/gateway/netmask) required when no topology_handle'
+            st.log(result['details'])
+            return result
         intf_args = {
             'port_handle': port_handle,
             'mode': 'config',
@@ -8541,9 +8548,9 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, ixia_ip, gateway, ne
         interface_handle = h1['handle']
         ipv6_handle = None
 
-    result['interface_handle'] = interface_handle
+    result['interface_handle'] = interface_handle if interface_handle else ipv6_handle
     result['ipv6_handle'] = ipv6_handle
-    st.log('IXIA interface handle: {}'.format(interface_handle))
+    st.log('IXIA interface handle: {}'.format(result['interface_handle']))
 
     # Step 2: Configure BGP peer
     # If IPv6 peering is requested, configure BGP on the IPv6 handle so that
@@ -8992,10 +8999,12 @@ def remove_dut_bgp_for_ixia(dut, leaf_asn, ixia_ip=None, vrf_name='Vrf101',
     st.log('DUT BGP neighbor(s) removed from {} vrf {}'.format(dut, vrf_name))
 
 
-def verify_dut_bgp_ixia_session(dut, vrf_name, ixia_ip, expected_prefixes=None,
+def verify_dut_bgp_ixia_session(dut, vrf_name, ixia_ip=None, expected_prefixes=None,
                                 ixia_ipv6=None, addr_family='ipv4'):
     """
     Verify BGP neighborship between DUT and IXIA, and check received routes.
+
+    Supports IPv4-only (ixia_ip), IPv6-only (ixia_ipv6), or dual-stack.
 
     Verifies:
       1) BGP neighbor state is 'Established' (via 'show bgp vrf <vrf> summary')
@@ -9004,9 +9013,9 @@ def verify_dut_bgp_ixia_session(dut, vrf_name, ixia_ip, expected_prefixes=None,
     Args:
         dut: DUT node name (e.g. leaf0_dc1)
         vrf_name: VRF name (e.g. 'Vrf101')
-        ixia_ip: IXIA IPv4 neighbor address (e.g. '80.99.0.100')
+        ixia_ip: IXIA IPv4 neighbor address (e.g. '80.99.0.100'), None for IPv6-only
         expected_prefixes: list of prefix strings to verify (e.g. ['10.100.0.0/24'])
-        ixia_ipv6: IXIA IPv6 neighbor address (e.g. '2099::100'), None if IPv4-only
+        ixia_ipv6: IXIA IPv6 neighbor address (e.g. '2099::100'), None for IPv4-only
         addr_family: 'ipv4' or 'ipv6' — address family for route verification
     Returns:
         dict: {'result': True/False, 'details': str}

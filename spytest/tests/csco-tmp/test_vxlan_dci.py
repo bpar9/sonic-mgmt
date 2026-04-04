@@ -5351,8 +5351,14 @@ class TestVxlanDCIBase():
         
         st.log('Leaf {} ASN: {}'.format(leaf_node, leaf_asn))
         
-        # IXIA BGP parameters — IPv6 only for this test case
+        # IXIA BGP parameters — IPv4 for L2/L3 connectivity, IPv6 for BGP peering
+        # NOTE: IXIA protocol framework requires an IPv4 stack for protocol
+        # management, so we keep IPv4 connectivity on both IXIA and DUT SVI.
+        # However, the DUT BGP neighbor is IPv6-only (only v6 neighbor + v6 AF).
         ixia_asn = '65299'
+        ixia_ip = '80.99.0.100'
+        ixia_gateway = '80.99.0.1'
+        ixia_netmask = '255.255.255.0'
         ixia_mac = '00:00:AA:BB:CC:08'
         ixia_ipv6 = '2099::100'
         ixia_gateway_ipv6 = '2099::1'
@@ -5366,16 +5372,19 @@ class TestVxlanDCIBase():
             {'prefix': '2001:db8:4::', 'prefix_len': 64, 'num_routes': 1},
         ]
         
-        st.log('IXIA BGP IPv6: local_as={}, remote_as={}, ipv6={}, gw_ipv6={}'.format(
-            ixia_asn, leaf_asn, ixia_ipv6, ixia_gateway_ipv6))
+        st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
+            ixia_asn, leaf_asn, ixia_ip, ixia_gateway))
+        st.log('IXIA BGP IPv6: ipv6={}, gw_ipv6={}'.format(ixia_ipv6, ixia_gateway_ipv6))
         st.log('IPv6 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv6_prefixes]))
         
         # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
-        # IPv6-only: configure only IPv6 SVI and IPv6 BGP neighbor.
-        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (IPv6) and BGP neighbor for IXIA peer on {}'.format(leaf_node))
+        # DUT SVI: both IPv4 + IPv6 (IXIA needs IPv4 stack for protocol framework).
+        # DUT BGP: IPv6-only neighbor — only v6 neighbor and v6 address-family.
+        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (v4+v6) and IPv6-only BGP neighbor for IXIA peer on {}'.format(leaf_node))
         vxlan_obj.configure_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+            svi_ip=ixia_gateway, svi_mask='24',
             svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64',
             dut_intf=dut_intf)
         vxlan_obj.configure_dut_bgp_for_ixia(
@@ -5385,7 +5394,9 @@ class TestVxlanDCIBase():
         # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
         # Pass the existing topology_handle so the helper creates a device group
         # on the existing topology instead of creating a new one (Error 6502).
-        # IPv6-only: pass only IPv6 addresses for IXIA BGP peer.
+        # IXIA: IPv4 stack (required by IXIA protocol framework) + IPv6 stack
+        # for IPv6 BGP peering.  Only IPv6 BGP peer is created; IPv6 prefixes
+        # are advertised under IPv6 address-family.
         st.banner('Step 3b: Configure IXIA BGP IPv6 session per bgp_ixia.txt pattern')
         ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
             tg_handle=tg_handle,
@@ -5395,6 +5406,9 @@ class TestVxlanDCIBase():
             ixia_asn=ixia_asn,
             leaf_asn=leaf_asn,
             ipv6_prefixes=ipv6_prefixes,
+            ixia_ip=ixia_ip,
+            gateway=ixia_gateway,
+            netmask=ixia_netmask,
             vlan_enabled='1',
             vlan_id='99',
             ixia_ipv6=ixia_ipv6,
@@ -5409,7 +5423,7 @@ class TestVxlanDCIBase():
                 ixia_ipv6=ixia_ipv6)
             vxlan_obj.remove_dut_ixia_l3_intf(
                 dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-                svi_ipv6=ixia_gateway_ipv6,
+                svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
                 dut_intf=dut_intf)
             report_result(False, tc_id, summ)
             return
@@ -5481,7 +5495,7 @@ class TestVxlanDCIBase():
             ixia_ipv6=ixia_ipv6)
         vxlan_obj.remove_dut_ixia_l3_intf(
             dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ipv6=ixia_gateway_ipv6,
+            svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
             dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)

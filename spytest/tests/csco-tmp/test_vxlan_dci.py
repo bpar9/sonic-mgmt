@@ -4826,6 +4826,21 @@ def _get_dci_mac_move_cfg():
     }
 
 
+def _get_dci_l3vni_mac_move_cfg():
+    """Return DCI L3VNI MAC move config for cross-VLAN host mobility tests.
+
+    Uses vxlan_helper.get_l3vni_mac_move_params() to derive gateway/host IPs
+    and MACs, then merges burst/rate settings from the base MAC-move config.
+    """
+    l3_params = vxlan_obj.get_l3vni_mac_move_params(test_cfg)
+    mm_base = _get_dci_mac_move_cfg()
+    l3_params['pkts_per_burst_sim'] = mm_base['pkts_per_burst_sim']
+    l3_params['rate_percent_sim'] = mm_base.get('rate_percent_sim', 0.01)
+    l3_params['pkts_per_burst_hw'] = mm_base['pkts_per_burst_hw']
+    l3_params['rate_percent_hw'] = mm_base.get('rate_percent_hw', 10)
+    return l3_params
+
+
 # ============================================================================
 # BASE TEST CLASS (DCI base config + base testcases only)
 # ============================================================================
@@ -6491,6 +6506,656 @@ class TestVxlanDCIBase():
             st.log(summ)
             result = False
         
+        report_result(result, tc_id, summ)
+
+    # ========================================================================
+    # L3VNI MAC Move helper methods (reuse verify_mac_move_dci pattern)
+    # ========================================================================
+
+    def _l3vni_get_first_orphan_handle(self, node, topo_handles):
+        """Return port_handle, tg_handle, topo_handle for the first orphan port on node."""
+        if node not in topo_handles:
+            return None
+        for key, value in topo_handles[node].items():
+            if isinstance(key, str) and 'PortChannel' not in key:
+                return {
+                    'port_handle': value['port_handle'],
+                    'tg_handle': value['tg_handle'],
+                    'topo_handle': value['topology_handle'],
+                }
+        return None
+
+    def _l3vni_get_first_pc_handle(self, node, topo_handles):
+        """Return port_handle, tg_handle, topo_handle for the first PortChannel on node."""
+        if node not in topo_handles:
+            return None
+        for key, value in topo_handles[node].items():
+            if isinstance(key, str) and 'PortChannel' in key:
+                return {
+                    'port_handle': value['port_handle'],
+                    'tg_handle': value['tg_handle'],
+                    'topo_handle': value['topology_handle'],
+                }
+        return None
+
+    def _l3vni_get_handle(self, node, topo_handles, prefer_pc=False):
+        """Return handle for node; prefer PC if prefer_pc else orphan."""
+        if prefer_pc:
+            h = self._l3vni_get_first_pc_handle(node, topo_handles)
+            if h:
+                return h
+        return self._l3vni_get_first_orphan_handle(node, topo_handles)
+
+    def _l3vni_send_traffic(self, tg_handle, traffic_items):
+        """Run then stop traffic for the given stream handles."""
+        if isinstance(traffic_items, list):
+            for item in traffic_items:
+                tg_handle.tg_traffic_control(action='run', stream_handle=item)
+            st.wait(5)
+            for item in traffic_items:
+                tg_handle.tg_traffic_control(action='stop', stream_handle=item)
+        else:
+            tg_handle.tg_traffic_control(action='run', stream_handle=traffic_items)
+            st.wait(5)
+            tg_handle.tg_traffic_control(action='stop', stream_handle=traffic_items)
+        st.wait(5)
+
+    def _l3vni_verify_mac(self, mac_addr, ip_addr=""):
+        """Run show bgp/arp/nd for diagnostic (no assert)."""
+        selected_nodes = [d for d in st.get_dut_names() if "leaf" in d]
+        cmd = 'vtysh -c "show bgp l2vpn evpn route type 2" | grep {} -A5'.format(mac_addr)
+        cmd1 = "show arp | grep {0} ; show nd | grep {0} ; show arp | grep {1} ; show nd | grep {1}".format(
+            mac_addr, ip_addr)
+        for dut in selected_nodes:
+            mac_obj.get_mac_entries_by_mac_address(dut, mac_addr)
+            st.config(dut, cmd, skip_error_check=True)
+            if ip_addr:
+                st.config(dut, cmd1, skip_error_check=True)
+
+    def _l3vni_cleanup_tgen(self, handles):
+        """Remove L3VNI MAC-move streams and device groups."""
+        tg_handle = handles.get('tg_handle')
+        if not tg_handle:
+            return
+        for key in ('src1_stream_handle', 'src2_stream_handle'):
+            sid = handles.get(key)
+            if sid:
+                try:
+                    tg_handle.tg_traffic_config(mode='remove', stream_id=sid)
+                except Exception:
+                    pass
+        for key in ('dest1_dg', 'dest2_dg', 'src_dg'):
+            dg = handles.get(key)
+            if dg:
+                try:
+                    tg_handle.tg_topology_config(device_group_handle=dg, mode='destroy')
+                except Exception:
+                    pass
+
+    def _l3vni_get_mh_expected_nodes(self, move_dir, dest1_node, dest2_node):
+        """Expand expected nodes for MH move directions to include ES peers."""
+        mh_dc1 = ['leaf0_dc1', 'leaf1_dc1']
+        mh_dc2 = ['leaf0_dc2', 'leaf1_dc2']
+        mm1 = [dest1_node]
+        mm2 = [dest2_node]
+        if move_dir == 'l3vni_mh_to_mh_across_dc':
+            mm1 = mh_dc1 if dest1_node in mh_dc1 else mm1
+            mm2 = mh_dc2 if dest2_node in mh_dc2 else mm2
+        elif move_dir == 'l3vni_orphan_to_mh_across_dc':
+            mm2 = mh_dc2 if dest2_node in mh_dc2 else mm2
+        return (mm1, mm2)
+
+    def get_l3vni_stream_handles_dci(self, move_dir, ip_version='ipv4'):
+        """
+        Build stream handles for DCI L3VNI MAC move (cross-VLAN, L3 routing).
+
+        Creates device groups for the moving host (VLAN 11) and traffic source
+        (VLAN 13) with IPv4 or IPv6, then builds two traffic streams from src
+        to dest1/dest2 ports so that validate_stats can verify which port
+        receives routed traffic.
+
+        move_dir: l3vni_orphan_within_dc | l3vni_orphan_across_dc |
+                  l3vni_orphan_to_mh_across_dc | l3vni_mh_to_mh_across_dc
+        ip_version: 'ipv4' or 'ipv6'
+        """
+        global tgen_handles
+        topo_handles = (tgen_handles or {}).get('topo_handles') or {}
+        # move_dir -> (dest1_node, dest2_node, src_node, dest1_pc, dest2_pc)
+        move_config = {
+            'l3vni_orphan_within_dc': ('leaf0_dc1', 'leaf1_dc1', 'leaf0_dc2', False, False),
+            'l3vni_orphan_across_dc': ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', False, False),
+            'l3vni_orphan_to_mh_across_dc': ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', False, True),
+            'l3vni_mh_to_mh_across_dc': ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', True, True),
+        }
+        if move_dir not in move_config:
+            st.log('get_l3vni_stream_handles_dci: move_dir "{}" not implemented'.format(move_dir))
+            return None
+        d1, d2, src, pc1, pc2 = move_config[move_dir]
+        h1 = self._l3vni_get_handle(d1, topo_handles, prefer_pc=pc1)
+        h2 = self._l3vni_get_handle(d2, topo_handles, prefer_pc=pc2)
+        h_src = self._l3vni_get_first_orphan_handle(src, topo_handles)
+        if not h1 or not h2 or not h_src:
+            st.log('get_l3vni_stream_handles_dci: cannot resolve handles for '
+                   'd1={} d2={} src={}'.format(d1, d2, src))
+            return None
+
+        mm_cfg = _get_dci_l3vni_mac_move_cfg()
+        host_vlan = mm_cfg['host_vlan']
+        src_vlan = mm_cfg['src_vlan']
+        dut_type = vxlan_obj.check_hw_or_sim(st.get_dut_names()[0])
+        if dut_type == 'hw':
+            pkts = mm_cfg['pkts_per_burst_hw']
+            rate = mm_cfg['rate_percent_hw']
+        else:
+            pkts = mm_cfg['pkts_per_burst_sim']
+            rate = mm_cfg['rate_percent_sim']
+
+        is_v4 = (ip_version == 'ipv4')
+        if is_v4:
+            host_mac = mm_cfg['host_mac_ipv4']
+            host_mac_d2 = mm_cfg['host_mac_ipv4_dest2']
+            src_mac = mm_cfg['src_mac_ipv4']
+            host_ip = mm_cfg['host_ipv4']
+            host_ip_d2 = mm_cfg['host_ipv4_dest2']
+            src_ip = mm_cfg['src_ipv4']
+            gw = mm_cfg['gateway_v4']
+            src_gw = mm_cfg['src_gateway_v4']
+        else:
+            host_mac = mm_cfg['host_mac_ipv6']
+            host_mac_d2 = mm_cfg['host_mac_ipv6_dest2']
+            src_mac = mm_cfg['src_mac_ipv6']
+            host_ip = mm_cfg['host_ipv6']
+            host_ip_d2 = mm_cfg['host_ipv6_dest2']
+            src_ip = mm_cfg['src_ipv6']
+            gw = mm_cfg['gateway_v6']
+            src_gw = mm_cfg['src_gateway_v6']
+
+        tg = h1['tg_handle']
+        my = {
+            'tg_handle': tg,
+            'dest1_node': d1,
+            'dest2_node': d2,
+            'mm_host': {
+                'src1': {'mac': host_mac, 'ip': host_ip},
+                'src2': {'mac': host_mac_d2, 'ip': host_ip_d2},
+            },
+        }
+
+        # --- Dest1 device group (host on host_vlan at dest1) ---
+        st.log("################################################################################")
+        st.log("#  [L3VNI dest1] node={} vlan={} mac={} ip={} gw={}".format(
+            d1, host_vlan, host_mac, host_ip, gw))
+        st.log("################################################################################")
+        dg1 = tg.tg_topology_config(
+            topology_handle=h1['topo_handle'],
+            device_group_name="l3vni_mm_dest1", device_group_multiplier="1",
+            device_group_enabled="1")
+        my['dest1_dg'] = dg1.get('device_group_handle')
+        eth1 = tg.tg_interface_config(
+            protocol_name="Eth_l3vni_dest1", protocol_handle=dg1['device_group_handle'],
+            mtu="1500", src_mac_addr=host_mac,
+            vlan=1, vlan_id=str(host_vlan), vlan_id_step=0, vlan_id_count=1)
+        if is_v4:
+            tg.tg_interface_config(
+                protocol_name="v4_l3vni_dest1", protocol_handle=eth1['ethernet_handle'],
+                ipv4_resolve_gateway="1", gateway=gw, intf_ip_addr=host_ip)
+        else:
+            tg.tg_interface_config(
+                protocol_name="v6_l3vni_dest1", protocol_handle=eth1['ethernet_handle'],
+                ipv6_resolve_gateway="1", ipv6_gateway=gw, ipv6_intf_addr=host_ip)
+
+        # --- Dest2 device group (host on host_vlan at dest2) ---
+        st.log("################################################################################")
+        st.log("#  [L3VNI dest2] node={} vlan={} mac={} ip={} gw={}".format(
+            d2, host_vlan, host_mac_d2, host_ip_d2, gw))
+        st.log("################################################################################")
+        dg2 = tg.tg_topology_config(
+            topology_handle=h2['topo_handle'],
+            device_group_name="l3vni_mm_dest2", device_group_multiplier="1",
+            device_group_enabled="1")
+        my['dest2_dg'] = dg2.get('device_group_handle')
+        eth2 = tg.tg_interface_config(
+            protocol_name="Eth_l3vni_dest2", protocol_handle=dg2['device_group_handle'],
+            mtu="1500", src_mac_addr=host_mac_d2,
+            vlan=1, vlan_id=str(host_vlan), vlan_id_step=0, vlan_id_count=1)
+        if is_v4:
+            tg.tg_interface_config(
+                protocol_name="v4_l3vni_dest2", protocol_handle=eth2['ethernet_handle'],
+                ipv4_resolve_gateway="1", gateway=gw, intf_ip_addr=host_ip_d2)
+        else:
+            tg.tg_interface_config(
+                protocol_name="v6_l3vni_dest2", protocol_handle=eth2['ethernet_handle'],
+                ipv6_resolve_gateway="1", ipv6_gateway=gw, ipv6_intf_addr=host_ip_d2)
+
+        # --- Source device group (traffic src on src_vlan) ---
+        st.log("################################################################################")
+        st.log("#  [L3VNI src] node={} vlan={} mac={} ip={} gw={}".format(
+            src, src_vlan, src_mac, src_ip, src_gw))
+        st.log("################################################################################")
+        dg_src = tg.tg_topology_config(
+            topology_handle=h_src['topo_handle'],
+            device_group_name="l3vni_mm_src", device_group_multiplier="1",
+            device_group_enabled="1")
+        my['src_dg'] = dg_src.get('device_group_handle')
+        eth_src = tg.tg_interface_config(
+            protocol_name="Eth_l3vni_src", protocol_handle=dg_src['device_group_handle'],
+            mtu="1500", src_mac_addr=src_mac,
+            vlan=1, vlan_id=str(src_vlan), vlan_id_step=0, vlan_id_count=1)
+        if is_v4:
+            tg.tg_interface_config(
+                protocol_name="v4_l3vni_src", protocol_handle=eth_src['ethernet_handle'],
+                ipv4_resolve_gateway="1", gateway=src_gw, intf_ip_addr=src_ip)
+        else:
+            tg.tg_interface_config(
+                protocol_name="v6_l3vni_src", protocol_handle=eth_src['ethernet_handle'],
+                ipv6_resolve_gateway="1", ipv6_gateway=src_gw, ipv6_intf_addr=src_ip)
+
+        tg.tg_test_control(action="apply_on_the_fly_changes", handle=my['dest1_dg'])
+        tg.tg_test_control(action="apply_on_the_fly_changes", handle=my['dest2_dg'])
+        tg.tg_test_control(action="apply_on_the_fly_changes", handle=my['src_dg'])
+
+        # --- Traffic streams: src -> dest1, src -> dest2 ---
+        kw = dict(emulation_src_handle=h_src['port_handle'], mode='create',
+                  transmit_mode='single_burst', pkts_per_burst=pkts, rate_percent=rate,
+                  circuit_type='raw', frame_size=1000, src_dest_mesh='one_to_one',
+                  track_by='endpoint_pair')
+        if is_v4:
+            st.log("################################################################################")
+            st.log("#  [src1] src_mac={} src_ip={} dst_mac={} dst_ip={}".format(
+                src_mac, src_ip, host_mac, host_ip))
+            st.log("################################################################################")
+            src1 = tg.tg_traffic_config(
+                emulation_dst_handle=h1['port_handle'], mac_src=src_mac,
+                mac_dst=host_mac, ip_src_addr=src_ip, ip_dst_addr=host_ip,
+                vlan_id=src_vlan, **kw)
+            st.wait(2)
+            st.log("################################################################################")
+            st.log("#  [src2] src_mac={} src_ip={} dst_mac={} dst_ip={}".format(
+                src_mac, src_ip, host_mac_d2, host_ip_d2))
+            st.log("################################################################################")
+            src2 = tg.tg_traffic_config(
+                emulation_dst_handle=h2['port_handle'], mac_src=src_mac,
+                mac_dst=host_mac_d2, ip_src_addr=src_ip, ip_dst_addr=host_ip_d2,
+                vlan_id=src_vlan, **kw)
+        else:
+            st.log("################################################################################")
+            st.log("#  [src1] src_mac={} src_ip={} dst_mac={} dst_ip={}".format(
+                src_mac, src_ip, host_mac, host_ip))
+            st.log("################################################################################")
+            src1 = tg.tg_traffic_config(
+                emulation_dst_handle=h1['port_handle'], mac_src=src_mac,
+                mac_dst=host_mac, ipv6_src_addr=src_ip, ipv6_dst_addr=host_ip,
+                vlan_id=src_vlan, **kw)
+            st.wait(2)
+            st.log("################################################################################")
+            st.log("#  [src2] src_mac={} src_ip={} dst_mac={} dst_ip={}".format(
+                src_mac, src_ip, host_mac_d2, host_ip_d2))
+            st.log("################################################################################")
+            src2 = tg.tg_traffic_config(
+                emulation_dst_handle=h2['port_handle'], mac_src=src_mac,
+                mac_dst=host_mac_d2, ipv6_src_addr=src_ip, ipv6_dst_addr=host_ip_d2,
+                vlan_id=src_vlan, **kw)
+        st.wait(2)
+        my['src1_stream_handle'] = src1.get('stream_id')
+        my['src2_stream_handle'] = src2.get('stream_id')
+        my['dest1_handle'] = my['dest1_dg']
+        my['dest2_handle'] = my['dest2_dg']
+        return my
+
+    def verify_l3vni_mac_move_dci(self, tc_id, move_dir, ip_version='ipv4'):
+        """
+        L3VNI host mobility verification — reuses the 9-phase pattern from
+        verify_mac_move_dci but with cross-VLAN (L3-routed) traffic.
+
+        Phases:
+          1. Learn host at dest1 (start protocol on dest1 device group)
+          2. Verify Type-2 MAC+IP at dest1
+          3. Traffic before move (src on VLAN 13 -> host on VLAN 11 at dest1)
+          4. Move host from dest1 to dest2
+          5. Verify MAC at dest2 with seq=1
+          6. Traffic after 1st move
+          7. Move host back from dest2 to dest1
+          8. Verify MAC at dest1 with seq=2
+          9. Traffic after move back
+        """
+        _sep = "=" * 60
+        st.banner("DCI L3VNI MAC MOVE: {}".format(tc_id))
+        st.log("{}".format(_sep))
+        st.log("  move_dir={}  ip_version={}".format(move_dir, ip_version))
+        st.log("{}".format(_sep))
+
+        mm_handles = self.get_l3vni_stream_handles_dci(move_dir, ip_version)
+        if not mm_handles:
+            st.log("[FAIL] get_l3vni_stream_handles_dci returned None")
+            st.banner("DCI L3VNI MAC MOVE FAILED: {} (Setup)".format(tc_id))
+            return False
+
+        tg_handle = mm_handles['tg_handle']
+        dest1_node = mm_handles['dest1_node']
+        dest2_node = mm_handles['dest2_node']
+        mm1_list, mm2_list = self._l3vni_get_mh_expected_nodes(move_dir, dest1_node, dest2_node)
+        host_type = 'mac+ipv4' if ip_version == 'ipv4' else 'mac+ipv6'
+
+        # --- PHASE 1: Learn host at dest1 ---
+        st.log("")
+        st.log("--- PHASE 1: Learn host at dest1 ({}) ---".format(dest1_node))
+        tg_handle.tg_test_control(action="start_protocol", handle=mm_handles['dest1_handle'])
+        st.wait(5)
+        st.log("  Started protocol on dest1 device group")
+        self._l3vni_verify_mac(
+            mm_handles['mm_host']['src1']['mac'],
+            ip_addr=mm_handles['mm_host']['src1'].get('ip', ''))
+
+        # --- PHASE 2: Verify MAC at dest1 (no seq check) ---
+        st.log("")
+        st.log("--- PHASE 2: Verify MAC at dest1 before traffic (no seq check) ---")
+        check_mm_1 = vxlan_obj.verify_mac_seq(
+            mm_handles['mm_host']['src1'],
+            mac_move_seq='', host_local_node=mm1_list, host_type=host_type,
+            is_mh_host=False, dci_enabled=True, check_seq=False)
+        st.log("  Expected: MAC on {}  Result: {}".format(
+            dest1_node, "PASS" if check_mm_1 else "FAIL"))
+        if not check_mm_1:
+            st.log("[FAIL] MAC not found at dest1")
+            tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
+            st.wait(2)
+            self._l3vni_cleanup_tgen(mm_handles)
+            st.banner("DCI L3VNI MAC MOVE FAILED: {} (Phase 2: MAC at dest1)".format(tc_id))
+            return False
+
+        # --- PHASE 3: Traffic BEFORE move ---
+        st.log("")
+        st.log("--- PHASE 3: Traffic BEFORE move (host at {}) ---".format(dest1_node))
+        self._l3vni_send_traffic(tg_handle,
+                                 [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']])
+        out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+        out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+        st.log("  Stream to {} (host here):  rx={}  [expect PASS]".format(
+            dest1_node, "PASS" if out1 else "FAIL"))
+        st.log("  Stream to {} (host away):  rx={}  [expect FAIL]".format(
+            dest2_node, "PASS" if out2 else "FAIL"))
+        if not (out1 and not out2):
+            st.log("[FAIL] L3VNI traffic should reach dest1 only (host at dest1)")
+            tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
+            st.wait(2)
+            self._l3vni_cleanup_tgen(mm_handles)
+            st.banner("{} : L3VNI traffic failed when no host move".format(ip_version))
+            st.banner("DCI L3VNI MAC MOVE FAILED: {} (Phase 3)".format(tc_id))
+            return False
+        st.log("  Traffic check: PASS")
+        st.banner("{} : L3VNI traffic passed as expected when no host move".format(ip_version))
+
+        # --- PHASE 4: Move host from dest1 to dest2 ---
+        st.log("")
+        st.log("--- PHASE 4: Move host from {} to {} ---".format(dest1_node, dest2_node))
+        tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
+        st.wait(2)
+        tg_handle.tg_test_control(action="start_protocol", handle=mm_handles['dest2_handle'])
+        st.wait(5)
+        st.log("  Stopped dest1 protocol, started dest2 protocol")
+        self._l3vni_verify_mac(
+            mm_handles['mm_host']['src2']['mac'],
+            ip_addr=mm_handles['mm_host']['src2'].get('ip', ''))
+
+        # --- PHASE 5: Verify MAC at dest2 (seq=1) ---
+        st.log("")
+        exp_seq = '1'
+        st.log("--- PHASE 5: Verify MAC at dest2 (seq={}) after move ---".format(exp_seq))
+        check_mm_2 = vxlan_obj.verify_mac_seq(
+            mm_handles['mm_host']['src2'],
+            mac_move_seq=exp_seq, host_local_node=mm2_list, host_type=host_type,
+            is_mh_host=False, dci_enabled=True)
+        st.log("  Expected: MAC on {} with seq={}  Result: {}".format(
+            dest2_node, exp_seq, "PASS" if check_mm_2 else "FAIL"))
+        if not check_mm_2:
+            st.log("[FAIL] MAC not found at dest2 or wrong sequence")
+            tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest2_handle'])
+            st.wait(2)
+            self._l3vni_cleanup_tgen(mm_handles)
+            st.banner("DCI L3VNI MAC MOVE FAILED: {} (Phase 5: MAC at dest2)".format(tc_id))
+            return False
+
+        # --- PHASE 6: Traffic AFTER 1st move ---
+        st.log("")
+        st.log("--- PHASE 6: Traffic AFTER 1st move (host at {}) ---".format(dest2_node))
+        self._l3vni_send_traffic(tg_handle,
+                                 [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']])
+        out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+        out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+        st.log("  Stream to {} (host away):  rx={}  [expect FAIL]".format(
+            dest1_node, "PASS" if out1 else "FAIL"))
+        st.log("  Stream to {} (host here):  rx={}  [expect PASS]".format(
+            dest2_node, "PASS" if out2 else "FAIL"))
+        if not (not out1 and out2):
+            st.log("[FAIL] L3VNI traffic should reach dest2 only (host moved to dest2)")
+            tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest2_handle'])
+            st.wait(2)
+            self._l3vni_cleanup_tgen(mm_handles)
+            st.banner("{} : L3VNI traffic failed after first move".format(ip_version))
+            st.banner("DCI L3VNI MAC MOVE FAILED: {} (Phase 6)".format(tc_id))
+            return False
+        st.log("  Traffic check: PASS")
+        st.banner("{} : L3VNI traffic passed as expected after first move".format(ip_version))
+
+        # --- PHASE 7: Move host back from dest2 to dest1 ---
+        st.log("")
+        st.log("--- PHASE 7: Move host back from {} to {} ---".format(dest2_node, dest1_node))
+        tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest2_handle'])
+        st.wait(2)
+        tg_handle.tg_test_control(action="start_protocol", handle=mm_handles['dest1_handle'])
+        st.wait(5)
+        st.log("  Stopped dest2 protocol, started dest1 protocol")
+        self._l3vni_verify_mac(
+            mm_handles['mm_host']['src1']['mac'],
+            ip_addr=mm_handles['mm_host']['src1'].get('ip', ''))
+
+        # --- PHASE 8: Verify MAC at dest1 (seq=2) ---
+        st.log("")
+        exp_seq_2 = '2'
+        st.log("--- PHASE 8: Verify MAC at dest1 (seq={}) after move back ---".format(exp_seq_2))
+        check_mm_3 = vxlan_obj.verify_mac_seq(
+            mm_handles['mm_host']['src1'],
+            mac_move_seq=exp_seq_2, host_local_node=mm1_list, host_type=host_type,
+            is_mh_host=False, dci_enabled=True)
+        st.log("  Expected: MAC on {} with seq={}  Result: {}".format(
+            dest1_node, exp_seq_2, "PASS" if check_mm_3 else "FAIL"))
+        if not check_mm_3:
+            st.log("[FAIL] MAC not found at dest1 or wrong sequence after move back")
+            tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
+            st.wait(2)
+            self._l3vni_cleanup_tgen(mm_handles)
+            st.banner("DCI L3VNI MAC MOVE FAILED: {} (Phase 8)".format(tc_id))
+            return False
+
+        # --- PHASE 9: Traffic AFTER move back ---
+        st.log("")
+        st.log("--- PHASE 9: Traffic AFTER move back (host at {}) ---".format(dest1_node))
+        self._l3vni_send_traffic(tg_handle,
+                                 [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']])
+        out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+        out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+        st.log("  Stream to {} (host here):  rx={}  [expect PASS]".format(
+            dest1_node, "PASS" if out1 else "FAIL"))
+        st.log("  Stream to {} (host away):  rx={}  [expect FAIL]".format(
+            dest2_node, "PASS" if out2 else "FAIL"))
+        if not (out1 and not out2):
+            st.log("[FAIL] L3VNI traffic should reach dest1 only (host moved back)")
+            tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
+            st.wait(2)
+            self._l3vni_cleanup_tgen(mm_handles)
+            st.banner("{} : L3VNI traffic failed after mac move to original".format(ip_version))
+            st.banner("DCI L3VNI MAC MOVE FAILED: {} (Phase 9)".format(tc_id))
+            return False
+        st.log("  Traffic check: PASS")
+        st.banner("{} : L3VNI traffic passed after mac move to original".format(ip_version))
+
+        # Cleanup
+        tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
+        st.wait(2)
+        self._l3vni_cleanup_tgen(mm_handles)
+
+        st.log("")
+        st.log("{}".format(_sep))
+        st.banner("DCI L3VNI MAC MOVE PASSED: {} ({} -> {} -> {})".format(
+            tc_id, dest1_node, dest2_node, dest1_node))
+        st.log("{}".format(_sep))
+        return True
+
+    # ========================================================================
+    # L3VNI MAC Move test cases (L3VNI_dci:59, 60, 62, 63)
+    # ========================================================================
+
+    def test_base_dci_l3vni_mac_move_within_dc(self):
+        """
+        L3VNI_dci:59 - L3VNI Host Mobility: host move within DC (same VRF).
+
+        Description:
+            Host on VLAN 11 (VRF 101) moves between orphan ports within DC1
+            (leaf0_dc1 -> leaf1_dc1 -> leaf0_dc1).  Traffic source is on
+            leaf0_dc2 VLAN 13 (same VRF, different subnet) so traffic is
+            routed via L3VNI.  Verify Type-2 route updates with incremented
+            MM sequence and L3 traffic follows the host.
+
+        Steps:
+            1. Learn host at leaf0_dc1 on VLAN 11
+            2. Send L3 traffic from leaf0_dc2 VLAN 13 -> host IP on VLAN 11
+            3. Move host to leaf1_dc1, verify seq=1, verify traffic
+            4. Move host back to leaf0_dc1, verify seq=2, verify traffic
+        """
+        tc_id = "test_base_dci_l3vni_mac_move_within_dc"
+        st.banner('L3VNI_dci:59: L3VNI Host Mobility - Host move within DC ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        # IPv4 L3VNI traffic
+        st.banner('Step 1: L3VNI MAC move within DC - IPv4')
+        res_v4 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv4]", "l3vni_orphan_within_dc", "ipv4")
+        if not res_v4:
+            summ += 'L3VNI MAC move within DC IPv4: Fail\n'
+            result = False
+
+        # IPv6 L3VNI traffic
+        st.banner('Step 2: L3VNI MAC move within DC - IPv6')
+        res_v6 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv6]", "l3vni_orphan_within_dc", "ipv6")
+        if not res_v6:
+            summ += 'L3VNI MAC move within DC IPv6: Fail\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_mac_move_across_dci(self):
+        """
+        L3VNI_dci:60 - L3VNI Host Mobility: host move across DCI (DC1 to DC2).
+
+        Description:
+            Host on VLAN 11 (VRF 101) moves between orphan ports across DCs
+            (leaf0_dc1 -> leaf0_dc2 -> leaf0_dc1).  Traffic source is on
+            leaf2_dc1 VLAN 13 (same VRF, different subnet) so traffic is
+            routed via L3VNI across DCI.  Verify Type-2 route updates with
+            incremented MM sequence and L3 traffic follows the host across DCs.
+
+        Steps:
+            1. Learn host at leaf0_dc1 on VLAN 11
+            2. Send L3 traffic from leaf2_dc1 VLAN 13 -> host IP on VLAN 11
+            3. Move host to leaf0_dc2, verify seq=1, verify traffic
+            4. Move host back to leaf0_dc1, verify seq=2, verify traffic
+        """
+        tc_id = "test_base_dci_l3vni_mac_move_across_dci"
+        st.banner('L3VNI_dci:60: L3VNI Host Mobility - Host move across DCI ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        st.banner('Step 1: L3VNI MAC move across DCI - IPv4')
+        res_v4 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv4]", "l3vni_orphan_across_dc", "ipv4")
+        if not res_v4:
+            summ += 'L3VNI MAC move across DCI IPv4: Fail\n'
+            result = False
+
+        st.banner('Step 2: L3VNI MAC move across DCI - IPv6')
+        res_v6 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv6]", "l3vni_orphan_across_dc", "ipv6")
+        if not res_v6:
+            summ += 'L3VNI MAC move across DCI IPv6: Fail\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_mac_move_orphan_to_mh(self):
+        """
+        L3VNI_dci:62 - L3VNI Host Mobility: host move from orphan to MH port.
+
+        Description:
+            Host on VLAN 11 (VRF 101) moves from orphan port on leaf0_dc1 to
+            PortChannel (MH) on leaf0_dc2 and back.  Traffic source is on
+            leaf2_dc1 VLAN 13.  Verify Type-2 route updates, Type-1/Type-4
+            routes for ESI, and L3 traffic follows the host to MH port.
+
+        Steps:
+            1. Learn host at leaf0_dc1 orphan port on VLAN 11
+            2. Send L3 traffic from leaf2_dc1 VLAN 13 -> host IP on VLAN 11
+            3. Move host to leaf0_dc2 PortChannel, verify seq=1, verify traffic
+            4. Move host back to leaf0_dc1, verify seq=2, verify traffic
+        """
+        tc_id = "test_base_dci_l3vni_mac_move_orphan_to_mh"
+        st.banner('L3VNI_dci:62: L3VNI Host Mobility - Orphan to MH port ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        st.banner('Step 1: L3VNI MAC move orphan->MH across DCI - IPv4')
+        res_v4 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv4]", "l3vni_orphan_to_mh_across_dc", "ipv4")
+        if not res_v4:
+            summ += 'L3VNI MAC move orphan->MH IPv4: Fail\n'
+            result = False
+
+        st.banner('Step 2: L3VNI MAC move orphan->MH across DCI - IPv6')
+        res_v6 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv6]", "l3vni_orphan_to_mh_across_dc", "ipv6")
+        if not res_v6:
+            summ += 'L3VNI MAC move orphan->MH IPv6: Fail\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_mac_move_mh_to_mh(self):
+        """
+        L3VNI_dci:63 - L3VNI Host Mobility: host move from MH to MH port.
+
+        Description:
+            Host on VLAN 11 (VRF 101) moves between PortChannel (MH) ports
+            across DCs (leaf0_dc1 MH -> leaf0_dc2 MH -> leaf0_dc1 MH).
+            Traffic source is on leaf2_dc1 VLAN 13.  Verify Type-2 route
+            updates, Type-1/Type-4 routes for both ESIs, and L3 traffic
+            follows the host between MH ports.
+
+        Steps:
+            1. Learn host at leaf0_dc1 PortChannel on VLAN 11
+            2. Send L3 traffic from leaf2_dc1 VLAN 13 -> host IP on VLAN 11
+            3. Move host to leaf0_dc2 PortChannel, verify seq=1, verify traffic
+            4. Move host back to leaf0_dc1 PortChannel, verify seq=2, verify traffic
+        """
+        tc_id = "test_base_dci_l3vni_mac_move_mh_to_mh"
+        st.banner('L3VNI_dci:63: L3VNI Host Mobility - MH to MH port ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        st.banner('Step 1: L3VNI MAC move MH->MH across DCI - IPv4')
+        res_v4 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv4]", "l3vni_mh_to_mh_across_dc", "ipv4")
+        if not res_v4:
+            summ += 'L3VNI MAC move MH->MH IPv4: Fail\n'
+            result = False
+
+        st.banner('Step 2: L3VNI MAC move MH->MH across DCI - IPv6')
+        res_v6 = self.verify_l3vni_mac_move_dci(
+            tc_id + " [IPv6]", "l3vni_mh_to_mh_across_dc", "ipv6")
+        if not res_v6:
+            summ += 'L3VNI MAC move MH->MH IPv6: Fail\n'
+            result = False
+
         report_result(result, tc_id, summ)
 
 

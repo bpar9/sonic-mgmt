@@ -2824,6 +2824,101 @@ def find_l3_dci_traffic_endpoints(host_info_dict, config_dict, vrf_vlan_dict=Non
     return endpoints
 
 
+def get_l3vni_mac_move_params(config_dict, host_vlan=11, src_vlan=13, vrf_id=101):
+    """
+    Return L3VNI MAC move endpoint parameters for cross-VLAN host mobility tests.
+
+    Derives gateway IPs, host IPs, and MACs from the topology config for the
+    given host_vlan (where the moving host resides) and src_vlan (where the
+    traffic source resides).  Both VLANs must belong to the same VRF so that
+    traffic is routed via L3VNI.
+
+    Parameters
+    ----------
+    config_dict : dict
+        Parsed YAML topology/config dictionary (test_cfg).
+    host_vlan : int
+        VLAN ID on which the moving host is emulated (default 11).
+    src_vlan : int
+        VLAN ID on which the traffic source is emulated (default 13).
+    vrf_id : int
+        VRF ID that binds both VLANs (default 101).
+
+    Returns
+    -------
+    dict with keys:
+        host_vlan, src_vlan, vrf_id,
+        gateway_v4, gateway_v6          -- SAG gateway for host_vlan
+        src_gateway_v4, src_gateway_v6  -- SAG gateway for src_vlan
+        host_ipv4, host_ipv4_dest2      -- host IPv4 addresses at dest1/dest2
+        src_ipv4                        -- source IPv4 address
+        host_ipv6, host_ipv6_dest2      -- host IPv6 addresses at dest1/dest2
+        src_ipv6                        -- source IPv6 address
+        host_mac, host_mac_dest2        -- host MACs (locally-administered)
+        src_mac                         -- source MAC
+    """
+    # IP addressing follows the existing per-VLAN scheme: 80.<vlan>.0.x / 8000:<vlan>::x
+    hv = host_vlan
+    sv = src_vlan
+
+    params = {
+        'host_vlan': host_vlan,
+        'src_vlan': src_vlan,
+        'vrf_id': vrf_id,
+        # SAG gateways (first address on each VLAN subnet)
+        'gateway_v4': '80.{}.0.1'.format(hv),
+        'gateway_v6': '8000:{:x}::1'.format(hv),
+        'src_gateway_v4': '80.{}.0.1'.format(sv),
+        'src_gateway_v6': '8000:{:x}::1'.format(sv),
+        # Host IPs on host_vlan (.51/.52 to avoid SAG host range 10-30)
+        'host_ipv4': '80.{}.0.51'.format(hv),
+        'host_ipv4_dest2': '80.{}.0.52'.format(hv),
+        'src_ipv4': '80.{}.0.51'.format(sv),
+        'host_ipv6': '8000:{:x}::51'.format(hv),
+        'host_ipv6_dest2': '8000:{:x}::52'.format(hv),
+        'src_ipv6': '8000:{:x}::51'.format(sv),
+        # Locally-administered MACs (02:00:00 prefix, disjoint from L2 MAC-move range)
+        'host_mac': '02:00:00:00:{:02x}:51'.format(hv),
+        'host_mac_dest2': '02:00:00:00:{:02x}:52'.format(hv),
+        'src_mac': '02:00:00:00:{:02x}:51'.format(sv),
+        'host_mac_ipv4': '02:00:00:04:{:02x}:51'.format(hv),
+        'host_mac_ipv4_dest2': '02:00:00:04:{:02x}:52'.format(hv),
+        'src_mac_ipv4': '02:00:00:04:{:02x}:51'.format(sv),
+        'host_mac_ipv6': '02:00:00:06:{:02x}:51'.format(hv),
+        'host_mac_ipv6_dest2': '02:00:00:06:{:02x}:52'.format(hv),
+        'src_mac_ipv6': '02:00:00:06:{:02x}:51'.format(sv),
+    }
+
+    # Validate that both VLANs belong to the specified VRF in the config
+    vrf_key = 'vrf_id'
+    vlan_found_in_vrf = {'host': False, 'src': False}
+    for node_name, node_cfg in config_dict.items():
+        if not isinstance(node_cfg, dict) or 'l3vni' not in node_cfg:
+            continue
+        for vrf_entry in node_cfg.get('l3vni', []):
+            if vrf_entry.get(vrf_key) == vrf_id:
+                bindings = vrf_entry.get('vlan_bindings', [])
+                if host_vlan in bindings:
+                    vlan_found_in_vrf['host'] = True
+                if src_vlan in bindings:
+                    vlan_found_in_vrf['src'] = True
+        if vlan_found_in_vrf['host'] and vlan_found_in_vrf['src']:
+            break
+
+    if not vlan_found_in_vrf['host']:
+        st.log('get_l3vni_mac_move_params: WARNING host_vlan {} not found '
+               'in VRF {} bindings'.format(host_vlan, vrf_id))
+    if not vlan_found_in_vrf['src']:
+        st.log('get_l3vni_mac_move_params: WARNING src_vlan {} not found '
+               'in VRF {} bindings'.format(src_vlan, vrf_id))
+
+    st.log('get_l3vni_mac_move_params: host_vlan={} src_vlan={} vrf={} '
+           'gw_v4={} src_gw_v4={}'.format(
+               host_vlan, src_vlan, vrf_id,
+               params['gateway_v4'], params['src_gateway_v4']))
+    return params
+
+
 def create_traffic_item(device_handles, endpoints, topo_handles, transmit_mode="single_burst",
                         version = "ipv4", udp_header = False, multi_dst = None, name_prfx='TI', 
                         circuit_type='default', rx_all_ports=False, 

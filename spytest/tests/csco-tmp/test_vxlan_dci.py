@@ -5378,125 +5378,131 @@ class TestVxlanDCIBase():
         st.log('IPv6 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv6_prefixes]))
         
-        # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
-        # DUT SVI: both IPv4 + IPv6 (IXIA needs IPv4 stack for protocol framework).
-        # DUT BGP: IPv6-only neighbor — only v6 neighbor and v6 address-family.
-        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (v4+v6) and IPv6-only BGP neighbor for IXIA peer on {}'.format(leaf_node))
-        vxlan_obj.configure_dut_ixia_l3_intf(
-            dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_mask='24',
-            svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64',
-            dut_intf=dut_intf)
-        vxlan_obj.configure_dut_bgp_for_ixia(
-            dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
-            vrf_name='Vrf101', ixia_ipv6=ixia_ipv6)
+        # Wrap the entire config/verify/cleanup sequence in try/finally so that
+        # cleanup always runs even if the test fails mid-way with an exception.
+        # This prevents stale VLAN/BGP/IXIA config from affecting subsequent tests.
+        bgp_handle = None
+        interface_handle = None
+        ixia_configured = False
+        dut_configured = False
         
-        # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
-        # Pass the existing topology_handle so the helper creates a device group
-        # on the existing topology instead of creating a new one (Error 6502).
-        # IXIA: IPv4 stack (required by IXIA protocol framework) + IPv6 stack
-        # for IPv6 BGP peering.  Only IPv6 BGP peer is created; IPv6 prefixes
-        # are advertised under IPv6 address-family.
-        st.banner('Step 3b: Configure IXIA BGP IPv6 session per bgp_ixia.txt pattern')
-        ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
-            tg_handle=tg_handle,
-            port_handle=port_handle,
-            topology_handle=topo_handle,
-            src_mac=ixia_mac,
-            ixia_asn=ixia_asn,
-            leaf_asn=leaf_asn,
-            ipv6_prefixes=ipv6_prefixes,
-            ixia_ip=ixia_ip,
-            gateway=ixia_gateway,
-            netmask=ixia_netmask,
-            vlan_enabled='1',
-            vlan_id='99',
-            ixia_ipv6=ixia_ipv6,
-            gateway_ipv6=ixia_gateway_ipv6
-        )
-        
-        if not ixia_result['result']:
-            summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
-            # Cleanup DUT config on failure
-            vxlan_obj.remove_dut_bgp_for_ixia(
-                dut=leaf_node, leaf_asn=leaf_asn, vrf_name='Vrf101',
-                ixia_ipv6=ixia_ipv6)
-            vxlan_obj.remove_dut_ixia_l3_intf(
+        try:
+            # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
+            # DUT SVI: both IPv4 + IPv6 (IXIA needs IPv4 stack for protocol framework).
+            # DUT BGP: IPv6-only neighbor — only v6 neighbor and v6 address-family.
+            st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (v4+v6) and IPv6-only BGP neighbor for IXIA peer on {}'.format(leaf_node))
+            vxlan_obj.configure_dut_ixia_l3_intf(
                 dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-                svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
+                svi_ip=ixia_gateway, svi_mask='24',
+                svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64',
                 dut_intf=dut_intf)
-            report_result(False, tc_id, summ)
-            return
-        
-        bgp_handle = ixia_result['bgp_handle']
-        interface_handle = ixia_result['interface_handle']
-        st.log('IXIA BGP session configured successfully')
-        st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
-        
-        # --- Step 4: Start BGP protocol on IXIA ---
-        st.banner('Step 4: Start BGP protocol on IXIA')
-        st.log('Applying changes for IXIA before starting BGP')
-        tg_handle.tg_test_control(action='apply_on_the_fly_changes')
-        st.wait(10)
-        try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
-            st.log('BGP protocol started on IXIA')
-            # Wait for BGP session to establish and routes to propagate
-            st.wait(30)
-        except Exception as e:
-            st.log('Warning: BGP protocol start returned: {}'.format(e))
-        
-        # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
-        st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
-        expected_ipv6_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
-                                  for p in ipv6_prefixes]
-        bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
-            dut=leaf_node, vrf_name='Vrf101',
-            expected_prefixes=expected_ipv6_prefixes,
-            ixia_ipv6=ixia_ipv6, addr_family='ipv6')
-        if not bgp_verify['result']:
-            summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
-            result = False
-        
-        # --- Step 5: Verify Type-5 routes on BGW nodes ---
-        # First verify base Type-5 routes (comprehensive check), then verify
-        # the specific IXIA-advertised prefixes appear as Type-5 routes.
-        st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv6 prefixes on BGW nodes')
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        st.log('BGW nodes to verify: {}'.format(bgw_nodes))
-        
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
-            summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv6 prefix advertisement\n'
-            result = False
-        
-        # Step 5b: Verify IXIA-advertised IPv6 prefixes specifically as Type-5 routes
-        st.banner('Step 5b: Verify IXIA IPv6 prefixes present as Type-5 routes on BGW nodes')
-        ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
-                            for p in ipv6_prefixes]
-        for bgw_node in bgw_nodes:
-            if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
-                             bgw_node, ixia_prefix_strs, expect_present=True):
-                summ += 'IXIA IPv6 Type-5 routes not found on {}\n'.format(bgw_node)
+            vxlan_obj.configure_dut_bgp_for_ixia(
+                dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
+                vrf_name='Vrf101', ixia_ipv6=ixia_ipv6)
+            dut_configured = True
+            
+            # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
+            # Pass the existing topology_handle so the helper creates a device group
+            # on the existing topology instead of creating a new one (Error 6502).
+            # IXIA: IPv4 stack (required by IXIA protocol framework) + IPv6 stack
+            # for IPv6 BGP peering.  Only IPv6 BGP peer is created; IPv6 prefixes
+            # are advertised under IPv6 address-family.
+            st.banner('Step 3b: Configure IXIA BGP IPv6 session per bgp_ixia.txt pattern')
+            ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
+                tg_handle=tg_handle,
+                port_handle=port_handle,
+                topology_handle=topo_handle,
+                src_mac=ixia_mac,
+                ixia_asn=ixia_asn,
+                leaf_asn=leaf_asn,
+                ipv6_prefixes=ipv6_prefixes,
+                ixia_ip=ixia_ip,
+                gateway=ixia_gateway,
+                netmask=ixia_netmask,
+                vlan_enabled='1',
+                vlan_id='99',
+                ixia_ipv6=ixia_ipv6,
+                gateway_ipv6=ixia_gateway_ipv6
+            )
+            
+            if not ixia_result['result']:
+                summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
+                report_result(False, tc_id, summ)
+                return
+            
+            bgp_handle = ixia_result['bgp_handle']
+            interface_handle = ixia_result['interface_handle']
+            ixia_configured = True
+            st.log('IXIA BGP session configured successfully')
+            st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
+            
+            # --- Step 4: Start BGP protocol on IXIA ---
+            st.banner('Step 4: Start BGP protocol on IXIA')
+            st.log('Applying changes for IXIA before starting BGP')
+            tg_handle.tg_test_control(action='apply_on_the_fly_changes')
+            st.wait(10)
+            try:
+                tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
+                st.log('BGP protocol started on IXIA')
+                # Wait for BGP session to establish and routes to propagate
+                st.wait(30)
+            except Exception as e:
+                st.log('Warning: BGP protocol start returned: {}'.format(e))
+            
+            # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
+            st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
+            expected_ipv6_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                      for p in ipv6_prefixes]
+            bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
+                dut=leaf_node, vrf_name='Vrf101',
+                expected_prefixes=expected_ipv6_prefixes,
+                ixia_ipv6=ixia_ipv6, addr_family='ipv6')
+            if not bgp_verify['result']:
+                summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
                 result = False
-            else:
-                st.log('IXIA IPv6 Type-5 routes verified on {}'.format(bgw_node))
+            
+            # --- Step 5: Verify Type-5 routes on BGW nodes ---
+            # First verify base Type-5 routes (comprehensive check), then verify
+            # the specific IXIA-advertised prefixes appear as Type-5 routes.
+            st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv6 prefixes on BGW nodes')
+            bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+            st.log('BGW nodes to verify: {}'.format(bgw_nodes))
+            
+            if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
+                summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv6 prefix advertisement\n'
+                result = False
+            
+            # Step 5b: Verify IXIA-advertised IPv6 prefixes specifically as Type-5 routes
+            st.banner('Step 5b: Verify IXIA IPv6 prefixes present as Type-5 routes on BGW nodes')
+            ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                for p in ipv6_prefixes]
+            for bgw_node in bgw_nodes:
+                if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
+                                 bgw_node, ixia_prefix_strs, expect_present=True):
+                    summ += 'IXIA IPv6 Type-5 routes not found on {}\n'.format(bgw_node)
+                    result = False
+                else:
+                    st.log('IXIA IPv6 Type-5 routes verified on {}'.format(bgw_node))
         
-        # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
-        st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
-        try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
-            st.log('BGP protocol stopped on IXIA')
-        except Exception as e:
-            st.log('Warning: BGP protocol stop returned: {}'.format(e))
-        
-        vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
-        vxlan_obj.remove_dut_bgp_for_ixia(
-            dut=leaf_node, leaf_asn=leaf_asn, vrf_name='Vrf101',
-            ixia_ipv6=ixia_ipv6)
-        vxlan_obj.remove_dut_ixia_l3_intf(
-            dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
-            dut_intf=dut_intf)
+        finally:
+            # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
+            # Always clean up to avoid stale config affecting subsequent test cases.
+            st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
+            if ixia_configured and bgp_handle:
+                try:
+                    tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
+                    st.log('BGP protocol stopped on IXIA')
+                except Exception as e:
+                    st.log('Warning: BGP protocol stop returned: {}'.format(e))
+                vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+            if dut_configured:
+                vxlan_obj.remove_dut_bgp_for_ixia(
+                    dut=leaf_node, leaf_asn=leaf_asn, vrf_name='Vrf101',
+                    ixia_ipv6=ixia_ipv6)
+                vxlan_obj.remove_dut_ixia_l3_intf(
+                    dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                    svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
+                    dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)
     
@@ -5625,114 +5631,122 @@ class TestVxlanDCIBase():
         st.log('IPv4 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv4_prefixes]))
         
-        # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
-        st.banner('Step 3a: Configure DUT VLAN/VRF/SVI and BGP neighbor for IXIA peer on {}'.format(leaf_node))
-        vxlan_obj.configure_dut_ixia_l3_intf(
-            dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway, svi_mask='24',
-            dut_intf=dut_intf)
-        vxlan_obj.configure_dut_bgp_for_ixia(
-            dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
-            ixia_ip=ixia_ip, vrf_name='Vrf101')
+        # Wrap the entire config/verify/cleanup sequence in try/finally so that
+        # cleanup always runs even if the test fails mid-way with an exception.
+        # This prevents stale VLAN/BGP/IXIA config from affecting subsequent tests.
+        bgp_handle = None
+        interface_handle = None
+        ixia_configured = False
+        dut_configured = False
         
-        # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
-        # Pass the existing topology_handle so the helper creates a device group
-        # on the existing topology instead of creating a new one (Error 6502).
-        st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
-        ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
-            tg_handle=tg_handle,
-            port_handle=port_handle,
-            topology_handle=topo_handle,
-            ixia_ip=ixia_ip,
-            gateway=ixia_gateway,
-            netmask=ixia_netmask,
-            src_mac=ixia_mac,
-            ixia_asn=ixia_asn,
-            leaf_asn=leaf_asn,
-            ipv4_prefixes=ipv4_prefixes,
-            vlan_enabled='1',
-            vlan_id='99'
-        )
-        
-        if not ixia_result['result']:
-            summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
-            # Cleanup DUT config on failure
-            vxlan_obj.remove_dut_bgp_for_ixia(
-                dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
-            vxlan_obj.remove_dut_ixia_l3_intf(
+        try:
+            # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
+            st.banner('Step 3a: Configure DUT VLAN/VRF/SVI and BGP neighbor for IXIA peer on {}'.format(leaf_node))
+            vxlan_obj.configure_dut_ixia_l3_intf(
                 dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                svi_ip=ixia_gateway, svi_mask='24',
                 dut_intf=dut_intf)
-            report_result(False, tc_id, summ)
-            return
-        
-        bgp_handle = ixia_result['bgp_handle']
-        interface_handle = ixia_result['interface_handle']
-        st.log('IXIA BGP session configured successfully')
-        st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
-        
-        # --- Step 4: Start BGP protocol on IXIA ---
-        st.banner('Step 4: Start BGP protocol on IXIA')
-        st.log('Applying changes for IXIA before starting BGP')
-        tg_handle.tg_test_control(action='apply_on_the_fly_changes')
-        st.wait(10)
-        try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
-            st.log('BGP protocol started on IXIA')
-            # Wait for BGP session to establish and routes to propagate
-            st.wait(30)
-        except Exception as e:
-            st.log('Warning: BGP protocol start returned: {}'.format(e))
-        
-        # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
-        st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
-        expected_ipv4_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
-                                  for p in ipv4_prefixes]
-        bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
-            dut=leaf_node, vrf_name='Vrf101', ixia_ip=ixia_ip,
-            expected_prefixes=expected_ipv4_prefixes,
-            addr_family='ipv4')
-        if not bgp_verify['result']:
-            summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
-            result = False
-        
-        # --- Step 5: Verify Type-5 routes on BGW nodes ---
-        # First verify base Type-5 routes (comprehensive check), then verify
-        # the specific IXIA-advertised prefixes appear as Type-5 routes.
-        st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes')
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        st.log('BGW nodes to verify: {}'.format(bgw_nodes))
-        
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
-            summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
-            result = False
-        
-        # Step 5b: Verify IXIA-advertised IPv4 prefixes specifically as Type-5 routes
-        st.banner('Step 5b: Verify IXIA IPv4 prefixes present as Type-5 routes on BGW nodes')
-        ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
-                            for p in ipv4_prefixes]
-        for bgw_node in bgw_nodes:
-            if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
-                             bgw_node, ixia_prefix_strs, expect_present=True):
-                summ += 'IXIA IPv4 Type-5 routes not found on {}\n'.format(bgw_node)
+            vxlan_obj.configure_dut_bgp_for_ixia(
+                dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
+                ixia_ip=ixia_ip, vrf_name='Vrf101')
+            dut_configured = True
+            
+            # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
+            # Pass the existing topology_handle so the helper creates a device group
+            # on the existing topology instead of creating a new one (Error 6502).
+            st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
+            ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
+                tg_handle=tg_handle,
+                port_handle=port_handle,
+                topology_handle=topo_handle,
+                ixia_ip=ixia_ip,
+                gateway=ixia_gateway,
+                netmask=ixia_netmask,
+                src_mac=ixia_mac,
+                ixia_asn=ixia_asn,
+                leaf_asn=leaf_asn,
+                ipv4_prefixes=ipv4_prefixes,
+                vlan_enabled='1',
+                vlan_id='99'
+            )
+            
+            if not ixia_result['result']:
+                summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
+                report_result(False, tc_id, summ)
+                return
+            
+            bgp_handle = ixia_result['bgp_handle']
+            interface_handle = ixia_result['interface_handle']
+            ixia_configured = True
+            st.log('IXIA BGP session configured successfully')
+            st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
+            
+            # --- Step 4: Start BGP protocol on IXIA ---
+            st.banner('Step 4: Start BGP protocol on IXIA')
+            st.log('Applying changes for IXIA before starting BGP')
+            tg_handle.tg_test_control(action='apply_on_the_fly_changes')
+            st.wait(10)
+            try:
+                tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
+                st.log('BGP protocol started on IXIA')
+                # Wait for BGP session to establish and routes to propagate
+                st.wait(30)
+            except Exception as e:
+                st.log('Warning: BGP protocol start returned: {}'.format(e))
+            
+            # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
+            st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
+            expected_ipv4_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                      for p in ipv4_prefixes]
+            bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
+                dut=leaf_node, vrf_name='Vrf101', ixia_ip=ixia_ip,
+                expected_prefixes=expected_ipv4_prefixes,
+                addr_family='ipv4')
+            if not bgp_verify['result']:
+                summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
                 result = False
-            else:
-                st.log('IXIA IPv4 Type-5 routes verified on {}'.format(bgw_node))
+            
+            # --- Step 5: Verify Type-5 routes on BGW nodes ---
+            # First verify base Type-5 routes (comprehensive check), then verify
+            # the specific IXIA-advertised prefixes appear as Type-5 routes.
+            st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes')
+            bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+            st.log('BGW nodes to verify: {}'.format(bgw_nodes))
+            
+            if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
+                summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
+                result = False
+            
+            # Step 5b: Verify IXIA-advertised IPv4 prefixes specifically as Type-5 routes
+            st.banner('Step 5b: Verify IXIA IPv4 prefixes present as Type-5 routes on BGW nodes')
+            ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                for p in ipv4_prefixes]
+            for bgw_node in bgw_nodes:
+                if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
+                                 bgw_node, ixia_prefix_strs, expect_present=True):
+                    summ += 'IXIA IPv4 Type-5 routes not found on {}\n'.format(bgw_node)
+                    result = False
+                else:
+                    st.log('IXIA IPv4 Type-5 routes verified on {}'.format(bgw_node))
         
-        # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
-        st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
-        try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
-            st.log('BGP protocol stopped on IXIA')
-        except Exception as e:
-            st.log('Warning: BGP protocol stop returned: {}'.format(e))
-        
-        vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
-        vxlan_obj.remove_dut_bgp_for_ixia(
-            dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
-        vxlan_obj.remove_dut_ixia_l3_intf(
-            dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
-            svi_ip=ixia_gateway,
-            dut_intf=dut_intf)
+        finally:
+            # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
+            # Always clean up to avoid stale config affecting subsequent test cases.
+            st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
+            if ixia_configured and bgp_handle:
+                try:
+                    tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
+                    st.log('BGP protocol stopped on IXIA')
+                except Exception as e:
+                    st.log('Warning: BGP protocol stop returned: {}'.format(e))
+                vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+            if dut_configured:
+                vxlan_obj.remove_dut_bgp_for_ixia(
+                    dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
+                vxlan_obj.remove_dut_ixia_l3_intf(
+                    dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                    svi_ip=ixia_gateway,
+                    dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)
     

@@ -2206,6 +2206,7 @@ ALL_CHECKS = [
     'rt_rewrite',        # RT-REWRITE route-map verification (BGW nodes only)
     # 'mac_arp',         # MAC and ARP table entries for L3VNI hosts (disabled — will add later)
     'portchannel',       # PortChannel operational status
+    'ipv6_route',        # IPv6 route verification (show ipv6 route) — verifies IPv6 connected/BGP routes present
     'evpn_type5_comprehensive',  # Unified Type-5: 10 boolean checks (present, has_best, has_rt, has_et, has_rmac, has_ipv6_nh, installed_in_rib, installed_in_fib, has_local_class_path, has_remote_class_path) — same logic on leaf and BGW
 ]
 
@@ -2218,7 +2219,7 @@ CHECK_SETS = {
     'data_plane': ['vlan_vni', 'vrf_vni', 'vteps', 'tunnels'],
     'control_plane': ['bgp', 'evpn_es', 'evpn_type1', 'evpn_type4',
                       'ebgp_multihop', 'evpn_vni', 'rt_rewrite',
-                      'evpn_type5_comprehensive'],
+                      'ipv6_route', 'evpn_type5_comprehensive'],
 }
 
 
@@ -2648,6 +2649,20 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                     st.log(f'✗ PortChannel on {dut}: Fail - {err}')
                     results[dut]['portchannel'] = False
                     results['overall'] = False
+        
+        # ============================================================
+        # IPv6 Route Verification (show ipv6 route vrf all)
+        # Validates IPv6 connected + BGP routes are present
+        # ============================================================
+        if 'ipv6_route' in checks_to_run:
+            try:
+                vxlan_obj.verify_ipv6_route_dci(dut)
+                st.log(f'✓ IPv6 route on {dut}: Pass')
+                results[dut]['ipv6_route'] = True
+            except Exception as err:
+                st.log(f'✗ IPv6 route on {dut}: Fail - {err}')
+                results[dut]['ipv6_route'] = False
+                results['overall'] = False
         
         # ============================================================
         # Comprehensive Type-5 Verification (path-count, best-path, RT/ET/RMAC, IPv6 NH)
@@ -4867,8 +4882,12 @@ class TestVxlanDCIBase():
     
     def test_base_dci_bringup(self):
         """
-        Solution_dci:1 + L3VNI_dci:1 - Verify DCI base profile bring up with 3 DCs
-        including L3VNI base profile verification.
+        Solution_dci:1 + Solution_dci:2 + L3VNI_dci:1 + L3VNI_dci:2
+        Verify DCI base profile bring up with 3 DCs including L3VNI base
+        profile and FRR/SONIC CLI verification.
+        
+        Consolidated from former test_base_dci_bringup (Solution_dci:1, L3VNI_dci:1)
+        and test_base_dci_frr_sonic_cli (Solution_dci:2, L3VNI_dci:2).
         
         Description:
             Comprehensive verification of DCI base profile after initial configuration.
@@ -4883,7 +4902,11 @@ class TestVxlanDCIBase():
             - VXLAN tunnels (single on leafs, dual DC+WAN on BGWs)
             - Remote VTEP discovery via EVPN Type-3 routes
             - BGP control plane (underlay + EVPN overlay sessions)
+              * IPv6 Unicast underlay (TRANSIT peers) on all nodes
+              * IPv4 Unicast underlay (TRANSIT_WAN peers) on BGW nodes
+              * L2VPN EVPN overlay on all nodes (leafs + BGWs)
             - PortChannel status for multi-homed segments
+            - IPv6 route table verification (show ipv6 route vrf all)
         
         L3VNI Verification includes (L3VNI_dci:1):
             - VRF-VNI mappings (show vxlan vrfvnimap):
@@ -4897,65 +4920,55 @@ class TestVxlanDCIBase():
               L3VNI in extended community: 10101 (Vrf101), 10102 (Vrf102)
             - RIB/FIB install check (show ip route vrf all)
         
+        FRR/SONIC CLI Verification (L3VNI_dci:2):
+            - Type-5 route format on leaf nodes: [5]:[0]:[24]:[prefix]
+            - L3VNI=10101/10102 in extended community on leaf nodes
+            - IPv6 VTEP next-hop on leaf nodes (from BGW RT-REWRITE-DC route-map):
+              DC1 BGWs: 4000:1::1, DC2 BGWs: 6000:1::1, DC3 BGW: 7000:1::1
+        
         Verification CLIs:
             show vxlan vlanvnimap, show vxlan vrfvnimap, show vrf,
+            show bgp summary (IPv4 Unicast, IPv6 Unicast, L2VPN EVPN),
             show bgp l2vpn evpn route type 5, show mac, show arp,
             show vxlan tunnel, show vxlan counter, show vxlan remotevtep,
             show vxlan remotemac all, show ip route vrf all,
+            show ipv6 route vrf all,
             show evpn es, show evpn vni detail, show platform npu mac-age
         """
         tc_id = "test_base_dci_bringup"
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
         
-        st.banner('Testcase Solution_dci:1 + L3VNI_dci:1: Verify DCI base profile with L3VNI ({})'.format(tc_id))
-        
-        # Perform comprehensive base setup verification on all nodes
-        # This runs ALL checks including L3VNI: vrf_vni, vlan_vni,
-        # evpn_type5_comprehensive (incl. RIB/FIB), ebgp_multihop, evpn_vni, etc.
-        st.log('Performing comprehensive L2VNI + L3VNI verification on all DCI nodes...')
-        result = verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'])
-        if result:
-            st.log('Base DCI setup verification (L2VNI + L3VNI): Pass')
-        else:
-            st.log('Base DCI setup verification (L2VNI + L3VNI): Fail')
-        
-        report_result(result, tc_id, '')
-    
-    def test_base_dci_frr_sonic_cli(self):
-        """
-        Solution_dci:2 + L3VNI_dci:2 - Verify all FRR and SONIC CLIs
-        including L3VNI Type-5 route advertisement with IPv6 VTEP on leaf nodes.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify all the new FRR and SONIC CLI's implemented as a part of this feature
-            3) Verify Type-5 route advertised on leaf nodes: [5]:[0]:[24]:[prefix]
-            4) Verify L3VNI=10101/10102 in extended community
-            5) Verify next-hop is IPv6 VTEP
-               - Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP
-                 next-hop set by RT-REWRITE-DC route-map (DC VIP):
-                 DC1 BGWs: 4000:1::1, DC2 BGWs: 6000:1::1, DC3 BGW: 7000:1::1
-            
-        Steps:
-            1. Verify base setup via verify_base_setup_bgw on all nodes
-            2. Verify Type-5 routes with IPv6 VTEP next-hop and VRF-VNI on leaf nodes
-        """
-        tc_id = "test_base_dci_frr_sonic_cli"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:2 + L3VNI_dci:2: Verify FRR/SONIC CLIs with L3VNI Type-5 ({})'.format(tc_id))
+        st.banner('Testcase Solution_dci:1,2 + L3VNI_dci:1,2: Verify DCI base profile with L3VNI ({})'.format(tc_id))
         result = True
         summ = ''
         
-        # Verify Type-5 routes with IPv6 VTEP next-hop on leaf nodes (L3VNI_dci:2)
-        # Note: Base setup (L2VNI + L3VNI) is already verified in test_base_dci_bringup (Solution_dci:1).
-        # This test focuses on the unique L3VNI_dci:2 checks: Type-5 route format, L3VNI in
-        # extended community, and IPv6 VTEP next-hop on leaf nodes.
+        # --- Covered test IDs ---
+        st.log('This test covers the following testcase IDs:')
+        st.log('  Solution_dci:1 - DCI base profile bring up with 3 DCs')
+        st.log('  Solution_dci:2 - Verify all FRR and SONIC CLIs')
+        st.log('  L3VNI_dci:1    - L3VNI base profile (VRF-VNI, VLAN-VNI, Type-5 routes)')
+        st.log('  L3VNI_dci:2    - Type-5 route format, L3VNI ext-community, IPv6 VTEP next-hop on leaf nodes')
+        
+        # Step 1: Comprehensive base setup verification on all nodes
+        # This runs ALL checks including L3VNI: vrf_vni, vlan_vni,
+        # evpn_type5_comprehensive (incl. RIB/FIB), ebgp_multihop, evpn_vni,
+        # bgp (IPv4 Unicast, IPv6 Unicast, L2VPN EVPN), ipv6_route, etc.
+        st.banner('Step 1: Comprehensive L2VNI + L3VNI verification on all DCI nodes (Solution_dci:1 + L3VNI_dci:1)')
+        st.log('Performing comprehensive L2VNI + L3VNI verification on all DCI nodes...')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw']):
+            st.log('Base DCI setup verification (L2VNI + L3VNI): Fail')
+            summ += 'Comprehensive base setup verification failed\n'
+            result = False
+        else:
+            st.log('Base DCI setup verification (L2VNI + L3VNI): Pass')
+        
+        # Step 2: Additional leaf-specific Type-5 route + VRF-VNI verification (L3VNI_dci:2)
+        # Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP next-hop
+        # set by RT-REWRITE-DC route-map (DC VIP)
         leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw']
                       if 'leaf' in node.lower()]
-        st.banner('Verify Type-5 routes with IPv6 VTEP and VRF-VNI on leaf nodes')
+        st.banner('Step 2: Verify Type-5 routes with IPv6 VTEP and VRF-VNI on leaf nodes (Solution_dci:2 + L3VNI_dci:2)')
         st.log('Checking: route format [5]:[0]:[prefix_len]:[prefix], L3VNI in ext-community, IPv6 VTEP next-hop')
         st.log('Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP next-hop')
         st.log('Leaf nodes: {}'.format(leaf_nodes))

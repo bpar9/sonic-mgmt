@@ -6279,24 +6279,28 @@ def get_expected_bgp_summary_dci(dut):
                 'state': 'Up'
             })
     
-    # For BGW nodes, also add IPv4 Unicast WAN underlay neighbors
+    # For BGW nodes, also add IPv4 Unicast WAN underlay neighbors (TRANSIT_WAN)
+    # BGW config: address-family ipv4 unicast / neighbor TRANSIT_WAN activate
+    # TRANSIT_WAN peers are remote-DC BGW IPs on point-to-point /24 links
     if is_bgw:
         (loopback_ipv6_dc_vip,
          loopback_ipv4_wan_vip,
          loopback_ipv4_wan_overlay,
          transit_wan_ipv4_underlay) = generate_dci_vip_maps()
         
-        # Get the underlay IPs for this BGW
-        if dut in transit_wan_ipv4_underlay:
-            underlay_ips = transit_wan_ipv4_underlay[dut]
-            # For DC1 BGWs: peers with DC2/DC3 BGWs
-            # For DC2 BGWs: peers with DC1/DC3 BGWs
-            # For DC3 BGWs: peers with DC1/DC2 BGWs
-            
-            # Based on the actual BGP config, extract peer IPs
-            # This is a simplified version - ideally should parse from BGP config
-            # For now, we just note that IPv4 Unicast neighbors exist for BGWs
-            pass
+        # Get all BGW nodes and find remote-DC BGWs
+        config_dict = get_cfg_dict()
+        all_bgw_nodes = sorted([n for n in config_dict['nodes']['all'] if 'bgw' in n],
+                               key=get_node_sort_key)
+        transit_peers = _transit_peers_for(dut, transit_wan_ipv4_underlay, 
+                                          [n for n in all_bgw_nodes if n != dut 
+                                           and _get_dc_from_name(n) != my_dc])
+        for peer_ip in transit_peers:
+            ret_val.append({
+                'protocol': 'IPv4 Unicast',
+                'neighbor': peer_ip,
+                'state': 'Up'
+            })
     
     return ret_val
 
@@ -6318,7 +6322,7 @@ def verify_bgp_summary_dci(dut, exp_data, **kwargs):
 
 def get_expected_bgp_l2vpn_evpn_summary_dci(dut):
     """
-    Generate DCI-aware BGP EVPN summary expectations for a BGW node.
+    Generate DCI-aware BGP EVPN summary expectations for a node (BGW or leaf).
     
     Returns list of dicts with expected BGP EVPN neighbor attributes:
     [{
@@ -6335,13 +6339,13 @@ def get_expected_bgp_l2vpn_evpn_summary_dci(dut):
     For BGW nodes, expects L2VPN EVPN peers:
     - Local leaf nodes (same DC) via DC loopback IPv6 IPs
     - Remote BGW nodes (other DCs) via WAN overlay IPv4 IPs
+    
+    For leaf nodes, expects L2VPN EVPN peers:
+    - Other same-DC leaf nodes via DC loopback IPv6 IPs
+    - Same-DC BGW spines via DC loopback IPv6 IPs
     """
     import re
     ret_val = []
-    
-    # Only BGW nodes have EVPN neighbors in DCI
-    if 'bgw' not in dut.lower():
-        return ret_val
     
     # Extract DC from node name
     dc_match = re.search(r'_(dc\d+)', dut)
@@ -6350,52 +6354,45 @@ def get_expected_bgp_l2vpn_evpn_summary_dci(dut):
         return ret_val
     
     my_dc = dc_match.group(1)
+    is_bgw = 'bgw' in dut.lower()
+    is_leaf = 'leaf' in dut.lower()
     
     # Get configuration
     cfg_dict = get_cfg_dict()
     if dut not in cfg_dict:
         return ret_val
     
-    # Add local leaf nodes (same DC) with their DC loopback IPv6 IPs
-    for node_name, node_cfg in cfg_dict.items():
-        if node_name == dut:
-            continue
-        
-        # Check if node is in same DC
-        node_dc_match = re.search(r'_(dc\d+)', node_name)
-        if not node_dc_match or node_dc_match.group(1) != my_dc:
-            continue
-        
-        # Check if it's a leaf node with loopback config
-        if 'leaf' in node_name and node_cfg.get('loopbacks'):
-            for lb_cfg in node_cfg['loopbacks']:
-                if 'address' in lb_cfg and '::' in lb_cfg['address']:
-                    # IPv6 loopback for EVPN
-                    loopback_ip = lb_cfg['address'].split('/')[0]
-                    ret_val.append({
-                        'protocol': 'L2VPN EVPN',
-                        'neighbor': loopback_ip,
-                        'state': 'Up'
-                    })
-    
-    # Add remote BGW nodes (other DCs) with their WAN overlay IPv4 IPs
-    (loopback_ipv6_dc_vip,
-     loopback_ipv4_wan_vip,
-     loopback_ipv4_wan_overlay,
-     transit_wan_ipv4_underlay) = generate_dci_vip_maps()
-    
-    for bgw_node, overlay_ip in loopback_ipv4_wan_overlay.items():
-        if bgw_node == dut:
-            continue
-        
-        # Check if BGW is in a different DC
-        bgw_dc_match = re.search(r'_(dc\d+)', bgw_node)
-        if bgw_dc_match and bgw_dc_match.group(1) != my_dc:
+    # Use generate_bgp_overlay_info to get EVPN overlay neighbors
+    # This generates the correct neighbor list for both leaf and BGW nodes
+    bgp_info = get_bgp_underlay_info_cached()
+    overlay_info = generate_bgp_overlay_info(version='v6', dci_enabled=True, bgp_info=bgp_info)
+    if dut in overlay_info and 'neigbor_overlay' in overlay_info[dut]:
+        for neighbor_ip in overlay_info[dut]['neigbor_overlay']:
             ret_val.append({
                 'protocol': 'L2VPN EVPN',
-                'neighbor': overlay_ip,
+                'neighbor': neighbor_ip,
                 'state': 'Up'
             })
+    
+    # For BGW nodes, also add remote BGW nodes (other DCs) via WAN overlay IPv4 IPs
+    if is_bgw:
+        (loopback_ipv6_dc_vip,
+         loopback_ipv4_wan_vip,
+         loopback_ipv4_wan_overlay,
+         transit_wan_ipv4_underlay) = generate_dci_vip_maps()
+        
+        for bgw_node, overlay_ip in loopback_ipv4_wan_overlay.items():
+            if bgw_node == dut:
+                continue
+            
+            # Check if BGW is in a different DC
+            bgw_dc_match = re.search(r'_(dc\d+)', bgw_node)
+            if bgw_dc_match and bgw_dc_match.group(1) != my_dc:
+                ret_val.append({
+                    'protocol': 'L2VPN EVPN',
+                    'neighbor': overlay_ip,
+                    'state': 'Up'
+                })
     
     return ret_val
 
@@ -8276,6 +8273,74 @@ def verify_ip_route_vrf_dci(dut, vlan_ids, vrf_name='Vrf101', expect_present=Tru
         st.log('IP routes withdrawn for VLANs {} in VRF {} on {}'.format(
             vlan_ids, vrf_name, dut))
         return True
+
+
+def verify_ipv6_route_dci(dut):
+    """
+    Verify IPv6 routes are present on a DCI node via 'show ipv6 route vrf all'.
+
+    Checks that the node has IPv6 connected routes (from loopback/SVI interfaces)
+    and BGP-learned IPv6 routes. This validates the IPv6 underlay and overlay
+    routing table is properly populated.
+
+    For leaf nodes: expects connected loopback IPv6 route and BGP-learned routes
+    from same-DC peers (other leafs and BGW spines).
+
+    For BGW nodes: expects connected loopback IPv6 route plus BGP routes from
+    local leafs and remote BGWs (via EVPN Type-5 re-originated routes).
+
+    Args:
+        dut: Node hostname to verify
+
+    Returns:
+        Boolean: True if IPv6 routes are present, False otherwise
+
+    Raises:
+        Exception: If no IPv6 routes found at all
+    """
+    import re
+
+    st.banner('Verifying IPv6 routes on {} (show ipv6 route vrf all)'.format(dut))
+
+    try:
+        cli_output = st.show(dut, "show ipv6 route vrf all",
+                             skip_tmpl=True)
+    except Exception as err:
+        st.log('Failed to get IPv6 routes on {}: {}'.format(dut, err))
+        raise Exception('show ipv6 route vrf all failed on {}: {}'.format(dut, err))
+
+    if not cli_output or not cli_output.strip():
+        raise Exception('No IPv6 route output on {} - routing table empty'.format(dut))
+
+    # Count route types: connected (C), BGP (B), EVPN (B>*)
+    connected_count = 0
+    bgp_count = 0
+    total_lines = 0
+    for line in cli_output.splitlines():
+        line = line.strip()
+        if not line or line.startswith('VRF') or line.startswith('Codes'):
+            continue
+        # Connected routes start with C or C>*
+        if re.match(r'^C[>\s*]', line):
+            connected_count += 1
+            total_lines += 1
+        # BGP routes start with B or B>*
+        elif re.match(r'^B[>\s*]', line):
+            bgp_count += 1
+            total_lines += 1
+        # Continuation lines (via, interface) also count
+        elif '::' in line:
+            total_lines += 1
+
+    if total_lines == 0:
+        raise Exception('No IPv6 routes found in output on {}'.format(dut))
+
+    if connected_count == 0:
+        st.log('WARNING: No connected IPv6 routes on {} - loopback may be missing'.format(dut))
+
+    st.log('IPv6 routes on {}: {} connected, {} BGP, {} total lines'.format(
+        dut, connected_count, bgp_count, total_lines))
+    return True
 
 
 def verify_type5_ixia_prefixes_dci(dut, prefixes, expect_present=True):

@@ -4979,198 +4979,89 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l2l3vni_ipv4_within_dc(self):
+    @pytest.mark.parametrize("ip_version,scope", [
+        ("v4", "within"),  # Solution_dci:3 + L3VNI_dci:13
+        ("v6", "within"),  # Solution_dci:4 + L3VNI_dci:13
+        ("v4", "cross"),   # Solution_dci:5 + L3VNI_dci:14
+        ("v6", "cross"),   # Solution_dci:6 + L3VNI_dci:15
+    ])
+    def test_base_dci_l2l3vni_traffic(self, ip_version, scope):
         """
-        Solution_dci:3 + L3VNI_dci:13 - Verify L2VNI and L3VNI IPv4 traffic
-        between hosts within DC, including inter-VLAN routing via L3VNI.
-        
+        Solution_dci:3/4/5/6 + L3VNI_dci:13/14 - Verify L2VNI and L3VNI traffic
+        (parameterized by IP version and scope).
+
+        Args:
+            ip_version: 'v4' for IPv4, 'v6' for IPv6
+            scope: 'within' for within-DC traffic, 'cross' for cross-DC traffic
+
         Description:
             1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv4 L2VNI and L3VNI traffic between hosts within DC1
-            3) Within DC, there can be MH or SH host
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:13)
-            5) Send L3VNI IPv4 inter-VLAN traffic within DC
-            7) Verify no traffic drop
-            8) Verify no crash/core seen
-            
-        Note:
-            Only testing within DC1 (leaf0_dc1 → other DC1 leaves).
-            Within-DC behavior is identical across all DCs, so testing one DC is sufficient.
-            Uses scope='within' to filter only streams with DC1 destinations (no D11, D12, D14).
-            
+            2) Verify L2VNI and L3VNI traffic between hosts
+            3) Within DC: can be MH or SH host; Across DC: SH host only in phase 1
+            4) Verify no traffic drop and no crash/core seen
+
+        Test Cases:
+            - Solution_dci:3 + L3VNI_dci:13 (v4, within) - L2L3VNI IPv4 within DC
+            - Solution_dci:4 + L3VNI_dci:13 (v6, within) - L2L3VNI IPv6 within DC
+            - Solution_dci:5 + L3VNI_dci:14 (v4, cross)  - L2L3VNI IPv4 across DCI
+            - Solution_dci:6 + L3VNI_dci:15 (v6, cross)  - L2L3VNI IPv6 across DCI
+
         Steps:
-            1. Send L2VNI and L3VNI IPv4 traffic within DC1
+            1. Send L2VNI and L3VNI traffic with the given IP version and scope
         """
-        tc_id = "test_base_dci_l2l3vni_ipv4_within_dc"
+        # Map parameters to test case details
+        test_map = {
+            ("v4", "within"): ("test_base_dci_l2l3vni_ipv4_within_dc", 3, 13,
+                               ['l2_v4', 'l3_v4'],
+                               [('Solution_dci:3', 'test_base_dci_l2l3vni_ipv4_within_dc'),
+                                ('L3VNI_dci:13', 'L3VNI IPv4 within DC'),
+                                ('L3VNI_dci:18', 'test_base_dci_l3vni_sh_ipv4_within_dc'),
+                                ('L3VNI_dci:22', 'test_base_dci_l3vni_mh_ipv4_within_dc')]),
+            ("v6", "within"): ("test_base_dci_l2l3vni_ipv6_within_dc", 4, 13,
+                               ['l2_v6', 'l3_v6'],
+                               [('Solution_dci:4', 'test_base_dci_l2l3vni_ipv6_within_dc'),
+                                ('L3VNI_dci:13', 'L3VNI IPv6 within DC'),
+                                ('L3VNI_dci:20', 'test_base_dci_l3vni_sh_ipv6_within_dc'),
+                                ('L3VNI_dci:24', 'test_base_dci_l3vni_mh_ipv6_within_dc')]),
+            ("v4", "cross"):  ("test_base_dci_l2l3vni_ipv4_across_dci", 5, 14,
+                               ['l2_v4', 'l3_v4'],
+                               [('Solution_dci:5', 'test_base_dci_l2l3vni_ipv4_across_dci'),
+                                ('L3VNI_dci:14', 'L3VNI IPv4 across DCI'),
+                                ('L3VNI_dci:19', 'test_base_dci_l3vni_sh_ipv4_across_dci'),
+                                ('L3VNI_dci:23', 'test_base_dci_l3vni_mh_ipv4_across_dci')]),
+            ("v6", "cross"):  ("test_base_dci_l2l3vni_ipv6_across_dci", 6, 15,
+                               ['l2_v6', 'l3_v6'],
+                               [('Solution_dci:6', 'test_base_dci_l2l3vni_ipv6_across_dci'),
+                                ('L3VNI_dci:15', 'L3VNI IPv6 across DCI'),
+                                ('L3VNI_dci:21', 'test_base_dci_l3vni_sh_ipv6_across_dci'),
+                                ('L3VNI_dci:25', 'test_base_dci_l3vni_mh_ipv6_across_dci')]),
+        }
+        tc_id, sol_num, l3vni_num, traffic_types, covered_ids = test_map[(ip_version, scope)]
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:3 + L3VNI_dci:13: Verify L2VNI/L3VNI IPv4 within DC1 ({})'.format(tc_id))
+
+        scope_label = 'within DC1' if scope == 'within' else 'across DCI'
+        ip_label = 'IPv4' if ip_version == 'v4' else 'IPv6'
+        st.banner('Testcase Solution_dci:{} + L3VNI_dci:{}: Verify L2VNI/L3VNI {} {} ({})'.format(
+            sol_num, l3vni_num, ip_label, scope_label, tc_id))
         result = True
         summ = ''
-        
+
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='within' to test ONLY streams with DC1 destinations
         # L3VNI traffic includes both SH (orphan) and MH (PortChannel) host flows,
-        # so this single test covers SH and MH L3VNI IPv4 within-DC scenarios.
-        st.banner('Verify L2VNI and L3VNI IPv4 traffic within DC1')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v4', 'l3_v4'], scope='within'):
-            st.log('L2VNI and L3VNI IPv4 traffic within DC1: Pass')
+        # so this single test covers SH and MH L3VNI scenarios for the given scope.
+        st.banner('Verify L2VNI and L3VNI {} traffic {}'.format(ip_label, scope_label))
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=traffic_types, scope=scope):
+            st.log('L2VNI and L3VNI {} traffic {}: Pass'.format(ip_label, scope_label))
         else:
-            summ += 'L2VNI and L3VNI IPv4 traffic within DC1: Fail\n'
+            summ += 'L2VNI and L3VNI {} traffic {}: Fail\n'.format(ip_label, scope_label)
             st.log(summ)
             result = False
-        
+
         st.log('This test covers the following testcases:')
-        st.log('  - Solution_dci:3  (test_base_dci_l2l3vni_ipv4_within_dc)')
-        st.log('  - L3VNI_dci:13    (L3VNI IPv4 within DC)')
-        st.log('  - L3VNI_dci:18    (test_base_dci_l3vni_sh_ipv4_within_dc)')
-        st.log('  - L3VNI_dci:22    (test_base_dci_l3vni_mh_ipv4_within_dc)')
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l2l3vni_ipv6_within_dc(self):
-        """
-        Solution_dci:4 + L3VNI_dci:13 - Verify L2VNI and L3VNI IPv6 traffic
-        between hosts within DC, including inter-VLAN routing via L3VNI.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv6 L2VNI and L3VNI traffic between hosts within DC1
-            3) Within DC, there can be MH or SH host
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:13)
-            5) Send L3VNI IPv6 inter-VLAN traffic within DC
-            7) Verify no traffic drop
-            8) Verify no crash/core seen
-            
-        Note:
-            Only testing within DC1 (leaf0_dc1 → other DC1 leaves).
-            Within-DC behavior is identical across all DCs, so testing one DC is sufficient.
-            Uses scope='within' to filter only streams with DC1 destinations (no D11, D12, D14).
-            
-        Steps:
-            1. Send L2VNI and L3VNI IPv6 traffic within DC1
-        """
-        tc_id = "test_base_dci_l2l3vni_ipv6_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:4 + L3VNI_dci:13: Verify L2VNI/L3VNI IPv6 within DC1 ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='within' to test ONLY streams with DC1 destinations
-        # L3VNI traffic includes both SH (orphan) and MH (PortChannel) host flows,
-        # so this single test covers SH and MH L3VNI IPv6 within-DC scenarios.
-        st.banner('Verify L2VNI and L3VNI IPv6 traffic within DC1')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v6', 'l3_v6'], scope='within'):
-            st.log('L2VNI and L3VNI IPv6 traffic within DC1: Pass')
-        else:
-            summ += 'L2VNI and L3VNI IPv6 traffic within DC1: Fail\n'
-            st.log(summ)
-            result = False
-        
-        st.log('This test covers the following testcases:')
-        st.log('  - Solution_dci:4  (test_base_dci_l2l3vni_ipv6_within_dc)')
-        st.log('  - L3VNI_dci:13    (L3VNI IPv6 within DC)')
-        st.log('  - L3VNI_dci:20    (test_base_dci_l3vni_sh_ipv6_within_dc)')
-        st.log('  - L3VNI_dci:24    (test_base_dci_l3vni_mh_ipv6_within_dc)')
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l2l3vni_ipv4_across_dci(self):
-        """
-        Solution_dci:5 + L3VNI_dci:14 - Verify L2VNI and L3VNI IPv4 traffic
-        between hosts across DCI.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv4 L2VNI and L3VNI traffic between hosts across DC1, DC2 and DC3
-            3) Across DC, there will be SH host only in phase 1
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:14)
-            6) Verify no traffic drop
-            7) Verify no crash/core seen
-            
-        Note:
-            Uses scope='cross' to filter only streams with DC2/DC3 destinations (D11, D12, D14).
-            
-        Steps:
-            1. Send L2VNI and L3VNI IPv4 traffic across DCI
-        """
-        tc_id = "test_base_dci_l2l3vni_ipv4_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:5 + L3VNI_dci:14: Verify L2VNI/L3VNI IPv4 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='cross' to test ONLY streams with DC2/DC3 destinations
-        # L3VNI traffic includes both SH (orphan) and MH (PortChannel) host flows,
-        # so this single test covers SH and MH L3VNI IPv4 cross-DC scenarios.
-        st.banner('Verify L2VNI and L3VNI IPv4 traffic across DCI')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v4', 'l3_v4'], scope='cross'):
-            st.log('L2VNI and L3VNI IPv4 traffic across DCI: Pass')
-        else:
-            summ += 'L2VNI and L3VNI IPv4 traffic across DCI: Fail\n'
-            st.log(summ)
-            result = False
-        
-        st.log('This test covers the following testcases:')
-        st.log('  - Solution_dci:5  (test_base_dci_l2l3vni_ipv4_across_dci)')
-        st.log('  - L3VNI_dci:14    (L3VNI IPv4 across DCI)')
-        st.log('  - L3VNI_dci:19    (test_base_dci_l3vni_sh_ipv4_across_dci)')
-        st.log('  - L3VNI_dci:23    (test_base_dci_l3vni_mh_ipv4_across_dci)')
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l2l3vni_ipv6_across_dci(self):
-        """
-        Solution_dci:6 + L3VNI_dci:15 - Verify L2VNI and L3VNI IPv6 traffic
-        between hosts across DCI.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv6 L2VNI and L3VNI traffic between hosts across DC1, DC2 and DC3
-            3) Across DC, there will be SH host only in phase 1
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:15)
-            6) Verify no traffic drop
-            7) Verify no crash/core seen
-            
-        Note:
-            Uses scope='cross' to filter only streams with DC2/DC3 destinations (D11, D12, D14).
-            
-        Steps:
-            1. Send L2VNI and L3VNI IPv6 traffic across DCI
-        """
-        tc_id = "test_base_dci_l2l3vni_ipv6_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:6 + L3VNI_dci:15: Verify L2VNI/L3VNI IPv6 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='cross' to test ONLY streams with DC2/DC3 destinations
-        # L3VNI traffic includes both SH (orphan) and MH (PortChannel) host flows,
-        # so this single test covers SH and MH L3VNI IPv6 cross-DC scenarios.
-        st.banner('Verify L2VNI and L3VNI IPv6 traffic across DCI')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v6', 'l3_v6'], scope='cross'):
-            st.log('L2VNI and L3VNI IPv6 traffic across DCI: Pass')
-        else:
-            summ += 'L2VNI and L3VNI IPv6 traffic across DCI: Fail\n'
-            st.log(summ)
-            result = False
-        
-        st.log('This test covers the following testcases:')
-        st.log('  - Solution_dci:6  (test_base_dci_l2l3vni_ipv6_across_dci)')
-        st.log('  - L3VNI_dci:15    (L3VNI IPv6 across DCI)')
-        st.log('  - L3VNI_dci:21    (test_base_dci_l3vni_sh_ipv6_across_dci)')
-        st.log('  - L3VNI_dci:25    (test_base_dci_l3vni_mh_ipv6_across_dci)')
-        
+        for cid, cname in covered_ids:
+            st.log('  - {:16s} ({})'.format(cid, cname))
+
         report_result(result, tc_id, summ)
     
     def test_base_dci_l3vni_ebgp_multihop_bgw(self):
@@ -5895,156 +5786,65 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l3vni_dualstack_sh_within_dc(self):
+    @pytest.mark.parametrize("host_type,scope", [
+        ("SH", "within"),  # L3VNI_dci:26
+        ("SH", "cross"),   # L3VNI_dci:27
+        ("MH", "within"),  # L3VNI_dci:28
+        ("MH", "cross"),   # L3VNI_dci:29
+    ])
+    def test_base_dci_l3vni_dualstack_traffic(self, host_type, scope):
         """
-        L3VNI_dci:26 - Dual-stack SH - Simultaneous IPv4 and IPv6 within DC
-        
+        L3VNI_dci:26/27/28/29 - Dual-stack simultaneous IPv4+IPv6 traffic
+        (parameterized by host type and scope).
+
+        Args:
+            host_type: 'SH' for single-homed (orphan), 'MH' for multi-homed (PortChannel)
+            scope: 'within' for within-DC traffic, 'cross' for cross-DC traffic
+
         Description:
             1) Base profile bring up
-            2) Configure dual-stack hosts in each VLAN across different VRFs
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:18 (SH IPv4 within DC) and L3VNI_dci:20 (SH IPv6 within DC)
-            into a single dual-stack test sending both IPv4 and IPv6 traffic simultaneously.
-            
+            2) Send simultaneous L3VNI IPv4 and IPv6 traffic between hosts
+            3) Verify no traffic drops and no cores/crash
+
+        Test Cases:
+            - L3VNI_dci:26 (SH, within) - Dual-stack SH within DC
+            - L3VNI_dci:27 (SH, cross)  - Dual-stack SH across DCI
+            - L3VNI_dci:28 (MH, within) - Dual-stack MH within DC
+            - L3VNI_dci:29 (MH, cross)  - Dual-stack MH across DCI
+
         Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 traffic within DC (SH hosts)
+            1. Send simultaneous L3VNI IPv4 and IPv6 traffic with the given host type and scope
         """
-        tc_id = "test_base_dci_l3vni_dualstack_sh_within_dc"
+        # Map parameters to test case details
+        test_map = {
+            ("SH", "within"): ("test_base_dci_l3vni_dualstack_sh_within_dc", 26, 'L3-SH'),
+            ("SH", "cross"):  ("test_base_dci_l3vni_dualstack_sh_across_dci", 27, 'L3-SH'),
+            ("MH", "within"): ("test_base_dci_l3vni_dualstack_mh_within_dc", 28, 'L3-MH'),
+            ("MH", "cross"):  ("test_base_dci_l3vni_dualstack_mh_across_dci", 29, 'L3-MH'),
+        }
+        tc_id, dci_num, traffic_name = test_map[(host_type, scope)]
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:26: Dual-stack SH IPv4+IPv6 within DC ({})'.format(tc_id))
+
+        scope_label = 'within DC' if scope == 'within' else 'across DCI'
+        st.banner('Testcase L3VNI_dci:{}: Dual-stack {} IPv4+IPv6 {} ({})'.format(
+            dci_num, host_type, scope_label, tc_id))
         result = True
         summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Send SH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (SH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within',
-                          traffic_names=['L3-SH'], simultaneous=True):
-            st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Pass')
+
+        # Note: Base setup (VRF-VNI, Type-5 routes, EVPN ES) already verified in test_base_dci_bringup.
+        # Send host-type-specific IPv4 and IPv6 traffic simultaneously (not sequentially)
+        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic {} ({} hosts only)'.format(
+            scope_label, host_type))
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope=scope,
+                          traffic_names=[traffic_name], simultaneous=True):
+            st.log('L3VNI dual-stack {} IPv4+IPv6 simultaneous {} traffic: Pass'.format(host_type, scope_label))
         else:
-            summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
+            summ += 'L3VNI dual-stack {} IPv4+IPv6 simultaneous {} traffic: Fail\n'.format(host_type, scope_label)
             result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_dualstack_sh_across_dci(self):
-        """
-        L3VNI_dci:27 - Dual-stack SH - Simultaneous IPv4 and IPv6 across DCI
-        
-        Description:
-            1) Base profile bring up
-            2) Configure dual-stack hosts in each VLAN across different VRFs
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts across DCI
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:19 (SH IPv4 across DCI) and L3VNI_dci:21 (SH IPv6 across DCI)
-            into a single dual-stack test with L3VNI translation at BGW nodes.
-            
-        Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 SH traffic across DCI
-        """
-        tc_id = "test_base_dci_l3vni_dualstack_sh_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:27: Dual-stack SH IPv4+IPv6 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Send SH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (SH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross',
-                          traffic_names=['L3-SH'], simultaneous=True):
-            st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_dualstack_mh_within_dc(self):
-        """
-        L3VNI_dci:28 - Dual-stack MH - Simultaneous IPv4 and IPv6 within DC
-        
-        Description:
-            1) Base profile bring up
-            2) Configure dual-stack multi-homed hosts with ESI in each VLAN
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:22 (MH IPv4 within DC) and L3VNI_dci:24 (MH IPv6 within DC)
-            into a single dual-stack test. Additionally verifies EVPN ES status for MH hosts.
-            
-        Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 MH traffic within DC
-        """
-        tc_id = "test_base_dci_l3vni_dualstack_mh_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:28: Dual-stack MH IPv4+IPv6 within DC ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        # Send MH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (MH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within',
-                          traffic_names=['L3-MH'], simultaneous=True):
-            st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_dualstack_mh_across_dci(self):
-        """
-        L3VNI_dci:29 - Dual-stack MH - Simultaneous IPv4 and IPv6 across DCI
-        
-        Description:
-            1) Base profile bring up
-            2) Configure dual-stack multi-homed hosts with ESI in each VLAN
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts across DCI
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:23 (MH IPv4 across DCI) and L3VNI_dci:25 (MH IPv6 across DCI)
-            into a single dual-stack test with L3VNI translation and EVPN-MH.
-            
-        Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 MH traffic across DCI
-        """
-        tc_id = "test_base_dci_l3vni_dualstack_mh_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:29: Dual-stack MH IPv4+IPv6 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        # Send MH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (MH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross',
-                          traffic_names=['L3-MH'], simultaneous=True):
-            st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'
-            result = False
-        
-        
+
+        st.log('This test covers: L3VNI_dci:{} (dual-stack {} {})'.format(dci_num, host_type, scope_label))
+
         report_result(result, tc_id, summ)
     
     def test_base_dci_l3vni_type5_route_withdrawal(self):

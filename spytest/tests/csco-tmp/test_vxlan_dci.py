@@ -5066,7 +5066,7 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l2vni_ipv4_across_dci(self):
+    def test_base_dci_l2l3vni_ipv4_across_dci(self):
         """
         Solution_dci:5 + L3VNI_dci:14 - Verify L2VNI and L3VNI IPv4 traffic
         between hosts across DCI.
@@ -5085,7 +5085,7 @@ class TestVxlanDCIBase():
         Steps:
             1. Send L2VNI and L3VNI IPv4 traffic across DCI
         """
-        tc_id = "test_base_dci_l2vni_ipv4_across_dci"
+        tc_id = "test_base_dci_l2l3vni_ipv4_across_dci"
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
         
@@ -5106,14 +5106,14 @@ class TestVxlanDCIBase():
             result = False
         
         st.log('This test covers the following testcases:')
-        st.log('  - Solution_dci:5  (test_base_dci_l2vni_ipv4_across_dci)')
+        st.log('  - Solution_dci:5  (test_base_dci_l2l3vni_ipv4_across_dci)')
         st.log('  - L3VNI_dci:14    (L3VNI IPv4 across DCI)')
         st.log('  - L3VNI_dci:19    (test_base_dci_l3vni_sh_ipv4_across_dci)')
         st.log('  - L3VNI_dci:23    (test_base_dci_l3vni_mh_ipv4_across_dci)')
         
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l2vni_ipv6_across_dci(self):
+    def test_base_dci_l2l3vni_ipv6_across_dci(self):
         """
         Solution_dci:6 + L3VNI_dci:15 - Verify L2VNI and L3VNI IPv6 traffic
         between hosts across DCI.
@@ -5132,7 +5132,7 @@ class TestVxlanDCIBase():
         Steps:
             1. Send L2VNI and L3VNI IPv6 traffic across DCI
         """
-        tc_id = "test_base_dci_l2vni_ipv6_across_dci"
+        tc_id = "test_base_dci_l2l3vni_ipv6_across_dci"
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
         
@@ -5153,7 +5153,7 @@ class TestVxlanDCIBase():
             result = False
         
         st.log('This test covers the following testcases:')
-        st.log('  - Solution_dci:6  (test_base_dci_l2vni_ipv6_across_dci)')
+        st.log('  - Solution_dci:6  (test_base_dci_l2l3vni_ipv6_across_dci)')
         st.log('  - L3VNI_dci:15    (L3VNI IPv6 across DCI)')
         st.log('  - L3VNI_dci:21    (test_base_dci_l3vni_sh_ipv6_across_dci)')
         st.log('  - L3VNI_dci:25    (test_base_dci_l3vni_mh_ipv6_across_dci)')

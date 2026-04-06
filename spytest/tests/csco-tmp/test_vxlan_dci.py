@@ -5882,15 +5882,6 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
-    # L3VNI SH/MH test cases (dci:18-25) have been consolidated into the
-    # existing L2L3VNI/L2VNI traffic tests above:
-    #   - test_base_dci_l2l3vni_ipv4_within_dc covers L3VNI_dci:18 (SH) + L3VNI_dci:22 (MH)
-    #   - test_base_dci_l2l3vni_ipv6_within_dc covers L3VNI_dci:20 (SH) + L3VNI_dci:24 (MH)
-    #   - test_base_dci_l2vni_ipv4_across_dci  covers L3VNI_dci:19 (SH) + L3VNI_dci:23 (MH)
-    #   - test_base_dci_l2vni_ipv6_across_dci  covers L3VNI_dci:21 (SH) + L3VNI_dci:25 (MH)
-    # Each consolidated test sends both L2VNI and L3VNI (SH+MH) traffic in a single run
-    # and prints the list of covered testcase IDs at the end.
-
     def test_base_dci_l3vni_dualstack_sh_within_dc(self):
         """
         L3VNI_dci:26 - Dual-stack SH - Simultaneous IPv4 and IPv6 within DC

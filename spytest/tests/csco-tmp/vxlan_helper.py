@@ -8592,19 +8592,46 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, src_mac, ixia_asn,
     st.log('BGP peer configured: handle={}'.format(bgp_handle))
 
     # Step 3: Advertise IPv6 prefixes
-    # IMPORTANT: All prefixes are advertised in a SINGLE tg_emulation_bgp_route_config
-    # call to avoid repeated protocol stop/start cycles.  See IPv4 helper for
-    # detailed explanation of the TGenFail root cause.
+    # IMPORTANT: We call the IXIA API directly via ixia_eval() to BYPASS the
+    # spytest TG wrapper's tg_emulation_bgp_route_config pre-processing.
+    #
+    # Root cause of dci:8 failure (prefix_issue.txt analysis):
+    # The TG wrapper (tg.py lines 2162-2195) intercepts every
+    # tg_emulation_bgp_route_config call and:
+    #   1. Calls stop_all_protocols (line 2171)
+    #   2. Polls protocol_info in a 29-iteration loop (lines 2178-2191)
+    #      looking for the BGP port in the response
+    #   3. If the port is NOT found, calls apply_on_the_fly_changes and
+    #      continues looping
+    # In our DCI topology the IXIA BGP port (e.g. 1/2/3) is NOT present in
+    # the protocol_info global_per_port response because the new BGP
+    # topology/device-group has no started sessions yet.  The wrapper loops
+    # for ~48 minutes calling apply_on_the_fly_changes each iteration until
+    # the IXIA API eventually crashes with:
+    #   TG API Fatal Exception: unmatched '}' (<string>, line 1)
+    #
+    # By calling ixia_eval('emulation_bgp_route_config', ...) directly we
+    # skip the wrapper's stop_all_protocols + protocol_info polling entirely.
+    # We then manually stop protocols, add the route, apply changes, and
+    # restart protocols.
     total_routes = sum(p.get('num_routes', 1) for p in ipv6_prefixes)
     first_prefix = ipv6_prefixes[0]['prefix']
     first_prefix_len = ipv6_prefixes[0].get('prefix_len', 64)
 
-    st.banner('IXIA BGP: Advertising {} IPv6 routes starting from {}/{} in single call'.format(
+    st.banner('IXIA BGP: Advertising {} IPv6 routes starting from {}/{} (direct API)'.format(
         total_routes, first_prefix, first_prefix_len))
     st.log('  First prefix: {}/{}, total routes: {}'.format(
         first_prefix, first_prefix_len, total_routes))
 
-    route_result = tg_handle.tg_emulation_bgp_route_config(
+    # 3a. Stop all protocols before adding routes
+    st.log('IXIA: Stopping all protocols before adding BGP routes')
+    tg_handle.tg_topology_test_control(action='stop_all_protocols', tg_wait=10)
+    time.sleep(15)
+
+    # 3b. Call IXIA API directly — bypasses wrapper's protocol_info polling
+    st.log('IXIA: Calling emulation_bgp_route_config directly via ixia_eval')
+    route_result = tg_handle.ixia_eval(
+        'emulation_bgp_route_config',
         handle=bgp_handle,
         mode='add',
         ip_version='6',
@@ -8614,11 +8641,17 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, src_mac, ixia_asn,
     )
     st.log('Route config result: {}'.format(route_result))
 
+    # 3c. Apply changes and restart all protocols
+    st.log('IXIA: Applying on-the-fly changes after route config')
+    tg_handle.tg_topology_test_control(action='apply_on_the_fly_changes', tg_wait=5)
+    st.log('IXIA: Starting all protocols after route config')
+    tg_handle.tg_topology_test_control(action='start_all_protocols', tg_wait=30)
+
     if route_result:
         result['route_handles'].append(route_result)
 
     result['result'] = True
-    result['details'] = 'IXIA BGP configured: {} IPv6 routes advertised in single call'.format(
+    result['details'] = 'IXIA BGP configured: {} IPv6 routes advertised via direct API'.format(
         total_routes)
     st.log(result['details'])
     return result
@@ -8802,40 +8835,70 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
     st.log('BGP peer configured: handle={}'.format(bgp_handle))
 
     # Step 3: Advertise IPv4 prefixes
-    # IMPORTANT: All prefixes are advertised in a SINGLE tg_emulation_bgp_route_config
-    # call to avoid repeated protocol stop/start cycles.  The spytest TG wrapper
-    # internally calls stop_all_protocols -> protocol_info -> start_all_protocols
-    # for EVERY tg_emulation_bgp_route_config invocation.  Calling it in a loop
-    # (once per prefix) caused ~22 minutes of protocol cycling that eventually
-    # corrupted the TG port handle, resulting in:
-    #   TG API Fatal Error: Failed to get port 1/2/3 from the protocol info
-    # Using a single call with num_routes=<total> and prefix_step avoids this.
+    # IMPORTANT: We call the IXIA API directly via ixia_eval() to BYPASS the
+    # spytest TG wrapper's tg_emulation_bgp_route_config pre-processing.
+    #
+    # Root cause of dci:9 failure (prefix_issue.txt analysis):
+    # The TG wrapper (tg.py lines 2162-2195) intercepts every
+    # tg_emulation_bgp_route_config call and:
+    #   1. Calls stop_all_protocols (line 2171)
+    #   2. Polls protocol_info in a 29-iteration loop (lines 2178-2191)
+    #      looking for the BGP port in the response
+    #   3. If the port is NOT found, calls apply_on_the_fly_changes and
+    #      continues looping
+    # In our DCI topology the IXIA BGP port (e.g. 1/2/3) is NOT present in
+    # the protocol_info global_per_port response because the new BGP
+    # topology/device-group has no started sessions yet.  The wrapper loops
+    # for ~48 minutes calling apply_on_the_fly_changes each iteration until
+    # the IXIA API eventually crashes with:
+    #   TG API Fatal Exception: unmatched '}' (<string>, line 1)
+    #
+    # By calling ixia_eval('emulation_bgp_route_config', ...) directly we
+    # skip the wrapper's stop_all_protocols + protocol_info polling entirely.
+    # We then manually stop protocols, add the route, apply changes, and
+    # restart protocols.
     total_routes = sum(p.get('num_routes', 1) for p in ipv4_prefixes)
     first_prefix = ipv4_prefixes[0]['prefix']
     first_prefix_len = ipv4_prefixes[0].get('prefix_len', 24)
-    prefix_netmask = _prefix_len_to_ipv4_netmask(first_prefix_len)
 
-    st.banner('IXIA BGP: Advertising {} IPv4 routes starting from {}/{} in single call'.format(
+    st.banner('IXIA BGP: Advertising {} IPv4 routes starting from {}/{} (direct API)'.format(
         total_routes, first_prefix, first_prefix_len))
-    st.log('  First prefix: {}/{} (netmask {}), total routes: {}, prefix_step: 1'.format(
-        first_prefix, first_prefix_len, prefix_netmask, total_routes))
+    st.log('  First prefix: {}/{}, total routes: {}, prefix_step: 1'.format(
+        first_prefix, first_prefix_len, total_routes))
 
-    route_result = tg_handle.tg_emulation_bgp_route_config(
+    # 3a. Stop all protocols before adding routes
+    st.log('IXIA: Stopping all protocols before adding BGP routes')
+    tg_handle.tg_topology_test_control(action='stop_all_protocols', tg_wait=10)
+    time.sleep(15)
+
+    # 3b. Call IXIA API directly — bypasses wrapper's protocol_info polling
+    # Note: For IPv4, the wrapper normally converts 'netmask' to 'prefix_from'
+    # (prefix length in bits).  Since we bypass the wrapper, we pass
+    # 'prefix_from' directly instead of 'netmask'.
+    st.log('IXIA: Calling emulation_bgp_route_config directly via ixia_eval')
+    route_result = tg_handle.ixia_eval(
+        'emulation_bgp_route_config',
         handle=bgp_handle,
         mode='add',
         num_routes=str(total_routes),
         prefix=first_prefix,
-        netmask=prefix_netmask,
+        prefix_from=str(first_prefix_len),
         prefix_step=1,
         as_path='as_seq:1'
     )
     st.log('Route config result: {}'.format(route_result))
 
+    # 3c. Apply changes and restart all protocols
+    st.log('IXIA: Applying on-the-fly changes after route config')
+    tg_handle.tg_topology_test_control(action='apply_on_the_fly_changes', tg_wait=5)
+    st.log('IXIA: Starting all protocols after route config')
+    tg_handle.tg_topology_test_control(action='start_all_protocols', tg_wait=30)
+
     if route_result:
         result['route_handles'].append(route_result)
 
     result['result'] = True
-    result['details'] = 'IXIA BGP configured: {} IPv4 routes advertised in single call'.format(
+    result['details'] = 'IXIA BGP configured: {} IPv4 routes advertised via direct API'.format(
         total_routes)
     st.log(result['details'])
     return result

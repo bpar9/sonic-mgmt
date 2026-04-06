@@ -6349,7 +6349,12 @@ class TestVxlanDCIBase():
         target_vlan_id = 11
         target_vlan = str(target_vlan_id)
         
-        # Resolve VLAN member interface for the target leaf
+        # Resolve VLAN member interface for the target leaf.
+        # First try the cached vlan_config; if not available, query the DUT
+        # directly via 'show vlan config' to discover members.  We must use
+        # member remove/add (never delete the whole VLAN) because VLAN 11 has
+        # SVI IPs and VRF bindings — 'config vlan del' would fail with
+        # "First remove IP addresses assigned to this VLAN and unbind vrf".
         test_member = None
         if test_cfg.get('vlan_config') and test_cfg['vlan_config'].get(target_leaf):
             vlan_info = test_cfg['vlan_config'][target_leaf]
@@ -6358,8 +6363,19 @@ class TestVxlanDCIBase():
                 test_member = members[0] if isinstance(members, list) else members
         
         if not test_member:
-            st.log('WARNING: No VLAN member found for VLAN {} on {}, '
-                   'will delete/re-create VLAN instead'.format(target_vlan, target_leaf))
+            st.log('vlan_config does not have VLAN {} members for {}, '
+                   'querying DUT directly'.format(target_vlan, target_leaf))
+            live_members = vlan_obj.get_vlan_member(target_leaf, vlan_list=[target_vlan])
+            if live_members and live_members.get(target_vlan):
+                test_member = live_members[target_vlan][0]
+                st.log('Discovered VLAN {} member from DUT: {}'.format(
+                    target_vlan, test_member))
+        
+        if not test_member:
+            summ += 'No VLAN {} member found on {} (from config or DUT query)\n'.format(
+                target_vlan, target_leaf)
+            report_result(False, tc_id, summ)
+            return
         
         try:
             # Step 1: Verify Type-5 routes present on all nodes before withdrawal
@@ -6369,16 +6385,14 @@ class TestVxlanDCIBase():
                 summ += 'Type-5 route verification failed (pre-withdrawal check)\n'
                 result = False
             
-            # Step 2: Remove VLAN member on target leaf (like test_remove_add_vlan_members)
-            st.banner('Step 2: Remove VLAN {} member on {} to trigger route withdrawal'.format(
-                target_vlan, target_leaf))
-            if test_member:
-                vlan_obj.delete_vlan_member(target_leaf, target_vlan, test_member)
-                st.log('Removed member {} from VLAN {} on {}'.format(
-                    test_member, target_vlan, target_leaf))
-            else:
-                vlan_obj.delete_vlan(target_leaf, target_vlan)
-                st.log('Deleted VLAN {} on {}'.format(target_vlan, target_leaf))
+            # Step 2: Remove VLAN member on target leaf (like test_remove_add_vlan_members).
+            # We only remove VLAN members, never delete the whole VLAN, because
+            # the VLAN has SVI IPs and VRF bindings that would block deletion.
+            st.banner('Step 2: Remove VLAN {} member {} on {} to trigger route withdrawal'.format(
+                target_vlan, test_member, target_leaf))
+            vlan_obj.delete_vlan_member(target_leaf, target_vlan, test_member)
+            st.log('Removed member {} from VLAN {} on {}'.format(
+                test_member, target_vlan, target_leaf))
             st.wait(15, 'Waiting for route withdrawal after VLAN {} removal'.format(target_vlan))
             
             # Step 3: Verify Type-5 route and IP route withdrawn on all nodes
@@ -6402,15 +6416,11 @@ class TestVxlanDCIBase():
                     st.log('IP route withdrawal verified on {}'.format(node))
             
             # Step 4: Re-add VLAN member on target leaf
-            st.banner('Step 4: Re-add VLAN {} member on {} to trigger route re-advertisement'.format(
-                target_vlan, target_leaf))
-            if test_member:
-                vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
-                st.log('Re-added member {} to VLAN {} on {}'.format(
-                    test_member, target_vlan, target_leaf))
-            else:
-                vlan_obj.create_vlan(target_leaf, target_vlan)
-                st.log('Re-created VLAN {} on {}'.format(target_vlan, target_leaf))
+            st.banner('Step 4: Re-add VLAN {} member {} on {} to trigger route re-advertisement'.format(
+                target_vlan, test_member, target_leaf))
+            vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
+            st.log('Re-added member {} to VLAN {} on {}'.format(
+                test_member, target_vlan, target_leaf))
             st.wait(15, 'Waiting for route re-advertisement after VLAN {} re-add'.format(target_vlan))
             
             # Step 5: Verify Type-5 route and IP route re-advertised on all nodes
@@ -6445,10 +6455,7 @@ class TestVxlanDCIBase():
             summ += 'Exception: {}\n'.format(e)
             # Try to restore VLAN member
             try:
-                if test_member:
-                    vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
-                else:
-                    vlan_obj.create_vlan(target_leaf, target_vlan)
+                vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
             except Exception:
                 pass
             result = False

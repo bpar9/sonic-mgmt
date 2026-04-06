@@ -8951,6 +8951,9 @@ def configure_dut_bgp_for_ixia(dut, leaf_asn, ixia_asn, ixia_ip=None, vrf_name='
     st.banner('DUT BGP: Configuring neighbor {} (AS {}) on {} vrf {}'.format(
         nbr_desc, ixia_asn, dut, vrf_name))
     cmd = 'router bgp {} vrf {}\n'.format(leaf_asn, vrf_name)
+    # Disable ebgp-requires-policy so that IXIA eBGP routes are accepted
+    # without requiring explicit route-map policies on the neighbor.
+    cmd += 'no bgp ebgp-requires-policy\n'
     if ixia_ip:
         cmd += 'neighbor {} remote-as {}\n'.format(ixia_ip, ixia_asn)
     if ixia_ipv6:

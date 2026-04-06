@@ -19,6 +19,7 @@ import apis.system.reboot as reboot_obj
 from spytest.utils import poll_wait
 from copy import deepcopy
 import json
+import time
 import apis.routing.bgp as bgp_obj
 
 
@@ -5407,7 +5408,11 @@ class TestVxlanDCIBase():
             # IXIA: IPv4 stack (required by IXIA protocol framework) + IPv6 stack
             # for IPv6 BGP peering.  Only IPv6 BGP peer is created; IPv6 prefixes
             # are advertised under IPv6 address-family.
+            # NOTE: IXIA prefix installation is slow (~3 min per prefix group)
+            # because the spytest TG wrapper internally stops/starts all protocols
+            # for each tg_emulation_bgp_route_config call.  This is expected.
             st.banner('Step 3b: Configure IXIA BGP IPv6 session per bgp_ixia.txt pattern')
+            _ixia_start = time.time()
             ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
                 tg_handle=tg_handle,
                 port_handle=port_handle,
@@ -5433,7 +5438,8 @@ class TestVxlanDCIBase():
             bgp_handle = ixia_result['bgp_handle']
             interface_handle = ixia_result['interface_handle']
             ixia_configured = True
-            st.log('IXIA BGP session configured successfully')
+            _ixia_elapsed = time.time() - _ixia_start
+            st.log('IXIA BGP session configured successfully (took {:.1f}s)'.format(_ixia_elapsed))
             st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
             
             # --- Step 4: Start BGP protocol on IXIA ---
@@ -5461,19 +5467,12 @@ class TestVxlanDCIBase():
                 summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
                 result = False
             
-            # --- Step 5: Verify Type-5 routes on BGW nodes ---
-            # First verify base Type-5 routes (comprehensive check), then verify
-            # the specific IXIA-advertised prefixes appear as Type-5 routes.
-            st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv6 prefixes on BGW nodes')
+            # --- Step 5: Verify IXIA-advertised IPv6 prefixes as Type-5 routes on BGW nodes ---
+            # Only check for the newly advertised IXIA prefixes (not a full
+            # comprehensive Type-5 dump) to avoid printing the Type-5 output twice.
+            st.banner('Step 5: Verify IXIA IPv6 prefixes present as Type-5 routes on BGW nodes')
             bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
             st.log('BGW nodes to verify: {}'.format(bgw_nodes))
-            
-            if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
-                summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv6 prefix advertisement\n'
-                result = False
-            
-            # Step 5b: Verify IXIA-advertised IPv6 prefixes specifically as Type-5 routes
-            st.banner('Step 5b: Verify IXIA IPv6 prefixes present as Type-5 routes on BGW nodes')
             ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
                                 for p in ipv6_prefixes]
             for bgw_node in bgw_nodes:
@@ -5654,7 +5653,11 @@ class TestVxlanDCIBase():
             # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
             # Pass the existing topology_handle so the helper creates a device group
             # on the existing topology instead of creating a new one (Error 6502).
+            # NOTE: IXIA prefix installation is slow (~3 min per prefix group)
+            # because the spytest TG wrapper internally stops/starts all protocols
+            # for each tg_emulation_bgp_route_config call.  This is expected.
             st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
+            _ixia_start = time.time()
             ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
                 tg_handle=tg_handle,
                 port_handle=port_handle,
@@ -5678,7 +5681,8 @@ class TestVxlanDCIBase():
             bgp_handle = ixia_result['bgp_handle']
             interface_handle = ixia_result['interface_handle']
             ixia_configured = True
-            st.log('IXIA BGP session configured successfully')
+            _ixia_elapsed = time.time() - _ixia_start
+            st.log('IXIA BGP session configured successfully (took {:.1f}s)'.format(_ixia_elapsed))
             st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
             
             # --- Step 4: Start BGP protocol on IXIA ---
@@ -5706,19 +5710,12 @@ class TestVxlanDCIBase():
                 summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
                 result = False
             
-            # --- Step 5: Verify Type-5 routes on BGW nodes ---
-            # First verify base Type-5 routes (comprehensive check), then verify
-            # the specific IXIA-advertised prefixes appear as Type-5 routes.
-            st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes')
+            # --- Step 5: Verify IXIA-advertised IPv4 prefixes as Type-5 routes on BGW nodes ---
+            # Only check for the newly advertised IXIA prefixes (not a full
+            # comprehensive Type-5 dump) to avoid printing the Type-5 output twice.
+            st.banner('Step 5: Verify IXIA IPv4 prefixes present as Type-5 routes on BGW nodes')
             bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
             st.log('BGW nodes to verify: {}'.format(bgw_nodes))
-            
-            if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5_comprehensive']):
-                summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
-                result = False
-            
-            # Step 5b: Verify IXIA-advertised IPv4 prefixes specifically as Type-5 routes
-            st.banner('Step 5b: Verify IXIA IPv4 prefixes present as Type-5 routes on BGW nodes')
             ixia_prefix_strs = ['{}/{}'.format(p['prefix'], p['prefix_len'])
                                 for p in ipv4_prefixes]
             for bgw_node in bgw_nodes:

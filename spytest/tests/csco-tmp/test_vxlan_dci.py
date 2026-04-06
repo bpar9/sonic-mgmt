@@ -5364,13 +5364,13 @@ class TestVxlanDCIBase():
         ixia_ipv6 = '2099::100'
         ixia_gateway_ipv6 = '2099::1'
         
-        # IPv6 prefixes to advertise from IXIA
+        # IPv6 prefixes to advertise from IXIA.
+        # All 5 prefixes (2001:db8::/64 through 2001:db8:4::/64) are passed as a
+        # single entry with num_routes=5.  The helper consolidates them into one
+        # tg_emulation_bgp_route_config call to avoid repeated protocol stop/start
+        # cycles that cause TGenFail.
         ipv6_prefixes = [
-            {'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:1::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:2::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:3::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:4::', 'prefix_len': 64, 'num_routes': 1},
+            {'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5},
         ]
         
         st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
@@ -5408,9 +5408,10 @@ class TestVxlanDCIBase():
             # IXIA: IPv4 stack (required by IXIA protocol framework) + IPv6 stack
             # for IPv6 BGP peering.  Only IPv6 BGP peer is created; IPv6 prefixes
             # are advertised under IPv6 address-family.
-            # NOTE: IXIA prefix installation is slow (~3 min per prefix group)
-            # because the spytest TG wrapper internally stops/starts all protocols
-            # for each tg_emulation_bgp_route_config call.  This is expected.
+            # NOTE: The helper advertises all prefixes in a single
+            # tg_emulation_bgp_route_config call (num_routes=5) to avoid
+            # repeated protocol stop/start cycles that corrupt the TG port
+            # handle and cause TGenFail.
             st.banner('Step 3b: Configure IXIA BGP IPv6 session per bgp_ixia.txt pattern')
             _ixia_start = time.time()
             ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
@@ -5616,13 +5617,13 @@ class TestVxlanDCIBase():
         ixia_netmask = '255.255.255.0'
         ixia_mac = '00:00:AA:BB:CC:09'
         
-        # IPv4 prefixes to advertise from IXIA
+        # IPv4 prefixes to advertise from IXIA.
+        # All 5 prefixes (10.100.0.0/24 through 10.100.4.0/24) are passed as a
+        # single entry with num_routes=5.  The helper consolidates them into one
+        # tg_emulation_bgp_route_config call with prefix_step=1 to avoid
+        # repeated protocol stop/start cycles that cause TGenFail.
         ipv4_prefixes = [
-            {'prefix': '10.100.0.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.1.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.2.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.3.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.4.0', 'prefix_len': 24, 'num_routes': 1},
+            {'prefix': '10.100.0.0', 'prefix_len': 24, 'num_routes': 5},
         ]
         
         st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
@@ -5653,9 +5654,10 @@ class TestVxlanDCIBase():
             # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
             # Pass the existing topology_handle so the helper creates a device group
             # on the existing topology instead of creating a new one (Error 6502).
-            # NOTE: IXIA prefix installation is slow (~3 min per prefix group)
-            # because the spytest TG wrapper internally stops/starts all protocols
-            # for each tg_emulation_bgp_route_config call.  This is expected.
+            # NOTE: The helper advertises all prefixes in a single
+            # tg_emulation_bgp_route_config call (num_routes=5, prefix_step=1)
+            # to avoid repeated protocol stop/start cycles that corrupt the
+            # TG port handle and cause TGenFail.
             st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
             _ixia_start = time.time()
             ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(

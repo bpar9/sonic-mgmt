@@ -8592,31 +8592,34 @@ def configure_ixia_bgp_ipv6_session(tg_handle, port_handle, src_mac, ixia_asn,
     st.log('BGP peer configured: handle={}'.format(bgp_handle))
 
     # Step 3: Advertise IPv6 prefixes
-    st.banner('IXIA BGP: Advertising {} IPv6 prefix group(s)'.format(len(ipv6_prefixes)))
+    # IMPORTANT: All prefixes are advertised in a SINGLE tg_emulation_bgp_route_config
+    # call to avoid repeated protocol stop/start cycles.  See IPv4 helper for
+    # detailed explanation of the TGenFail root cause.
+    total_routes = sum(p.get('num_routes', 1) for p in ipv6_prefixes)
+    first_prefix = ipv6_prefixes[0]['prefix']
+    first_prefix_len = ipv6_prefixes[0].get('prefix_len', 64)
 
-    for idx, prefix_cfg in enumerate(ipv6_prefixes):
-        prefix = prefix_cfg['prefix']
-        prefix_len = prefix_cfg.get('prefix_len', 64)
-        num_routes = prefix_cfg.get('num_routes', 1)
-        st.log('  Prefix group {}: {} prefixes starting from {}/{}'.format(
-            idx + 1, num_routes, prefix, prefix_len))
+    st.banner('IXIA BGP: Advertising {} IPv6 routes starting from {}/{} in single call'.format(
+        total_routes, first_prefix, first_prefix_len))
+    st.log('  First prefix: {}/{}, total routes: {}'.format(
+        first_prefix, first_prefix_len, total_routes))
 
-        route_result = tg_handle.tg_emulation_bgp_route_config(
-            handle=bgp_handle,
-            mode='add',
-            ip_version='6',
-            num_routes=str(num_routes),
-            prefix=prefix,
-            as_path='as_seq:1'
-        )
-        st.log('Route config result: {}'.format(route_result))
+    route_result = tg_handle.tg_emulation_bgp_route_config(
+        handle=bgp_handle,
+        mode='add',
+        ip_version='6',
+        num_routes=str(total_routes),
+        prefix=first_prefix,
+        as_path='as_seq:1'
+    )
+    st.log('Route config result: {}'.format(route_result))
 
-        if route_result:
-            result['route_handles'].append(route_result)
+    if route_result:
+        result['route_handles'].append(route_result)
 
     result['result'] = True
-    result['details'] = 'IXIA BGP configured: {} IPv6 prefix groups advertised'.format(
-        len(ipv6_prefixes))
+    result['details'] = 'IXIA BGP configured: {} IPv6 routes advertised in single call'.format(
+        total_routes)
     st.log(result['details'])
     return result
 
@@ -8799,34 +8802,41 @@ def configure_ixia_bgp_ipv4_session(tg_handle, port_handle, ixia_ip, gateway, ne
     st.log('BGP peer configured: handle={}'.format(bgp_handle))
 
     # Step 3: Advertise IPv4 prefixes
-    st.banner('IXIA BGP: Advertising {} IPv4 prefix group(s)'.format(len(ipv4_prefixes)))
+    # IMPORTANT: All prefixes are advertised in a SINGLE tg_emulation_bgp_route_config
+    # call to avoid repeated protocol stop/start cycles.  The spytest TG wrapper
+    # internally calls stop_all_protocols -> protocol_info -> start_all_protocols
+    # for EVERY tg_emulation_bgp_route_config invocation.  Calling it in a loop
+    # (once per prefix) caused ~22 minutes of protocol cycling that eventually
+    # corrupted the TG port handle, resulting in:
+    #   TG API Fatal Error: Failed to get port 1/2/3 from the protocol info
+    # Using a single call with num_routes=<total> and prefix_step avoids this.
+    total_routes = sum(p.get('num_routes', 1) for p in ipv4_prefixes)
+    first_prefix = ipv4_prefixes[0]['prefix']
+    first_prefix_len = ipv4_prefixes[0].get('prefix_len', 24)
+    prefix_netmask = _prefix_len_to_ipv4_netmask(first_prefix_len)
 
-    for idx, prefix_cfg in enumerate(ipv4_prefixes):
-        prefix = prefix_cfg['prefix']
-        prefix_len = prefix_cfg.get('prefix_len', 24)
-        num_routes = prefix_cfg.get('num_routes', 1)
-        # Convert prefix_len to IPv4 netmask for tg_emulation_bgp_route_config
-        prefix_netmask = _prefix_len_to_ipv4_netmask(prefix_len)
-        st.log('  Prefix group {}: {} prefixes starting from {}/{} (netmask {})'.format(
-            idx + 1, num_routes, prefix, prefix_len, prefix_netmask))
+    st.banner('IXIA BGP: Advertising {} IPv4 routes starting from {}/{} in single call'.format(
+        total_routes, first_prefix, first_prefix_len))
+    st.log('  First prefix: {}/{} (netmask {}), total routes: {}, prefix_step: 1'.format(
+        first_prefix, first_prefix_len, prefix_netmask, total_routes))
 
-        route_result = tg_handle.tg_emulation_bgp_route_config(
-            handle=bgp_handle,
-            mode='add',
-            num_routes=str(num_routes),
-            prefix=prefix,
-            netmask=prefix_netmask,
-            prefix_step=1,
-            as_path='as_seq:1'
-        )
-        st.log('Route config result: {}'.format(route_result))
+    route_result = tg_handle.tg_emulation_bgp_route_config(
+        handle=bgp_handle,
+        mode='add',
+        num_routes=str(total_routes),
+        prefix=first_prefix,
+        netmask=prefix_netmask,
+        prefix_step=1,
+        as_path='as_seq:1'
+    )
+    st.log('Route config result: {}'.format(route_result))
 
-        if route_result:
-            result['route_handles'].append(route_result)
+    if route_result:
+        result['route_handles'].append(route_result)
 
     result['result'] = True
-    result['details'] = 'IXIA BGP configured: {} IPv4 prefix groups advertised'.format(
-        len(ipv4_prefixes))
+    result['details'] = 'IXIA BGP configured: {} IPv4 routes advertised in single call'.format(
+        total_routes)
     st.log(result['details'])
     return result
 

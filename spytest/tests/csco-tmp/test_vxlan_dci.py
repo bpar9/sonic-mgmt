@@ -1411,26 +1411,109 @@ def tgen_preconfig(**kwargs):
                     stream_handles['l2_v6'].extend(pc_cross_handles_v6 if isinstance(pc_cross_handles_v6, list) else [pc_cross_handles_v6])
 
     # ============================================================
-    # Continuous cross-DC L2 (IPv4/IPv6) for DCI link flap/shut tests
-    # These are NOT created here; they are created on-demand by
-    # _create_dci_fc_streams() when test_dci_link_trigger actually runs.
-    # This avoids UNAPPLIED traffic items in IXIA for tests that don't
-    # need them.  We only store the endpoint data and device handles
-    # needed for lazy creation.
+    # Continuous cross-DC L2+L3 (IPv4/IPv6) for DCI link flap/shut tests
+    # Created eagerly so test_dci_link_trigger can use them directly
+    # via tgen_handles['dci_flap_continuous'].
+    # Uses same VLANs as burst L2/L3 traffic; two representative VLANs
+    # (12, 18) to keep stream count manageable.
     # ============================================================
     stream_handles['dci_flap_continuous'] = {}
+    _dci_fc_key = 1
+    _dci_fc_rate = test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1)
+    _dci_fc_ppb = test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000)
+
+    def _dci_merge_flap_continuous(dest, created, start_key):
+        k = start_key
+        if not created:
+            return k
+        for _idx, sinfo in created.items():
+            if isinstance(sinfo, dict) and sinfo.get('stream_id'):
+                dest[k] = sinfo
+                k += 1
+        return k
+
+    # Limit flap-continuous streams: two VLANs only (12, 18) — one traffic item per VLAN per AF
+    _dci_fc_vlans = (12, 18)
+
+    def _dci_fc_endpoints_for_vlan(vlan_id):
+        merged = {}
+        if l2_orphan_cross:
+            for _k, _v in l2_orphan_cross.items():
+                if _v.get('src_vlan') == vlan_id:
+                    merged[_k] = _v
+        if l2_pc_cross:
+            for _k, _v in l2_pc_cross.items():
+                if _v.get('src_vlan') == vlan_id:
+                    merged[_k] = _v
+        return merged
+
     if dci_enabled and (l2_orphan_cross or l2_pc_cross):
-        stream_handles['_dci_fc_lazy'] = {
-            'l2_orphan_cross': l2_orphan_cross,
-            'l2_pc_cross': l2_pc_cross,
-            'v4_device_handles': v4_device_handles,
-            'v6_device_handles': v6_device_handles,
-            'rate_percent': test_cfg['global'].get('bum', {}).get('rate_percent', 0.1),
-            'pkts_per_burst': test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000),
-        }
-        st.log("DCI flap continuous: deferred (endpoints saved for on-demand creation)")
+        st.banner(
+            "DCI: continuous L2 cross-DC for link flap tests — VLANs {} only".format(
+                _dci_fc_vlans))
+        for _vlan_fc in _dci_fc_vlans:
+            _eps_fc = _dci_fc_endpoints_for_vlan(_vlan_fc)
+            if not _eps_fc:
+                continue
+            _h_fc = vxlan_obj.create_traffic_item(
+                device_handles=v4_device_handles,
+                endpoints=_eps_fc,
+                topo_handles=topo_handles,
+                multi_dst='vlan',
+                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
+                transmit_mode='continuous',
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
+        for _vlan_fc in _dci_fc_vlans:
+            _eps_fc = _dci_fc_endpoints_for_vlan(_vlan_fc)
+            if not _eps_fc:
+                continue
+            _h_fc = vxlan_obj.create_traffic_item(
+                device_handles=v6_device_handles,
+                endpoints=_eps_fc,
+                topo_handles=topo_handles,
+                version='ipv6',
+                multi_dst='vlan',
+                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
+                transmit_mode='continuous',
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
+
+    # L3 continuous cross-DC traffic for DCI link flap/shut tests
+    if dci_enabled and l3_cross_dc_endpoints:
+        st.banner("DCI: continuous L3 cross-DC for link flap tests")
+        _h_fc_l3 = vxlan_obj.create_traffic_item(
+            device_handles=v4_device_handles,
+            endpoints=l3_cross_dc_endpoints,
+            topo_handles=topo_handles,
+            multi_dst='vrf',
+            name_prfx='DCI-FC-L3-X',
+            transmit_mode='continuous',
+            rate_percent=_dci_fc_rate,
+            pkts_per_burst=_dci_fc_ppb,
+        )
+        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3, _dci_fc_key)
+        _h_fc_l3_v6 = vxlan_obj.create_traffic_item(
+            device_handles=v6_device_handles,
+            endpoints=l3_cross_dc_endpoints,
+            topo_handles=topo_handles,
+            version='ipv6',
+            multi_dst='vrf',
+            name_prfx='DCI-FC-L3-X',
+            transmit_mode='continuous',
+            rate_percent=_dci_fc_rate,
+            pkts_per_burst=_dci_fc_ppb,
+        )
+        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3_v6, _dci_fc_key)
+
+    if stream_handles['dci_flap_continuous']:
+        st.log("DCI flap continuous: {} stream(s) created (L2+L3)".format(len(stream_handles['dci_flap_continuous'])))
     else:
-        st.log("NOTE: No cross-DC L2 endpoints for DCI flap continuous streams.")
+        st.log("NOTE: No cross-DC endpoints for DCI flap continuous streams.")
 
     st.banner(f"Creating L3 IPv6 traffic items: {len(l3_traffic_endpoints)} endpoints "
               f"({len(l3_within_dc_endpoints)} within-DC [{len(l3_within_sh)} SH + {len(l3_within_mh)} MH] "
@@ -3877,89 +3960,6 @@ class TestVxlanBGPTriggers():
             report_result(False, tc_id, result_str)
 
 
-def _create_dci_fc_streams(handles):
-    """
-    On-demand creation of DCI flap continuous L2 cross-DC streams.
-    Called only by test_dci_link_trigger when the test actually runs,
-    so that IXIA does not carry UNAPPLIED traffic items for other tests.
-
-    Args:
-        handles: tgen_handles dict (must contain '_dci_fc_lazy' from tgen_preconfig)
-
-    Returns:
-        dict: The populated dci_flap_continuous streams, or empty dict if nothing to create.
-    """
-    # Already created in a previous parametrize iteration?
-    fc = handles.get('dci_flap_continuous')
-    if isinstance(fc, dict) and len(fc) > 0:
-        return fc
-
-    lazy = handles.get('_dci_fc_lazy')
-    if not lazy:
-        st.log("_create_dci_fc_streams: no deferred endpoint data – nothing to create")
-        return {}
-
-    l2_orphan_cross = lazy['l2_orphan_cross']
-    l2_pc_cross = lazy['l2_pc_cross']
-    v4_dh = lazy['v4_device_handles']
-    v6_dh = lazy['v6_device_handles']
-    fc_rate = lazy['rate_percent']
-    fc_ppb = lazy['pkts_per_burst']
-
-    dest = {}
-    key = 1
-
-    def _merge(created, start_key):
-        k = start_key
-        if not created:
-            return k
-        for _idx, sinfo in created.items():
-            if isinstance(sinfo, dict) and sinfo.get('stream_id'):
-                dest[k] = sinfo
-                k += 1
-        return k
-
-    st.banner("DCI: creating continuous L2 cross-DC streams on-demand for link flap tests")
-
-    # IPv4 SH
-    if l2_orphan_cross:
-        key = _merge(vxlan_obj.create_traffic_item(
-            device_handles=v4_dh, endpoints=l2_orphan_cross, topo_handles=topo_handles,
-            multi_dst='vlan', name_prfx='DCI-FC-L2-SH-X',
-            transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
-
-    # IPv4 MH (per-VLAN)
-    if l2_pc_cross:
-        for vlan in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
-            eps = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == vlan}
-            if eps:
-                key = _merge(vxlan_obj.create_traffic_item(
-                    device_handles=v4_dh, endpoints=eps, topo_handles=topo_handles,
-                    multi_dst='vlan', name_prfx='DCI-FC-L2-MH-X-v{}'.format(vlan),
-                    transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
-
-    # IPv6 SH
-    if l2_orphan_cross:
-        key = _merge(vxlan_obj.create_traffic_item(
-            device_handles=v6_dh, endpoints=l2_orphan_cross, topo_handles=topo_handles,
-            version='ipv6', multi_dst='vlan', name_prfx='DCI-FC-L2-SH-X',
-            transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
-
-    # IPv6 MH (per-VLAN)
-    if l2_pc_cross:
-        for vlan in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
-            eps = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == vlan}
-            if eps:
-                key = _merge(vxlan_obj.create_traffic_item(
-                    device_handles=v6_dh, endpoints=eps, topo_handles=topo_handles,
-                    version='ipv6', multi_dst='vlan', name_prfx='DCI-FC-L2-MH-X-v{}'.format(vlan),
-                    transmit_mode='continuous', rate_percent=fc_rate, pkts_per_burst=fc_ppb), key)
-
-    handles['dci_flap_continuous'] = dest
-    st.log("DCI flap continuous: {} stream(s) created on-demand".format(len(dest)))
-    return dest
-
-
 # ============================================================================
 # INTERFACE TRIGGER TEST CLASS (DCI link flap/shut + leaf interface shut/noshut)
 # ============================================================================
@@ -3981,6 +3981,7 @@ class TestVxlanInterfaceTriggers():
         - Solution_dci:27 / L3VNI_dci:40 - DCI link shut - 1 link
         - Solution_dci:28 / L3VNI_dci:41 - DCI link flap - all interface flap (one BGW)
         - Solution_dci:29 / L3VNI_dci:42 - DCI link shut - all interface shut towards 1 DCI node
+              (during-trigger check uses burst BUM/L2, not dci_flap_continuous)
         - Solution_dci:30 / L3VNI_dci:43 - DCI link shut - all interface shut (all DCI nodes unreachable)
     """
 
@@ -4040,6 +4041,212 @@ class TestVxlanInterfaceTriggers():
                 orphan_map[dut] = orphan_list
         return orphan_map
 
+    def _yaml_member_matches_host_port(self, host_port, yaml_member):
+        """Match full TGEN key (e.g. T1D3P1) to yaml shorthand (e.g. T1P1); same idea as session port_vlan_dict."""
+        if not yaml_member or yaml_member.startswith('PortChannel'):
+            return False
+        if host_port == yaml_member:
+            return True
+        if 'P' not in yaml_member:
+            return host_port == yaml_member
+        suf = yaml_member.split('P')[-1]
+        return host_port.endswith('P' + suf)
+
+    def _host_info_keys_for_portchannel(self, dut, pc_intf, by_if):
+        """
+        g_*_host_info_dict keys are full TGEN names (e.g. T1D3P1 from get_interfaces), not PortChannel.
+        For each L2VNI vlan that includes this PortChannel, find host dict keys that carry that vlan
+        and match the non-PortChannel yaml member (e.g. T1P1 <-> T1D3P1).
+        """
+        keys = []
+        if not pc_intf.startswith('PortChannel'):
+            return keys
+        for vlan in test_cfg.get(dut, {}).get('l2vni', []) or []:
+            mems = vlan.get('members') or []
+            if pc_intf not in mems:
+                continue
+            vid = vlan.get('vlan_id')
+            if vid is None:
+                continue
+            for ymem in mems:
+                if ymem == pc_intf or (isinstance(ymem, str) and ymem.startswith('PortChannel')):
+                    continue
+                for pk, per_vlan in by_if.items():
+                    if not isinstance(per_vlan, dict) or vid not in per_vlan:
+                        continue
+                    if self._yaml_member_matches_host_port(pk, ymem):
+                        keys.append(pk)
+        seen = set()
+        out = []
+        for k in keys:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
+
+    def _collect_hosts_on_leaf_interfaces(self, dut, intf_list):
+        """
+        SAG host MAC / host_ip per interface from g_v4_host_info_dict and g_v6_host_info_dict
+        (same keys as generate_sag_hosts). Both families are checked for remote type-2 withdrawal.
+        Orphan ports use Sonic names (Ethernet*); host_info is keyed by TGEN aliases - resolve via
+        find_port_alias (same mapping as vxlan_helper.get_interfaces). For PortChannel, resolve
+        to host_info keys via _host_info_keys_for_portchannel (vlan + T1P1<->T1D3P1 style match).
+        """
+        hosts = []
+        seen = set()
+        v4_d = g_v4_host_info_dict.get(dut) if g_v4_host_info_dict else None
+        v6_d = g_v6_host_info_dict.get(dut) if g_v6_host_info_dict else None
+        if not v4_d and not v6_d:
+            return hosts
+        # Interface keys match between v4/v6 host dicts; use whichever exists for alias resolution
+        by_if = v4_d if v4_d else v6_d
+
+        def _append_from_per_if(per_if, af_label):
+            if not per_if:
+                return
+            for _vlan, info in per_if.items():
+                mac = info.get('src_mac')
+                hip = info.get('host_ip', '') or ''
+                if not mac:
+                    continue
+                key = (mac.lower(), hip.lower(), af_label)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if af_label == 'v4':
+                    ht = 'mac+ipv4' if hip else 'mac_only'
+                else:
+                    ht = 'mac+ipv6' if hip else 'mac_only'
+                hosts.append({'mac': mac, 'host_ip': hip, 'ht': ht})
+
+        for intf in intf_list:
+            host_keys = []
+            if intf in by_if:
+                host_keys = [intf]
+            elif intf.startswith('PortChannel'):
+                host_keys = self._host_info_keys_for_portchannel(dut, intf, by_if)
+                if not host_keys:
+                    try:
+                        aliases = vxlan_obj.find_port_alias(vars, dut, [intf])
+                        host_keys = [a for a in (aliases or []) if a in by_if]
+                    except Exception as e:
+                        st.log('_collect_hosts_on_leaf_interfaces: PC find_port_alias({}) failed: {}'.format(intf, e))
+                if not host_keys:
+                    st.log(
+                        '_collect_hosts_on_leaf_interfaces: no host_info for {} on {} '
+                        '(l2vni co-members + find_port_alias; by_if keys sample: {})'.format(
+                            intf, dut, list(by_if.keys())[:16]))
+            else:
+                try:
+                    aliases = vxlan_obj.find_port_alias(vars, dut, [intf])
+                    host_keys = [a for a in (aliases or []) if a in by_if]
+                    if not host_keys:
+                        st.log(
+                            '_collect_hosts_on_leaf_interfaces: no host_info for {} on {} '
+                            '(find_port_alias returned: {})'.format(intf, dut, aliases))
+                except Exception as e:
+                    st.log('_collect_hosts_on_leaf_interfaces: find_port_alias({}) failed: {}'.format(intf, e))
+            for hk in host_keys:
+                if v4_d:
+                    _append_from_per_if(v4_d.get(hk), 'v4')
+                if v6_d:
+                    _append_from_per_if(v6_d.get(hk), 'v6')
+        return hosts
+
+    def _type2_withdrawn_on_remote(self, leaf, mac, hip, ht, max_retries=8, interval_sec=2,
+                                   fast_first_n=5, fast_interval_sec=1):
+        """
+        Poll remote leaf until type-2 grep is empty (withdrawn) or retries exhausted.
+        Returns (success, last_parsed) where last_parsed is falsy if withdrawn.
+        First `fast_first_n` waits use `fast_interval_sec` (quick retries); then `interval_sec`.
+        Set fast_first_n=0 to always use interval_sec only.
+        """
+        last_parsed = []
+        for attempt in range(max_retries):
+            last_parsed = vxlan_obj._show_evpn_type2_grep(leaf, mac, hip, ht)
+            if not last_parsed:
+                return True, last_parsed
+            if attempt < max_retries - 1:
+                if fast_first_n and attempt < fast_first_n:
+                    st.wait(fast_interval_sec)
+                else:
+                    st.wait(interval_sec)
+        return False, last_parsed
+
+    def _verify_remote_type2_withdrawn_dc2_dc3(self, host_entries, phase='after shut'):
+        """
+        On DC2 and DC3 leafs, run filtered 'show bgp l2vpn evpn route type 2' (grep MAC/IP).
+        After local host link down, remote type-2s for that host should be withdrawn (no parsed routes).
+        Polls each lookup to allow BGP withdrawal propagation (timing via global.evpn_type2_withdraw_poll;
+        default fast-then-slower waits, ~teens s max per host/leaf if route never clears).
+        Each entry may be IPv4 (mac+ipv4) or IPv6 (mac+ipv6); both must be gone on remotes after shut.
+        One summary line per leaf (checked N host routes, M failures); details only on failure.
+        Returns (ok, detail_string).
+        """
+        if not host_entries:
+            st.log('EVPN type-2 withdrawal check: no host entries from g_v4/g_v6 host_info; skipping')
+            return True, ''
+        remote_leafs = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                        if 'leaf' in n and ('_dc2' in n or '_dc3' in n)]
+        if not remote_leafs:
+            st.log('EVPN type-2 withdrawal check: no DC2/DC3 leaf nodes in testbed; skipping')
+            return True, ''
+        ok = True
+        detail = ''
+        n_hosts = len(host_entries)
+        tw_cfg = test_cfg.get('global', {}).get('evpn_type2_withdraw_poll', {}) or {}
+
+        def _poll_int(key, default):
+            try:
+                v = tw_cfg.get(key, default)
+                if v is None:
+                    return default
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+
+        max_retries = max(1, _poll_int('max_retries', 8))
+        interval_sec = max(0, _poll_int('interval_sec', 2))
+        fast_first_n = max(0, _poll_int('fast_first_n', 5))
+        fast_interval_sec = max(0, _poll_int('fast_interval_sec', 1))
+        for leaf in sorted(remote_leafs):
+            st.banner('EVPN type-2 withdrawal on {} - {}'.format(leaf, phase))
+            failures = []
+            for h in host_entries:
+                mac = h['mac']
+                hip = h.get('host_ip') or ''
+                ht = h.get('ht')
+                if not ht:
+                    if hip and ':' in hip:
+                        ht = 'mac+ipv6'
+                    elif hip:
+                        ht = 'mac+ipv4'
+                    else:
+                        ht = 'mac_only'
+                withdrawn_ok, parsed = self._type2_withdrawn_on_remote(
+                    leaf, mac, hip, ht, max_retries=max_retries, interval_sec=interval_sec,
+                    fast_first_n=fast_first_n, fast_interval_sec=fast_interval_sec)
+                if not withdrawn_ok:
+                    ok = False
+                    parsed_repr = str(parsed) if parsed is not None else ''
+                    if len(parsed_repr) > 800:
+                        parsed_repr = parsed_repr[:800] + '...'
+                    line = 'Type-2 still present on {} for MAC {} IP {} ht={} (phase {}): {}\n'.format(
+                        leaf, mac, hip or '-', ht, phase, parsed_repr)
+                    detail += line
+                    failures.append((mac, hip, ht, parsed))
+            n_fail = len(failures)
+            st.log('EVPN type-2 on {}: checked {} route(s) (v4+v6), {} failure(s) (withdrawn OK for {})'.format(
+                leaf, n_hosts, n_fail, n_hosts - n_fail))
+            for mac, hip, ht, parsed in failures:
+                err_snip = str(parsed) if parsed is not None else ''
+                if len(err_snip) > 400:
+                    err_snip = err_snip[:400] + '...'
+                st.error(
+                    'Expected EVPN type-2 withdrawn on {} for MAC {} IP {} ({}); still found: {}'.format(
+                        leaf, mac, hip or '-', ht, err_snip))
+        return ok, detail
+
     def _shutdown_interfaces(self, dut, intf_list):
         """
         Multi-homing style: shut interfaces and verify state transitions.
@@ -4086,6 +4293,7 @@ class TestVxlanInterfaceTriggers():
           - portchannel: PortChannel(s) from config on DC1 leafs
 
         Steps (common): baseline setup + cross-DC traffic, shut, restore, verify traffic;
+        orphan / portchannel: after shut, verify EVPN type-2 withdrawn on DC2/DC3 leafs (grep summary per leaf); then restore;
         orphan also checks cores; portchannel uses try/finally restore and post base-setup retry.
         """
         dc = "dc1"
@@ -4141,6 +4349,16 @@ class TestVxlanInterfaceTriggers():
                     st.log("Shutting PortChannels on {}: {}".format(dut, intfs))
                     self._shutdown_interfaces(dut, intfs)
                 st.wait(shut_time)
+
+                st.banner("Step 2b: Verify EVPN type-2 withdrawn on DC2/DC3 leafs (remote) after PortChannel shut")
+                host_entries_pc = []
+                for dut, intfs in targets:
+                    host_entries_pc.extend(self._collect_hosts_on_leaf_interfaces(dut, intfs))
+                w_ok_pc, w_detail_pc = self._verify_remote_type2_withdrawn_dc2_dc3(
+                    host_entries_pc, phase='after DC1 PortChannel shut')
+                if not w_ok_pc:
+                    summ += w_detail_pc
+                    result = False
             finally:
                 st.banner("Step 3: Restoring PortChannels")
                 for dut, intfs in targets:
@@ -4164,6 +4382,15 @@ class TestVxlanInterfaceTriggers():
             for dut, intfs in targets:
                 self._shutdown_interfaces(dut, intfs)
             st.wait(shut_time)
+
+            st.banner("Step 2b: Verify EVPN type-2 withdrawn on DC2/DC3 leafs (remote) after orphan shut")
+            host_entries = []
+            for dut, intfs in targets:
+                host_entries.extend(self._collect_hosts_on_leaf_interfaces(dut, intfs))
+            w_ok, w_detail = self._verify_remote_type2_withdrawn_dc2_dc3(host_entries, phase='after DC1 orphan shut')
+            if not w_ok:
+                summ += w_detail
+                result = False
 
             st.banner("Step 3: Unshutting host (orphan) interfaces")
             for dut, intfs in targets:
@@ -4196,7 +4423,7 @@ class TestVxlanInterfaceTriggers():
     def test_dci_link_trigger(self, action, scope):
         """
         Solution_dci:26/27/28/29/30 + L3VNI_dci:39-43 - DCI link flap/shut tests with different scopes.
-        Includes continuous cross-DC L2 traffic verification when dci_flap_continuous streams are available.
+        Includes continuous cross-DC L2+L3 traffic verification when dci_flap_continuous streams are available.
 
         Args:
             action: Type of action - 'flap' (shut then no-shut) or 'shut' (shut then restore)
@@ -4214,15 +4441,15 @@ class TestVxlanInterfaceTriggers():
             - Solution_dci:27 / L3VNI_dci:40 - DCI link shut - 1 link
             - Solution_dci:28 / L3VNI_dci:41 - DCI link flap - all interface flap (one BGW)
             - Solution_dci:29 / L3VNI_dci:42 - DCI link shut - all interface shut towards 1 DCI node
+                  (during-trigger check uses burst BUM/L2, not dci_flap_continuous)
             - Solution_dci:30 / L3VNI_dci:43 - DCI link shut - all interface shut (all DCI nodes unreachable)
 
         Steps:
-            1. Verify cross-DC traffic baseline
-            1c. Start continuous cross-DC L2 traffic (if dci_flap_continuous streams available)
+            1. Baseline: burst BUM/L2v4/L2v6/L3v4/L3v6, or skip when using dci_flap_continuous (start streams in step 1c)
             2. Select interfaces based on scope
-            3. Perform action (flap or shut); verify continuous traffic during/after trigger
-            4. Restore interfaces
-            5. Verify traffic recovery
+            3. Perform action (flap or shut); check same streams once for loss (min_perc) after trigger
+            4. Shut path: restore DCI interfaces; then finally stops continuous streams (all paths)
+            5. Step 5a base setup; Step 5b burst recovery verify only when not using continuous
         """
         # Determine test case number and ID
         test_map = {
@@ -4244,11 +4471,11 @@ class TestVxlanInterfaceTriggers():
         shut_time = tc_cfg.get('shut_time', 20 if scope == "single" else 30)
         stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
-        # On-demand creation of DCI flap continuous streams (lazy pattern).
-        # Streams are only created when this test actually runs, avoiding
-        # UNAPPLIED traffic items in IXIA for other tests in the same session.
-        fc_streams = _create_dci_fc_streams(tgen_handles)
-        use_fc = isinstance(fc_streams, dict) and len(fc_streams) > 0
+        fc_streams = tgen_handles.get('dci_flap_continuous')
+        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+        # TC 29 (shut all links on one BGW): burst BUM/L2 only - not continuous L2.
+        # TC 28 (flap one BGW) and TC 30 (shut all BGWs): use dci_flap_continuous when present.
+        use_fc = fc_available and test_num != 29
 
         # Get DCI interface mapping
         dci_map = self._get_bgw_dci_interfaces()
@@ -4315,14 +4542,17 @@ class TestVxlanInterfaceTriggers():
             summ += "Base setup verification failed before DCI link trigger\n"
             result = False
 
-        # Step 1b: Verify baseline cross-DC traffic
-        st.banner("Step 1b: Verify baseline cross-DC traffic")
-        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
-            summ += "Baseline cross-DC traffic failed (BUM/L2v4/L2v6/L3v4/L3v6)\n"
-            result = False
+        # Step 1b: Burst baseline (skipped when using continuous L2+L3 - Step 3 is the only drop check for fc)
+        if not use_fc:
+            st.banner("Step 1b: Verify baseline cross-DC traffic")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Baseline cross-DC traffic failed (BUM/L2v4/L2v6/L3v4/L3v6)\n"
+                result = False
+        else:
+            st.log("Step 1b: skipped (continuous cross-DC L2+L3 follows in Step 1c)")
 
         if use_fc and result:
-            st.banner("Step 1c: Start continuous cross-DC L2 traffic (DCI flap streams)")
+            st.banner("Step 1c: Start continuous cross-DC L2+L3 traffic (DCI flap streams)")
             try:
                 vxlan_obj.check_traffic(
                     fc_streams,
@@ -4345,13 +4575,13 @@ class TestVxlanInterfaceTriggers():
                     self._flap_interfaces(dut, intfs, down_wait=5, up_wait=20)
                 st.wait(10)
                 if use_fc and result:
-                    st.banner("Step 3: Verify continuous cross-DC L2 after DCI flap")
+                    st.banner("Step 3: Verify continuous cross-DC L2+L3 after DCI flap")
                     if not vxlan_obj.check_traffic(
                             fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
-                        summ += "Continuous cross-DC L2 check failed after DCI flap\n"
+                        summ += "Continuous cross-DC L2+L3 check failed after DCI flap\n"
                         result = False
                     else:
-                        st.log("Continuous cross-DC L2 check passed after flap")
+                        st.log("Continuous cross-DC L2+L3 check passed after flap")
 
             else:  # shut
                 st.banner("Step 2: Shutting DCI interfaces ({})".format(scope))
@@ -4362,21 +4592,21 @@ class TestVxlanInterfaceTriggers():
 
                 # Step 3: Verify traffic during trigger
                 if use_fc and result:
-                    st.banner("Step 3: Verify continuous cross-DC L2 while DCI link(s) shut")
+                    st.banner("Step 3: Verify continuous cross-DC L2+L3 while DCI link(s) shut")
                     c_ok = vxlan_obj.check_traffic(
                         fc_streams, action='check', stop_start_protocols=False, min_perc=99.6)
                     if scope == "all_bgws":
                         if c_ok:
-                            summ += "Continuous cross-DC L2 unexpectedly passed while ALL DCI links were shut\n"
+                            summ += "Continuous cross-DC L2+L3 unexpectedly passed while ALL DCI links were shut\n"
                             result = False
                         else:
-                            st.log("Continuous cross-DC L2 failed as expected while ALL DCI links were shut")
+                            st.log("Continuous cross-DC L2+L3 failed as expected while ALL DCI links were shut")
                     else:
                         if not c_ok:
-                            summ += "Continuous cross-DC L2 failed while {} link(s) were shut\n".format(scope)
+                            summ += "Continuous cross-DC L2+L3 failed while {} link(s) were shut\n".format(scope)
                             result = False
                         else:
-                            st.log("Continuous cross-DC L2 continued during partial DCI shut")
+                            st.log("Continuous cross-DC L2+L3 continued during partial DCI shut")
                 elif scope == "all_bgws":
                     st.banner("Step 3: Verify traffic FAILS while ALL DCI links are shut (expected)")
                     if verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
@@ -4419,19 +4649,27 @@ class TestVxlanInterfaceTriggers():
             summ += "Base setup verification failed after {} {}\n".format(action, scope)
             result = False
 
-        # Step 5b: Verify traffic recovery
-        st.banner("Step 5b: Verify cross-DC traffic recovery after {}".format(action))
-        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
-            summ += "Cross-DC traffic did not recover after {} {} (BUM/L2v4/L2v6/L3v4/L3v6)\n".format(action, scope)
-            result = False
+        # Step 5b: Burst recovery only when not using continuous (fc drop check is Step 3 only; no traffic rerun after no-shut)
+        if use_fc and fc_streams:
+            st.log(
+                "Step 5b: skipped - continuous drop already checked after trigger (Step 3); streams stopped in finally"
+            )
         else:
-            st.log("Cross-DC traffic recovered successfully")
+            st.banner("Step 5b: Verify cross-DC traffic recovery after {}".format(action))
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after {} {} (BUM/L2v4/L2v6/L3v4/L3v6)\n".format(action, scope)
+                result = False
+            else:
+                st.log("Cross-DC traffic recovered successfully")
 
         # Report results
         if result:
             st.banner("TEST PASSED: Solution_dci:{} - {}".format(test_num, tc_id))
             st.log("DCI link {} ({}) completed successfully".format(action, scope))
-            st.log("Traffic recovery verified")
+            if use_fc and fc_streams:
+                st.log("Continuous drop check: Step 3 only (post-restore traffic not run)")
+            else:
+                st.log("Traffic recovery verified (burst Step 5b)")
 
         report_result(result, tc_id, summ)
 

@@ -4764,11 +4764,6 @@ def _dci_mm_host_last_octets(move_dir, host_type):
         'orphan_to_orphan_across_dc': 20,
         'mh_to_mh_across_dc': 30,
         'mh_to_orphan_across_dc': 40,
-        # L3VNI host mobility scenarios
-        'l3vni_orphan_within_dc': 50,
-        'l3vni_orphan_across_dc': 60,
-        'l3vni_orphan_to_mh_within_dc': 70,
-        'l3vni_mh_to_mh_across_dc': 75,
     }
     band = _MOVE_BAND.get(move_dir, 0)
     # High /24 octets (180+) to stay clear of generate_sag_hosts() 80.12.0.{10,20,...} on typical topologies
@@ -6589,13 +6584,11 @@ class TestVxlanDciMacMoveTriggers():
         mh_dc2 = ['leaf0_dc2', 'leaf1_dc2']
         mm1 = [dest1_node]
         mm2 = [dest2_node]
-        if move_dir in ('mh_to_mh_across_dc', 'l3vni_mh_to_mh_across_dc'):
+        if move_dir == 'mh_to_mh_across_dc':
             mm1 = mh_dc1 if dest1_node in mh_dc1 else mm1
             mm2 = mh_dc2 if dest2_node in mh_dc2 else mm2
         elif move_dir == 'mh_to_orphan_across_dc':
             mm1 = mh_dc1 if dest1_node in mh_dc1 else mm1
-        elif move_dir == 'l3vni_orphan_to_mh_within_dc':
-            mm2 = mh_dc1 if dest2_node in mh_dc1 else mm2
         return (mm1, mm2)
 
     def _verify_mac_dci(self, mac_addr, ip_addr=""):
@@ -6656,11 +6649,6 @@ class TestVxlanDciMacMoveTriggers():
             "orphan_to_orphan_across_dc": ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', False, False, 'dc1_l3_orp'),
             "mh_to_mh_across_dc": ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', True, True, 'dc1_l3_orp'),
             "mh_to_orphan_across_dc": ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', True, False, 'dc1_l3_orp'),
-            # L3VNI host mobility move directions (L3VNI_dci:59,60,62,63)
-            "l3vni_orphan_within_dc": ('leaf0_dc1', 'leaf1_dc1', 'leaf2_dc1', False, False, 'dc1_l3_orp'),
-            "l3vni_orphan_across_dc": ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', False, False, 'dc1_l3_orp'),
-            "l3vni_orphan_to_mh_within_dc": ('leaf0_dc1', 'leaf0_dc1', 'leaf2_dc1', False, True, 'dc1_l3_orp'),
-            "l3vni_mh_to_mh_across_dc": ('leaf0_dc1', 'leaf0_dc2', 'leaf2_dc1', True, True, 'dc1_l3_orp'),
         }
         if move_dir not in move_config:
             st.log('get_stream_handles_dci: move_dir "{}" not implemented'.format(move_dir))
@@ -6688,11 +6676,6 @@ class TestVxlanDciMacMoveTriggers():
             'orphan_to_orphan_across_dc': 0x14,
             'mh_to_mh_across_dc': 0x15,
             'mh_to_orphan_across_dc': 0x16,
-            # L3VNI host mobility scenarios
-            'l3vni_orphan_within_dc': 0x17,
-            'l3vni_orphan_across_dc': 0x18,
-            'l3vni_orphan_to_mh_within_dc': 0x19,
-            'l3vni_mh_to_mh_across_dc': 0x1a,
         }
         # Host-type suffix (5th byte) - unique per (move_dir, host_type) so full class run gets seq 0,1,2
         _HT_SUFFIX = {
@@ -7127,13 +7110,15 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_orphan_within_dc_mac_and_ipv4(self):
         """Verify mac move between orphan ports mac_and_ipv4 within DC (Solution_dci:71)."""
         tc_id = "mac_and_ipv4 move between orphan ports within DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv4")
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv4",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_within_dc_mac_and_ipv6(self):
         """Verify mac move between orphan ports mac_and_ipv6 within DC (Solution_dci:72)."""
         tc_id = "mac_and_ipv6 move between orphan ports within DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv6")
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv6",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_within_dc_mac_only(self):
@@ -7152,13 +7137,15 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_orphan_across_dc_mac_and_ipv4(self):
         """Verify mac move between orphan ports mac+ipv4 across DC (Solution_dci:75)."""
         tc_id = "mac+ipv4 move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv4")
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv4",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_across_dc_mac_and_ipv6(self):
         """Verify mac move between orphan ports mac+ipv6 across DC (Solution_dci:76)."""
         tc_id = "mac+ipv6 move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv6")
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv6",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_across_dc_mac_only(self):
@@ -7170,13 +7157,15 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_orphan_across_dc_ipv4_changes(self):
         """Verify mac move between orphan ports ipv4_changes across DC (Solution_dci:78)."""
         tc_id = "ipv4_changes move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv4_changes")
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv4_changes",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_across_dc_ipv6_changes(self):
         """Verify mac move between orphan ports ipv6_changes across DC (Solution_dci:79)."""
         tc_id = "ipv6_changes move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv6_changes")
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv6_changes",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     @pytest.mark.skip(reason="Solution_dci:80 deferred")
@@ -7197,13 +7186,15 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_across_dc_mac_and_ipv4(self):
         """Verify mac move between MH ports mac+ipv4 across DC (Solution_dci:82)."""
         tc_id = "mac+ipv4 move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv4")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv4",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_across_dc_mac_and_ipv6(self):
         """Verify mac move between MH ports mac+ipv6 across DC (Solution_dci:83)."""
         tc_id = "mac+ipv6 move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv6")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv6",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_across_dc_mac_only(self):
@@ -7215,13 +7206,15 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_across_dc_ipv4_changes(self):
         """Verify mac move between MH ports ipv4_changes across DC (Solution_dci:85)."""
         tc_id = "ipv4_changes move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv4_changes")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv4_changes",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_across_dc_ipv6_changes(self):
         """Verify mac move between MH ports ipv6_changes across DC (Solution_dci:86)."""
         tc_id = "ipv6_changes move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv6_changes")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv6_changes",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     @pytest.mark.skip(reason="Solution_dci:87 deferred")
@@ -7242,13 +7235,15 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_to_orphan_across_dc_mac_and_ipv4(self):
         """Verify mac move between MH and orphan ports mac+ipv4 across DC (Solution_dci:89)."""
         tc_id = "mac+ipv4 move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv4")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv4",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_to_orphan_across_dc_mac_and_ipv6(self):
         """Verify mac move between MH and orphan ports mac+ipv6 across DC (Solution_dci:90)."""
         tc_id = "mac+ipv6 move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv6")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv6",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_to_orphan_across_dc_mac_only(self):
@@ -7260,13 +7255,15 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_to_orphan_across_dc_ipv4_changes(self):
         """Verify mac move between MH and orphan ports ipv4_changes across DC (Solution_dci:92)."""
         tc_id = "ipv4_changes move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv4_changes")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv4_changes",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_to_orphan_across_dc_ipv6_changes(self):
         """Verify mac move between MH and orphan ports ipv6_changes across DC (Solution_dci:93)."""
         tc_id = "ipv6_changes move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv6_changes")
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv6_changes",
+                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
         report_result(result, tc_id)
 
     @pytest.mark.skip(reason="Solution_dci:94 deferred")
@@ -7289,111 +7286,3 @@ class TestVxlanDciMacMoveTriggers():
         st.log("Solution_dci:96 - L3VNI across DCI not supported; traffic flows via Border spine Northbound peering")
         st.log("Skipping: requires separate VLAN/VNI setup and Border spine traffic verification")
         report_result(True, tc_id)  # Placeholder: pass for now; implement when topology/config ready
-
-    # ========================================================================
-    # L3VNI HOST MOBILITY (L3VNI_dci:59, 60, 62, 63)
-    # ========================================================================
-    # These tests reuse verify_mac_move_dci() with optional l3_traffic_scope
-    # and l3_traffic_types parameters to add L3VNI traffic verification at
-    # phases 3b, 6b, and 9b (after MAC move point-to-point traffic checks).
-    # ========================================================================
-
-    def test_base_dci_l3vni_host_mobility_within_dc(self):
-        """
-        L3VNI_dci:59 - L3VNI Host Mobility: Host move within DC (same VRF)
-
-        Description:
-            1) Host A initially on DC1-Leaf0 vlan 11
-            2) Move Host A to DC1-Leaf1 in same vlan 11
-            3) Verify Type-2 route update with incremented sequence number
-            4) Send L3VNI Traffic from DC2 host in Vlan 13.
-               After the move the L3VNI traffic should start flowing through DC1-leaf1.
-        """
-        tc_id = "test_base_dci_l3vni_host_mobility_within_dc"
-        test_cfg['tc_id'] = tc_id
-
-        st.banner('Testcase L3VNI_dci:59: L3VNI Host Mobility - '
-                   'Host move within DC (same VRF) ({})'.format(tc_id))
-        result = self.verify_mac_move_dci(
-            tc_id,
-            move_dir="l3vni_orphan_within_dc",
-            host_type="mac+ipv4",
-            l3_traffic_scope='cross',
-            l3_traffic_types=['l3_v4', 'l3_v6'])
-        summ = '' if result else 'L3VNI host mobility within DC failed\n'
-        report_result(result, tc_id, summ)
-
-    def test_base_dci_l3vni_host_mobility_across_dci(self):
-        """
-        L3VNI_dci:60 - L3VNI Host Mobility: Host move across DCI (DC1 to DC2)
-
-        Description:
-            1) Host A initially on DC1-Leaf0 vlan 11
-            2) Move Host A to DC2-Leaf0 in same vlan 11
-            3) Verify Type-2 route update with incremented sequence number
-            4) Send L3VNI Traffic from DC2 host in Vlan 13.
-               After the move the L3VNI traffic should start flowing through DC1-leaf1.
-        """
-        tc_id = "test_base_dci_l3vni_host_mobility_across_dci"
-        test_cfg['tc_id'] = tc_id
-
-        st.banner('Testcase L3VNI_dci:60: L3VNI Host Mobility - '
-                   'Host move across DCI DC1 to DC2 ({})'.format(tc_id))
-        result = self.verify_mac_move_dci(
-            tc_id,
-            move_dir="l3vni_orphan_across_dc",
-            host_type="mac+ipv4",
-            l3_traffic_scope='cross',
-            l3_traffic_types=['l3_v4', 'l3_v6'])
-        summ = '' if result else 'L3VNI host mobility across DCI failed\n'
-        report_result(result, tc_id, summ)
-
-    def test_base_dci_l3vni_host_mobility_orphan_to_mh(self):
-        """
-        L3VNI_dci:62 - L3VNI Host Mobility: Host move from orphan to multi-homed port with L3 traffic
-
-        Description:
-            1) Host A initially on orphan port (single-homed) on DC1 Leaf0
-            2) Move Host A to multi-homed port (ESI) on L0-L1 MH
-            3) Verify Type-1 and Type-4 routes generated for new ESI
-            4) Verify Type-2 route updated with ESI
-            5) Send L3VNI traffic from DC2-L0
-        """
-        tc_id = "test_base_dci_l3vni_host_mobility_orphan_to_mh"
-        test_cfg['tc_id'] = tc_id
-
-        st.banner('Testcase L3VNI_dci:62: L3VNI Host Mobility - '
-                   'Orphan to multi-homed port with L3 traffic ({})'.format(tc_id))
-        result = self.verify_mac_move_dci(
-            tc_id,
-            move_dir="l3vni_orphan_to_mh_within_dc",
-            host_type="mac+ipv4",
-            l3_traffic_scope='cross',
-            l3_traffic_types=['l3_v4', 'l3_v6'])
-        summ = '' if result else 'L3VNI host mobility orphan to MH failed\n'
-        report_result(result, tc_id, summ)
-
-    def test_base_dci_l3vni_host_mobility_mh_to_mh_across_dci(self):
-        """
-        L3VNI_dci:63 - L3VNI Host Mobility: Host move from MH to MH port across DCI with L3 traffic
-
-        Description:
-            1) Host A initially on MH port (single-homed) on DC1 Leaf0
-            2) Move Host A to multi-homed port (ESI) on L0-L1 MH of DC2
-            3) Verify Type-1 and Type-4 routes generated for new ESI
-            4) Verify Type-2 route updated with ESI
-            5) Send L3VNI traffic from DC3-L0. After the move traffic should flow through DC2.
-        """
-        tc_id = "test_base_dci_l3vni_host_mobility_mh_to_mh_across_dci"
-        test_cfg['tc_id'] = tc_id
-
-        st.banner('Testcase L3VNI_dci:63: L3VNI Host Mobility - '
-                   'MH to MH port across DCI with L3 traffic ({})'.format(tc_id))
-        result = self.verify_mac_move_dci(
-            tc_id,
-            move_dir="l3vni_mh_to_mh_across_dc",
-            host_type="mac+ipv4",
-            l3_traffic_scope='cross',
-            l3_traffic_types=['l3_v4', 'l3_v6'])
-        summ = '' if result else 'L3VNI host mobility MH to MH across DCI failed\n'
-        report_result(result, tc_id, summ)

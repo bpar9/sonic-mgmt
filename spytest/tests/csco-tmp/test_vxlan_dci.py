@@ -4333,9 +4333,9 @@ class TestVxlanInterfaceTriggers():
             summ += "Base setup verification failed before {} flap\n".format(desc)
             result = False
 
-        # Step 1b: Pre-check cross-DC traffic
-        st.banner("Step 1b: Verify baseline cross-DC L2VNI traffic")
-        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
+        # Step 1b: Pre-check cross-DC traffic (L2 + L3)
+        st.banner("Step 1b: Verify baseline cross-DC L2+L3 traffic")
+        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
             summ += "Traffic verification failed before {} flap\n".format(desc)
             result = False
         if not result:
@@ -4371,12 +4371,12 @@ class TestVxlanInterfaceTriggers():
                 summ += "Base setup verification failed after PortChannel flap\n"
                 result = False
 
-            st.banner("Step 4b: Verify cross-DC traffic recovery")
-            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
-                summ += "Cross-DC traffic did not recover after PortChannel shut/no-shut (BUM/L2v4/L2v6)\n"
+            st.banner("Step 4b: Verify cross-DC traffic recovery (L2 + L3)")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after PortChannel shut/no-shut (BUM/L2v4/L2v6/L3v4/L3v6)\n"
                 result = False
             else:
-                st.log("Cross-DC traffic recovered successfully")
+                st.log("Cross-DC L2+L3 traffic recovered successfully")
         else:
             st.banner("Step 2: Shutting host (orphan) interfaces on {} leaf nodes".format(dc.upper()))
             for dut, intfs in targets:
@@ -4397,9 +4397,9 @@ class TestVxlanInterfaceTriggers():
                 self._noshutdown_interfaces(dut, intfs)
             st.wait(10)
 
-            st.banner("Step 4: Verify L2VNI traffic across DCs after orphan shut/no-shut")
-            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
-                summ += "Cross-DC traffic did not recover after host orphan shut/no-shut (BUM/L2v4/L2v6)\n"
+            st.banner("Step 4: Verify L2+L3 traffic across DCs after orphan shut/no-shut")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after host orphan shut/no-shut (BUM/L2v4/L2v6/L3v4/L3v6)\n"
                 result = False
 
             st.banner("Step 5: Checking for core files and crashes")
@@ -6118,20 +6118,23 @@ class TestVxlanDCIBase():
         Description:
             1) Base profile bring up with L3VNI
             2) Verify Type-5 routes are advertised on all nodes
-            3) Remove VLAN member on a leaf node (like test_remove_add_vlan_members)
+            3) Perform full VLAN deletion on a leaf node:
+               remove members → unbind VRF → remove IP addresses → delete VLAN
             4) Verify Type-5 path count decreased on all nodes (in multi-DC,
                routes from remote DCs remain so prefix won't fully disappear)
-            5) Re-add the VLAN member
+            5) Restore VLAN in reverse order:
+               create VLAN → add IP addresses → bind VRF → add members
             6) Verify Type-5 route and IP route are present again on all nodes
             7) Verify traffic resumes with no drops
             
         Steps:
             1. Verify base setup, Type-5 routes present, record path counts
-            2. Remove VLAN 11 member on DC1 leaf0
-            3. Verify Type-5 path count decreased on all nodes
-            4. Re-add VLAN 11 member on DC1 leaf0
-            5. Verify Type-5 route and IP route re-advertised on all nodes
-            6. Verify L3VNI traffic still works
+            2. Save VLAN 11 state (members, VRF, IPs) on DC1 leaf0
+            3. Full VLAN deletion: remove members → unbind VRF → remove IPs → delete VLAN
+            4. Verify Type-5 path count decreased on all nodes
+            5. Full VLAN restoration: create VLAN → add IPs → bind VRF → add members
+            6. Verify Type-5 route and IP route re-advertised on all nodes
+            7. Verify L3VNI traffic still works
         """
         tc_id = "test_base_dci_l3vni_type5_route_withdrawal"
         test_cfg['tc_id'] = tc_id
@@ -6154,41 +6157,77 @@ class TestVxlanDCIBase():
         target_leaf = dc1_leafs[0]
         target_vlan_id = 11
         target_vlan = str(target_vlan_id)
+        target_vrf = 'Vrf101'
+        target_ipv4 = '11.11.11.1/24'
+        target_ipv6 = '11:11:11::1/64'
         
-        # Resolve VLAN member interface for the target leaf.
+        # Discover all VLAN members for the target VLAN on the target leaf.
         # First try the cached vlan_config; if not available, query the DUT
-        # directly via 'show vlan config' to discover members.  We must use
-        # member remove/add (never delete the whole VLAN) because VLAN 11 has
-        # SVI IPs and VRF bindings — 'config vlan del' would fail with
-        # "First remove IP addresses assigned to this VLAN and unbind vrf".
-        test_member = None
+        # directly via 'show vlan config' to discover members.
+        vlan_members = []
         if test_cfg.get('vlan_config') and test_cfg['vlan_config'].get(target_leaf):
             vlan_info = test_cfg['vlan_config'][target_leaf]
             members = vlan_info.get(target_vlan)
             if members:
-                test_member = members[0] if isinstance(members, list) else members
+                vlan_members = members if isinstance(members, list) else [members]
         
-        if not test_member:
+        if not vlan_members:
             st.log('vlan_config does not have VLAN {} members for {}, '
                    'querying DUT directly'.format(target_vlan, target_leaf))
             live_members = vlan_obj.get_vlan_member(target_leaf, vlan_list=[target_vlan])
             if live_members and live_members.get(target_vlan):
-                test_member = live_members[target_vlan][0]
-                st.log('Discovered VLAN {} member from DUT: {}'.format(
-                    target_vlan, test_member))
+                vlan_members = live_members[target_vlan]
+                st.log('Discovered VLAN {} members from DUT: {}'.format(
+                    target_vlan, vlan_members))
         
-        if not test_member:
-            summ += 'No VLAN {} member found on {} (from config or DUT query)\n'.format(
+        if not vlan_members:
+            summ += 'No VLAN {} members found on {} (from config or DUT query)\n'.format(
                 target_vlan, target_leaf)
             report_result(False, tc_id, summ)
             return
+        
+        st.log('VLAN {} state on {}: members={}, VRF={}, IPv4={}, IPv6={}'.format(
+            target_vlan, target_leaf, vlan_members, target_vrf, target_ipv4, target_ipv6))
+        
+        def _restore_vlan_full():
+            """Restore VLAN with full config: create → add IPs → bind VRF → add members."""
+            st.log('Restoring VLAN {} on {} (full restoration)'.format(target_vlan, target_leaf))
+            try:
+                vlan_obj.create_vlan(target_leaf, target_vlan)
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv4))
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv6))
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config vlan static-anycast-gateway enable {}'.format(target_vlan))
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config interface vrf bind Vlan{} {}'.format(target_vlan, target_vrf))
+            except Exception:
+                pass
+            for member in vlan_members:
+                try:
+                    vlan_obj.add_vlan_member(target_leaf, target_vlan, member)
+                except Exception:
+                    pass
         
         try:
             # Step 1: Verify Type-5 routes present on all nodes before withdrawal
             # and record per-node path counts for the target VLAN prefixes.
             # In a multi-DC topology, a prefix like 80.11.0.0/24 has paths from
-            # multiple sources (local leafs + remote DC BGWs).  After removing
-            # a VLAN member on one leaf, the prefix will NOT completely disappear
+            # multiple sources (local leafs + remote DC BGWs).  After deleting
+            # VLAN on one leaf, the prefix will NOT completely disappear
             # on BGW/remote nodes because paths from other DCs remain.  We use
             # path-count-decrease instead of prefix-absence to verify withdrawal.
             st.banner('Step 1: Verify Type-5 routes present and record path counts before withdrawal')
@@ -6203,25 +6242,53 @@ class TestVxlanDCIBase():
                     node, [target_vlan_id])
                 st.log('Pre-removal path counts on {}: {}'.format(node, pre_counts[node]))
             
-            # Step 2: Remove VLAN member on target leaf (like test_remove_add_vlan_members).
-            # We only remove VLAN members, never delete the whole VLAN, because
-            # the VLAN has SVI IPs and VRF bindings that would block deletion.
-            st.banner('Step 2: Remove VLAN {} member {} on {} to trigger route withdrawal'.format(
-                target_vlan, test_member, target_leaf))
-            vlan_obj.delete_vlan_member(target_leaf, target_vlan, test_member)
-            st.log('Removed member {} from VLAN {} on {}'.format(
-                test_member, target_vlan, target_leaf))
-            st.wait(15, 'Waiting for route withdrawal after VLAN {} removal'.format(target_vlan))
+            # Step 2: Full VLAN deletion sequence on target leaf.
+            # Order: remove members → disable SAG → unbind VRF → remove IPs → delete VLAN
+            st.banner('Step 2: Full VLAN {} deletion on {} (members → VRF unbind → IP remove → VLAN delete)'.format(
+                target_vlan, target_leaf))
+            
+            # 2a: Remove all VLAN members
+            for member in vlan_members:
+                vlan_obj.delete_vlan_member(target_leaf, target_vlan, member)
+                st.log('Removed member {} from VLAN {} on {}'.format(
+                    member, target_vlan, target_leaf))
+            
+            # 2b: Disable static-anycast-gateway on the VLAN
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config vlan static-anycast-gateway disable {}'.format(target_vlan))
+            st.log('Disabled static-anycast-gateway on VLAN {} on {}'.format(
+                target_vlan, target_leaf))
+            
+            # 2c: Unbind VRF from the VLAN interface
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface vrf unbind Vlan{}'.format(target_vlan))
+            st.log('Unbound VRF from Vlan{} on {}'.format(target_vlan, target_leaf))
+            
+            # 2d: Remove IP addresses from the VLAN SVI
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip remove Vlan{} {}'.format(target_vlan, target_ipv4))
+            st.log('Removed IPv4 {} from Vlan{} on {}'.format(
+                target_ipv4, target_vlan, target_leaf))
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip remove Vlan{} {}'.format(target_vlan, target_ipv6))
+            st.log('Removed IPv6 {} from Vlan{} on {}'.format(
+                target_ipv6, target_vlan, target_leaf))
+            
+            # 2e: Delete the VLAN
+            vlan_obj.delete_vlan(target_leaf, target_vlan)
+            st.log('Deleted VLAN {} on {}'.format(target_vlan, target_leaf))
+            
+            st.wait(15, 'Waiting for route withdrawal after full VLAN {} deletion'.format(target_vlan))
             
             # Step 3: Verify Type-5 route path count decreased on all nodes.
             # On the target leaf itself the locally-originated path should be
             # withdrawn.  On BGW and remote nodes, paths from other DCs remain
             # so we verify path_count decreased (not that the prefix is absent).
-            st.banner('Step 3: Verify Type-5 path count decreased on all nodes after VLAN member removal')
+            st.banner('Step 3: Verify Type-5 path count decreased on all nodes after VLAN deletion')
             for node in all_verify_nodes:
                 post_counts = vxlan_obj.get_type5_path_counts_dci(
                     node, [target_vlan_id])
-                st.log('Post-removal path counts on {}: {}'.format(node, post_counts))
+                st.log('Post-deletion path counts on {}: {}'.format(node, post_counts))
                 
                 node_ok = True
                 for pfx in pre_counts.get(node, {}):
@@ -6249,16 +6316,46 @@ class TestVxlanDCIBase():
                     st.log('IP route for VLAN {} still present in Vrf101 on {} '
                            '(may be from remote DC paths)'.format(target_vlan_id, node))
             
-            # Step 4: Re-add VLAN member on target leaf
-            st.banner('Step 4: Re-add VLAN {} member {} on {} to trigger route re-advertisement'.format(
-                target_vlan, test_member, target_leaf))
-            vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
-            st.log('Re-added member {} to VLAN {} on {}'.format(
-                test_member, target_vlan, target_leaf))
-            st.wait(15, 'Waiting for route re-advertisement after VLAN {} re-add'.format(target_vlan))
+            # Step 4: Full VLAN restoration in reverse order.
+            # Order: create VLAN → add IPs → enable SAG → bind VRF → add members
+            st.banner('Step 4: Full VLAN {} restoration on {} (VLAN create → IP add → VRF bind → member add)'.format(
+                target_vlan, target_leaf))
+            
+            # 4a: Create the VLAN
+            vlan_obj.create_vlan(target_leaf, target_vlan)
+            st.log('Created VLAN {} on {}'.format(target_vlan, target_leaf))
+            
+            # 4b: Add IP addresses to the VLAN SVI
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv4))
+            st.log('Added IPv4 {} to Vlan{} on {}'.format(
+                target_ipv4, target_vlan, target_leaf))
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv6))
+            st.log('Added IPv6 {} to Vlan{} on {}'.format(
+                target_ipv6, target_vlan, target_leaf))
+            
+            # 4c: Enable static-anycast-gateway on the VLAN
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config vlan static-anycast-gateway enable {}'.format(target_vlan))
+            st.log('Enabled static-anycast-gateway on VLAN {} on {}'.format(
+                target_vlan, target_leaf))
+            
+            # 4d: Bind VRF to the VLAN interface
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface vrf bind Vlan{} {}'.format(target_vlan, target_vrf))
+            st.log('Bound {} to Vlan{} on {}'.format(target_vrf, target_vlan, target_leaf))
+            
+            # 4e: Re-add all VLAN members
+            for member in vlan_members:
+                vlan_obj.add_vlan_member(target_leaf, target_vlan, member)
+                st.log('Added member {} to VLAN {} on {}'.format(
+                    member, target_vlan, target_leaf))
+            
+            st.wait(15, 'Waiting for route re-advertisement after full VLAN {} restoration'.format(target_vlan))
             
             # Step 5: Verify Type-5 route path counts restored on all nodes
-            st.banner('Step 5: Verify Type-5 path counts restored after VLAN member re-add')
+            st.banner('Step 5: Verify Type-5 path counts restored after VLAN restoration')
             for node in all_verify_nodes:
                 if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
                                  node, [target_vlan_id], expect_present=True):
@@ -6287,11 +6384,8 @@ class TestVxlanDCIBase():
         
         except Exception as e:
             summ += 'Exception: {}\n'.format(e)
-            # Try to restore VLAN member
-            try:
-                vlan_obj.add_vlan_member(target_leaf, target_vlan, test_member)
-            except Exception:
-                pass
+            # Try full VLAN restoration on failure
+            _restore_vlan_full()
             result = False
         
         report_result(result, tc_id, summ)

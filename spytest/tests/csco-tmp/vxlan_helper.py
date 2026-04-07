@@ -8394,8 +8394,10 @@ def verify_type5_ixia_prefixes_dci(dut, prefixes, expect_present=True):
         if missing:
             st.log('IXIA Type-5 routes missing on {}: {}'.format(dut, missing))
             return False
-        st.log('IXIA Type-5 routes present for prefixes {} on {}'.format(
-            prefixes, dut))
+        for pfx in sorted(found_prefixes):
+            st.log('  IXIA Type-5 route FOUND on {}: {}'.format(dut, pfx))
+        st.log('IXIA Type-5 verification successful: all {} prefixes present on {}'.format(
+            len(found_prefixes), dut))
         return True
     else:
         still_present = target_prefixes & found_prefixes
@@ -8406,6 +8408,52 @@ def verify_type5_ixia_prefixes_dci(dut, prefixes, expect_present=True):
         st.log('IXIA Type-5 routes withdrawn for prefixes {} on {}'.format(
             prefixes, dut))
         return True
+
+
+def get_type5_path_counts_dci(dut, vlan_ids):
+    """
+    Get the current path count for Type-5 prefixes associated with given VLANs.
+
+    In a multi-DC topology, a prefix like 80.11.0.0/24 may have paths from
+    multiple sources (local leafs + remote DC BGWs).  This function returns
+    the path count per prefix so callers can verify that path counts decrease
+    after a VLAN member removal (rather than checking for complete prefix
+    absence, which won't work when remote DC routes remain).
+
+    Args:
+        dut: Node hostname to query
+        vlan_ids: list of VLAN IDs (e.g. [11])
+
+    Returns:
+        dict mapping prefix string to path count, e.g.
+        {'80.11.0.0/24': 7, '8000:11::/64': 7}
+        Returns empty dict on error.
+    """
+    target_prefixes = set()
+    for vlan_id in vlan_ids:
+        target_prefixes.add('80.{}.0.0/24'.format(vlan_id))
+        target_prefixes.add('8000:{}::/64'.format(vlan_id))
+
+    try:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        st.log('Failed to get Type-5 routes on {}: {}'.format(dut, err))
+        return {}
+
+    if not cli_output or not cli_output.strip():
+        st.log('No Type-5 route output on {}'.format(dut))
+        return {pfx: 0 for pfx in target_prefixes}
+
+    detailed = _parse_type5_routes_detailed(cli_output)
+    counts = {}
+    for pfx in target_prefixes:
+        if pfx in detailed:
+            counts[pfx] = detailed[pfx]['path_count']
+        else:
+            counts[pfx] = 0
+    st.log('Type-5 path counts on {} for VLANs {}: {}'.format(dut, vlan_ids, counts))
+    return counts
 
 
 def verify_vrf_vni_after_reload_dci(dut):

@@ -4823,6 +4823,14 @@ def _get_dci_mac_move_cfg():
         'rate_percent_sim': cfg.get('rate_percent_sim', 0.01),
         'pkts_per_burst_hw': cfg.get('pkts_per_burst_hw', 1000),
         'rate_percent_hw': cfg.get('rate_percent_hw', 10),
+        # L3VNI config: same source, different VLAN (vlan13 in Vrf101)
+        'l3_vlan': cfg.get('l3_vlan', 13),
+        'l3_gateway_v4': cfg.get('l3_gateway_v4', '13.13.13.1'),
+        'l3_gateway_v6': cfg.get('l3_gateway_v6', '13:13:13::1'),
+        'l3_src_ipv4': cfg.get('l3_src_ipv4', '13.13.13.99'),
+        'l3_src_ipv6': cfg.get('l3_src_ipv6', '13:13:13::99'),
+        'l3_dst_ipv4': cfg.get('l3_dst_ipv4', '13.13.13.50'),
+        'l3_dst_ipv6': cfg.get('l3_dst_ipv6', '13:13:13::50'),
     }
 
 
@@ -6876,14 +6884,61 @@ class TestVxlanDciMacMoveTriggers():
             st.wait(2)
             my_stream_handles['src1_stream_handle'] = src1.get('stream_id')
             my_stream_handles['src2_stream_handle'] = src2.get('stream_id')
+
+            # Create L3 traffic streams on vlan13 (L3VNI) inline — same src port, different VLAN
+            l3_vlan = mm_cfg['l3_vlan']
+            l3_mac_src = "02:00:00:13:{:02x}:99".format(sf)
+            l3_mac_dst = "02:00:00:13:{:02x}:{:02x}".format(sf, ht1)
+            l3_kw = dict(emulation_src_handle=stream_info['src']['src_handle'], mode='create',
+                         transmit_mode='single_burst', pkts_per_burst=pkts, rate_percent=rate,
+                         circuit_type='raw', frame_size=1000, vlan_id=l3_vlan,
+                         src_dest_mesh='one_to_one', track_by='endpoint_pair')
+            if host_type in ipv4_host_types:
+                st.log("################################################################################")
+                st.log("#  [L3 src1] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv4'], mm_cfg['l3_dst_ipv4']))
+                st.log("################################################################################")
+                l3_src1 = stream_info['src']['tg_handle'].tg_traffic_config(
+                    emulation_dst_handle=stream_info['src']['dest_handle1'],
+                    mac_src=l3_mac_src, mac_dst=l3_mac_dst,
+                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=mm_cfg['l3_dst_ipv4'], **l3_kw)
+                st.wait(2)
+                st.log("################################################################################")
+                st.log("#  [L3 src2] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv4'], mm_cfg['l3_dst_ipv4']))
+                st.log("################################################################################")
+                l3_src2 = stream_info['src']['tg_handle'].tg_traffic_config(
+                    emulation_dst_handle=stream_info['src']['dest_handle2'],
+                    mac_src=l3_mac_src, mac_dst=l3_mac_dst,
+                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=mm_cfg['l3_dst_ipv4'], **l3_kw)
+            else:
+                st.log("################################################################################")
+                st.log("#  [L3 src1] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv6'], mm_cfg['l3_dst_ipv6']))
+                st.log("################################################################################")
+                l3_src1 = stream_info['src']['tg_handle'].tg_traffic_config(
+                    emulation_dst_handle=stream_info['src']['dest_handle1'],
+                    mac_src=l3_mac_src, mac_dst=l3_mac_dst,
+                    ipv6_src_addr=mm_cfg['l3_src_ipv6'], ipv6_dst_addr=mm_cfg['l3_dst_ipv6'], **l3_kw)
+                st.wait(2)
+                st.log("################################################################################")
+                st.log("#  [L3 src2] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv6'], mm_cfg['l3_dst_ipv6']))
+                st.log("################################################################################")
+                l3_src2 = stream_info['src']['tg_handle'].tg_traffic_config(
+                    emulation_dst_handle=stream_info['src']['dest_handle2'],
+                    mac_src=l3_mac_src, mac_dst=l3_mac_dst,
+                    ipv6_src_addr=mm_cfg['l3_src_ipv6'], ipv6_dst_addr=mm_cfg['l3_dst_ipv6'], **l3_kw)
+            st.wait(2)
+            my_stream_handles['l3_src1_stream_handle'] = l3_src1.get('stream_id')
+            my_stream_handles['l3_src2_stream_handle'] = l3_src2.get('stream_id')
+            st.log("  Created L3 streams on vlan %s: l3_src1=%s l3_src2=%s" % (
+                l3_vlan, my_stream_handles['l3_src1_stream_handle'], my_stream_handles['l3_src2_stream_handle']))
+
         return my_stream_handles
 
-    def verify_mac_move_dci(self, tc_id, move_dir, host_type,
-                             l3_traffic_scope=None, l3_traffic_types=None):
+    def verify_mac_move_dci(self, tc_id, move_dir, host_type):
         """Learn at dest1, verify traffic; move to dest2, verify seq=1, traffic; move back to dest1, verify seq=2, traffic; cleanup (same as multi-homing).
 
-        When l3_traffic_scope and l3_traffic_types are provided, additionally
-        verifies L3VNI traffic via verify_traffic() at phases 3, 6, and 9.
+        For non-mac_only host types, L3VNI traffic streams are created inline
+        on vlan13 by get_stream_handles_dci() and verified automatically at
+        phases 3b, 6b, and 9b.
         """
         _sep = "=" * 60
         st.banner("DCI MAC MOVE: {}".format(tc_id))
@@ -6943,15 +6998,17 @@ class TestVxlanDciMacMoveTriggers():
         st.log("  Traffic check: PASS")
         st.banner("{} : traffic passed as expected when no host move".format(host_type))
 
-        # L3VNI traffic verification before move (when requested)
-        if l3_traffic_scope and l3_traffic_types:
+        # L3VNI traffic verification before move (auto for non-mac_only)
+        if mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle'):
             st.log("")
             st.log("--- PHASE 3b: L3VNI traffic BEFORE move (host at {}) ---".format(dest1_node))
-            st.banner("Verify L3VNI traffic before host move")
-            l3_before = verify_traffic(tgen_handles, regenerate=True,
-                                       traffic_types=l3_traffic_types, scope=l3_traffic_scope)
-            st.log("  L3VNI traffic before move: {}".format("PASS" if l3_before else "FAIL"))
-            if not l3_before:
+            st.banner("Verify L3VNI traffic before host move (vlan13 inline streams)")
+            self._send_traffic_dci(tg_handle, [mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+            st.log("  L3 stream to {} (host here): {}  L3 stream to {} (host away): {}".format(
+                dest1_node, "PASS" if l3_out1 else "FAIL", dest2_node, "PASS" if l3_out2 else "FAIL"))
+            if not l3_out1:
                 st.log("[FAIL] L3VNI traffic failed before host move")
                 if host_type != 'mac_only':
                     tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
@@ -7011,15 +7068,17 @@ class TestVxlanDciMacMoveTriggers():
         st.log("  Traffic check: PASS")
         st.banner("{} : traffic passed as expected after first move".format(host_type))
 
-        # L3VNI traffic verification after 1st move (when requested)
-        if l3_traffic_scope and l3_traffic_types:
+        # L3VNI traffic verification after 1st move (auto for non-mac_only)
+        if mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle'):
             st.log("")
             st.log("--- PHASE 6b: L3VNI traffic AFTER 1st move (host at {}) ---".format(dest2_node))
-            st.banner("Verify L3VNI traffic after host move to {}".format(dest2_node))
-            l3_after = verify_traffic(tgen_handles, regenerate=True,
-                                      traffic_types=l3_traffic_types, scope=l3_traffic_scope)
-            st.log("  L3VNI traffic after move: {}".format("PASS" if l3_after else "FAIL"))
-            if not l3_after:
+            st.banner("Verify L3VNI traffic after host move to {} (vlan13 inline streams)".format(dest2_node))
+            self._send_traffic_dci(tg_handle, [mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+            st.log("  L3 stream to {} (host away): {}  L3 stream to {} (host here): {}".format(
+                dest1_node, "PASS" if l3_out1 else "FAIL", dest2_node, "PASS" if l3_out2 else "FAIL"))
+            if not l3_out2:
                 st.log("[FAIL] L3VNI traffic failed after host move to dest2")
                 if host_type != 'mac_only':
                     tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest2_handle'])
@@ -7078,15 +7137,17 @@ class TestVxlanDciMacMoveTriggers():
         st.log("  Traffic check: PASS")
         st.banner("{} : traffic passed as expected after mac move to original location".format(host_type))
 
-        # L3VNI traffic verification after move back (when requested)
-        if l3_traffic_scope and l3_traffic_types:
+        # L3VNI traffic verification after move back (auto for non-mac_only)
+        if mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle'):
             st.log("")
             st.log("--- PHASE 9b: L3VNI traffic AFTER move back (host at {}) ---".format(dest1_node))
-            st.banner("Verify L3VNI traffic after host move back to {}".format(dest1_node))
-            l3_final = verify_traffic(tgen_handles, regenerate=True,
-                                      traffic_types=l3_traffic_types, scope=l3_traffic_scope)
-            st.log("  L3VNI traffic after move back: {}".format("PASS" if l3_final else "FAIL"))
-            if not l3_final:
+            st.banner("Verify L3VNI traffic after host move back to {} (vlan13 inline streams)".format(dest1_node))
+            self._send_traffic_dci(tg_handle, [mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+            st.log("  L3 stream to {} (host here): {}  L3 stream to {} (host away): {}".format(
+                dest1_node, "PASS" if l3_out1 else "FAIL", dest2_node, "PASS" if l3_out2 else "FAIL"))
+            if not l3_out1:
                 st.log("[FAIL] L3VNI traffic failed after host move back to dest1")
                 if host_type != 'mac_only':
                     tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
@@ -7110,15 +7171,13 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_orphan_within_dc_mac_and_ipv4(self):
         """Verify mac move between orphan ports mac_and_ipv4 within DC (Solution_dci:71)."""
         tc_id = "mac_and_ipv4 move between orphan ports within DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv4",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv4")
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_within_dc_mac_and_ipv6(self):
         """Verify mac move between orphan ports mac_and_ipv6 within DC (Solution_dci:72)."""
         tc_id = "mac_and_ipv6 move between orphan ports within DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv6",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_within_dc", "mac+ipv6")
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_within_dc_mac_only(self):
@@ -7137,15 +7196,13 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_orphan_across_dc_mac_and_ipv4(self):
         """Verify mac move between orphan ports mac+ipv4 across DC (Solution_dci:75)."""
         tc_id = "mac+ipv4 move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv4",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv4")
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_across_dc_mac_and_ipv6(self):
         """Verify mac move between orphan ports mac+ipv6 across DC (Solution_dci:76)."""
         tc_id = "mac+ipv6 move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv6",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "mac+ipv6")
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_across_dc_mac_only(self):
@@ -7157,15 +7214,13 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_orphan_across_dc_ipv4_changes(self):
         """Verify mac move between orphan ports ipv4_changes across DC (Solution_dci:78)."""
         tc_id = "ipv4_changes move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv4_changes",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv4_changes")
         report_result(result, tc_id)
 
     def test_dci_mac_move_orphan_across_dc_ipv6_changes(self):
         """Verify mac move between orphan ports ipv6_changes across DC (Solution_dci:79)."""
         tc_id = "ipv6_changes move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv6_changes",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv6_changes")
         report_result(result, tc_id)
 
     @pytest.mark.skip(reason="Solution_dci:80 deferred")
@@ -7186,15 +7241,13 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_across_dc_mac_and_ipv4(self):
         """Verify mac move between MH ports mac+ipv4 across DC (Solution_dci:82)."""
         tc_id = "mac+ipv4 move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv4",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv4")
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_across_dc_mac_and_ipv6(self):
         """Verify mac move between MH ports mac+ipv6 across DC (Solution_dci:83)."""
         tc_id = "mac+ipv6 move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv6",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv6")
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_across_dc_mac_only(self):
@@ -7206,15 +7259,13 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_across_dc_ipv4_changes(self):
         """Verify mac move between MH ports ipv4_changes across DC (Solution_dci:85)."""
         tc_id = "ipv4_changes move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv4_changes",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv4_changes")
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_across_dc_ipv6_changes(self):
         """Verify mac move between MH ports ipv6_changes across DC (Solution_dci:86)."""
         tc_id = "ipv6_changes move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv6_changes",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv6_changes")
         report_result(result, tc_id)
 
     @pytest.mark.skip(reason="Solution_dci:87 deferred")
@@ -7235,15 +7286,13 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_to_orphan_across_dc_mac_and_ipv4(self):
         """Verify mac move between MH and orphan ports mac+ipv4 across DC (Solution_dci:89)."""
         tc_id = "mac+ipv4 move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv4",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv4")
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_to_orphan_across_dc_mac_and_ipv6(self):
         """Verify mac move between MH and orphan ports mac+ipv6 across DC (Solution_dci:90)."""
         tc_id = "mac+ipv6 move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv6",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "mac+ipv6")
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_to_orphan_across_dc_mac_only(self):
@@ -7255,15 +7304,13 @@ class TestVxlanDciMacMoveTriggers():
     def test_dci_mac_move_mh_to_orphan_across_dc_ipv4_changes(self):
         """Verify mac move between MH and orphan ports ipv4_changes across DC (Solution_dci:92)."""
         tc_id = "ipv4_changes move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv4_changes",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv4_changes")
         report_result(result, tc_id)
 
     def test_dci_mac_move_mh_to_orphan_across_dc_ipv6_changes(self):
         """Verify mac move between MH and orphan ports ipv6_changes across DC (Solution_dci:93)."""
         tc_id = "ipv6_changes move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv6_changes",
-                                            l3_traffic_scope='cross', l3_traffic_types=['l3_v4', 'l3_v6'])
+        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv6_changes")
         report_result(result, tc_id)
 
     @pytest.mark.skip(reason="Solution_dci:94 deferred")

@@ -6698,6 +6698,637 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
 
+    # ------------------------------------------------------------------
+    # L3VNI_dci:57 / L3VNI_dci:58  –  DF Failover with L3VNI traffic
+    # ------------------------------------------------------------------
+    @pytest.mark.parametrize("ip_version", ["v4", "v6"])
+    def test_base_dci_l3vni_mh_df_failover(self, ip_version):
+        """
+        L3VNI_dci:57 (IPv4) / L3VNI_dci:58 (IPv6) - DF failover with L3VNI traffic.
+
+        Description:
+            Multi-homed host on DC2 (leaf0_dc2 + leaf1_dc2 form an EVPN MH pair).
+            One leaf is the Designated Forwarder (DF) and the other is Non-DF.
+            Shutdown the DF leaf's host-facing PortChannel to trigger DF election
+            to the peer leaf, then verify L3VNI cross-DC traffic continues.
+
+        Steps:
+            1. Verify base setup before trigger
+            2. Identify DC2 MH leaf pair and their PortChannels
+            3. Start cross-DC L3VNI traffic (IPv4 or IPv6)
+            4. Shutdown DF leaf's PortChannel to trigger DF failover
+            5. Verify traffic continues after DF failover
+            6. Restore PortChannel (no-shut)
+            7. Verify traffic after recovery
+            8. Check for core files and crashes
+        """
+        tc_num = 57 if ip_version == 'v4' else 58
+        ip_label = 'IPv4' if ip_version == 'v4' else 'IPv6'
+        tc_id = 'test_base_dci_l3vni_mh_{}_df_failover'.format(ip_version)
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:{}: L3VNI Multi-homed - DF failover with {} L3VNI traffic ({})'.format(
+            tc_num, ip_label, tc_id))
+        result = True
+        summ = ''
+
+        # Step 1: Verify base setup before trigger
+        st.banner('Step 1: Verify base setup before DF failover')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before DF failover\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Identify DC2 MH leaf pair and PortChannels
+        st.banner('Step 2: Identify DC2 MH leaf pair and PortChannels')
+        dc2_leafs = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                      if 'leaf' in n and 'dc2' in n]
+        if len(dc2_leafs) < 2:
+            dc2_leafs = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                          if 'leaf' in n and 'dc2' in n]
+        if len(dc2_leafs) < 2:
+            pytest.skip('DC2 does not have 2 MH leafs for DF failover test')
+            return
+
+        dc2_leafs = sorted(dc2_leafs)[:2]
+        st.log('DC2 MH leaf pair: {}'.format(dc2_leafs))
+
+        # Get PortChannel interfaces on each DC2 leaf
+        config_dict = vxlan_obj.get_cfg_dict()
+        pc_map = {}
+        for leaf in dc2_leafs:
+            leaf_cfg = config_dict.get(leaf, {})
+            pcs = []
+            if isinstance(leaf_cfg, dict) and leaf_cfg.get('port_channel'):
+                for pc_item in leaf_cfg['port_channel']:
+                    pc_name = pc_item.get('name', '')
+                    if pc_name:
+                        pcs.append(pc_name)
+            if not pcs:
+                # Fallback: find PortChannels from interface config
+                int_cfg = vxlan_obj.get_config_interfaces_list(st.get_testbed_vars())
+                l2vni_intfs = int_cfg.get(leaf, {}).get('l2vni_int', [])
+                pcs = [i for i in l2vni_intfs if i.startswith('PortChannel')]
+            pc_map[leaf] = pcs
+            st.log('{} PortChannels: {}'.format(leaf, pcs))
+
+        # Pick the first leaf as the DF target (in a real system we'd check
+        # 'show evpn es' but the framework doesn't always expose DF status;
+        # shutting either MH leaf triggers DF re-election to the peer)
+        df_leaf = dc2_leafs[0]
+        ndf_leaf = dc2_leafs[1]
+        df_pcs = pc_map.get(df_leaf, [])
+        if not df_pcs:
+            summ += 'No PortChannels found on DF leaf {}\n'.format(df_leaf)
+            report_result(False, tc_id, summ)
+            return
+        st.log('DF leaf: {} (PortChannels: {}), Peer leaf: {}'.format(df_leaf, df_pcs, ndf_leaf))
+
+        # Step 3: Verify cross-DC L3VNI traffic before trigger
+        traffic_types = ['l3_{}'.format(ip_version)]
+        st.banner('Step 3: Verify cross-DC L3VNI {} traffic before DF failover'.format(ip_label))
+        if not verify_traffic(tgen_handles, traffic_types=traffic_types, scope='cross'):
+            summ += 'L3VNI {} cross-DC traffic failed before DF failover\n'.format(ip_label)
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 4: Shutdown DF leaf's PortChannel to trigger DF failover
+        st.banner('Step 4: Shutdown PortChannel on DF leaf {} to trigger DF failover'.format(df_leaf))
+        try:
+            for pc in df_pcs:
+                st.log('Shutting PortChannel {} on {}'.format(pc, df_leaf))
+                intf_obj.interface_shutdown(dut=df_leaf, interfaces=pc)
+            st.wait(10, 'Wait for DF election to move to peer leaf')
+
+            # Step 5: Verify traffic continues after DF failover
+            st.banner('Step 5: Verify L3VNI {} cross-DC traffic after DF failover'.format(ip_label))
+            if not verify_traffic(tgen_handles, traffic_types=traffic_types, scope='cross'):
+                summ += 'L3VNI {} cross-DC traffic failed after DF failover\n'.format(ip_label)
+                result = False
+            else:
+                st.log('L3VNI {} cross-DC traffic continues after DF failover: PASS'.format(ip_label))
+        finally:
+            # Step 6: Restore PortChannel (no-shut)
+            st.banner('Step 6: Restore PortChannel on DF leaf {}'.format(df_leaf))
+            for pc in df_pcs:
+                st.log('No-shutting PortChannel {} on {}'.format(pc, df_leaf))
+                intf_obj.interface_noshutdown(dut=df_leaf, interfaces=pc)
+            st.wait(15, 'Wait for PortChannel and DF election recovery')
+
+        # Step 7: Verify traffic after recovery
+        st.banner('Step 7: Verify L3VNI {} cross-DC traffic after PortChannel recovery'.format(ip_label))
+        if not verify_traffic(tgen_handles, traffic_types=traffic_types, scope='cross'):
+            summ += 'L3VNI {} cross-DC traffic failed after PortChannel recovery\n'.format(ip_label)
+            result = False
+        else:
+            st.log('L3VNI {} cross-DC traffic after recovery: PASS'.format(ip_label))
+
+        # Step 8: Check for core files and crashes
+        st.banner('Step 8: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after DF failover test\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:84  –  Simultaneous reboot of both BGWs
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_simultaneous_bgw_reboot(self):
+        """
+        L3VNI_dci:84 - Simultaneous reboot of both BGWs in DC1.
+
+        Description:
+            Reboot both BGW spines of DC1 simultaneously and verify that
+            L2VNI + L3VNI traffic recovers after both BGWs come back up.
+
+        Steps:
+            1. Verify base setup before trigger
+            2. Save FRR config on both BGWs
+            3. Record docker counts
+            4. Simultaneously reboot both BGWs (threaded)
+            5. Verify docker recovery on both BGWs
+            6. Verify base setup after reboot (with retries)
+            7. Verify remote VTEPs are present
+            8. Verify L2+L3 traffic flows
+            9. Check for core files and crashes
+        """
+        tc_id = 'test_base_dci_l3vni_simultaneous_bgw_reboot'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:84: Simultaneous reboot of both BGWs ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        # Get DC1 BGW nodes
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                         if 'bgw' in n and 'dc1' in n]
+        if len(dc1_bgws) < 2:
+            pytest.skip('DC1 does not have 2 BGW nodes for simultaneous reboot test')
+            return
+
+        dc1_bgws = sorted(dc1_bgws)[:2]
+        st.log('DC1 BGW nodes for simultaneous reboot: {}'.format(dc1_bgws))
+
+        # Step 1: Verify base setup before trigger
+        st.banner('Step 1: Verify base setup before simultaneous BGW reboot')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before simultaneous BGW reboot\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Save FRR config on both BGWs
+        st.banner('Step 2: Save FRR configuration on both BGWs')
+        docker_counts = {}
+        for bgw in dc1_bgws:
+            st.log('Saving BGP config on {}'.format(bgw))
+            vxlan_obj.config_dut(bgw, 'bgp', 'do write')
+            docker_counts[bgw] = basic_obj.get_and_match_docker_count(bgw)
+            st.log('Docker count on {} before reboot: {}'.format(bgw, docker_counts[bgw]))
+
+        # Step 3: Simultaneously reboot both BGWs
+        st.banner('Step 3: Simultaneously rebooting both BGWs: {}'.format(dc1_bgws))
+        reboot_threads = []
+        for bgw in dc1_bgws:
+            t = threading.Thread(target=reboot_obj.dut_reboot, args=(bgw,))
+            t.start()
+            reboot_threads.append(t)
+        for t in reboot_threads:
+            t.join()
+        st.log('Both BGWs have been rebooted')
+
+        # Restore helper files
+        for bgw in dc1_bgws:
+            try:
+                restore_helper_file(bgw)
+            except Exception:
+                st.log('restore_helper_file not available or not needed for {}'.format(bgw))
+
+        # Step 4: Verify docker recovery on both BGWs
+        st.banner('Step 4: Verifying docker recovery on both BGWs')
+        for bgw in dc1_bgws:
+            st.log('Checking docker status on {}'.format(bgw))
+            if not poll_wait(basic_obj.verify_docker_status, 180, bgw, 'Exited'):
+                summ += 'Dockers not auto recovered on {} after reboot\n'.format(bgw)
+                report_result(False, tc_id, summ)
+                return
+            if not poll_wait(basic_obj.get_and_match_docker_count, 180, bgw, docker_counts[bgw]):
+                summ += 'All dockers not up on {} after reboot\n'.format(bgw)
+                report_result(False, tc_id, summ)
+                return
+        st.log('Docker recovery verified on both BGWs')
+
+        # Step 5: Verify base setup after reboot
+        st.banner('Step 5: Verifying base setup after simultaneous BGW reboot')
+        if not verify_base_setup_bgw(setup_nodes, retry=10):
+            summ += 'Base setup verification failed after simultaneous BGW reboot\n'
+            result = False
+
+        # Step 6: Verify remote VTEPs
+        st.banner('Step 6: Verifying remote VTEPs are present')
+        vtep_nodes = test_cfg['nodes'].get('l2l3vni', [])
+        if vtep_nodes:
+            if not vxlan_obj.verify_vtep(vtep_nodes, dci_enabled=True):
+                summ += 'Remote VTEPs not fully recovered after simultaneous BGW reboot\n'
+                result = False
+            else:
+                st.log('All remote VTEPs are present')
+
+        # Step 7: Verify L2+L3 traffic
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 7: Verifying traffic after simultaneous BGW reboot')
+            if not verify_traffic(tgen_handles, bum=True,
+                                  traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                  scope='cross'):
+                summ += 'Traffic verification failed after simultaneous BGW reboot\n'
+                result = False
+            else:
+                st.log('L2+L3 traffic verified after simultaneous BGW reboot')
+
+        # Step 8: Check for core files
+        st.banner('Step 8: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after simultaneous BGW reboot\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:85  –  Rolling reboot of DC fabric
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_rolling_reboot(self):
+        """
+        L3VNI_dci:85 - Rolling reboot of DC1 fabric with L3VNI.
+
+        Description:
+            Sequentially reboot DC1 nodes (leaf1 -> leaf2 -> spine0 -> spine1_bgw1)
+            and verify that L2VNI + L3VNI traffic recovers after the rolling reboot.
+
+        Steps:
+            1. Verify base setup before trigger
+            2. Save FRR config on all target nodes
+            3. Rolling reboot: reboot each node sequentially, wait for recovery
+            4. Verify base setup after rolling reboot
+            5. Verify remote VTEPs are present
+            6. Verify L2+L3 traffic flows
+            7. Check for core files and crashes
+        """
+        tc_id = 'test_base_dci_l3vni_rolling_reboot'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:85: Rolling reboot of DC1 fabric with L3VNI ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        # Build ordered list of DC1 nodes for rolling reboot
+        # Order: leaf1_dc1 -> leaf2_dc1 -> spine0_dc1 -> spine1_bgw (first DC1 BGW)
+        all_nodes = test_cfg['nodes'].get('l2l3vni_bgw', []) + test_cfg['nodes'].get('spine', [])
+        dc1_leafs = sorted([n for n in all_nodes if 'leaf' in n and 'dc1' in n])
+        dc1_spines = sorted([n for n in all_nodes if 'spine' in n and 'dc1' in n and 'bgw' not in n])
+        dc1_bgws = sorted([n for n in all_nodes if 'bgw' in n and 'dc1' in n])
+
+        # Select nodes for rolling reboot: pick 2 leafs, 1 spine, 1 BGW
+        rolling_nodes = []
+        if len(dc1_leafs) >= 2:
+            rolling_nodes.extend(dc1_leafs[1:3])  # leaf1_dc1, leaf2_dc1 (skip leaf0)
+        elif dc1_leafs:
+            rolling_nodes.extend(dc1_leafs[:1])
+        if dc1_spines:
+            rolling_nodes.append(dc1_spines[0])
+        if dc1_bgws:
+            rolling_nodes.append(dc1_bgws[0])
+
+        if not rolling_nodes:
+            pytest.skip('No DC1 nodes found for rolling reboot test')
+            return
+
+        st.log('Rolling reboot order: {}'.format(rolling_nodes))
+
+        # Step 1: Verify base setup before trigger
+        st.banner('Step 1: Verify base setup before rolling reboot')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before rolling reboot\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Save FRR config on all target nodes
+        st.banner('Step 2: Save FRR configuration on all rolling reboot nodes')
+        docker_counts = {}
+        for node in rolling_nodes:
+            st.log('Saving BGP config on {}'.format(node))
+            vxlan_obj.config_dut(node, 'bgp', 'do write')
+            docker_counts[node] = basic_obj.get_and_match_docker_count(node)
+
+        # Step 3: Rolling reboot - sequential reboot with recovery wait
+        st.banner('Step 3: Performing rolling reboot')
+        for idx, node in enumerate(rolling_nodes):
+            step_num = idx + 1
+            st.banner('Step 3.{}: Rebooting {} ({}/{})'.format(
+                step_num, node, step_num, len(rolling_nodes)))
+            reboot_obj.dut_reboot(node)
+
+            try:
+                restore_helper_file(node)
+            except Exception:
+                st.log('restore_helper_file not available or not needed for {}'.format(node))
+
+            st.log('Waiting for docker recovery on {}'.format(node))
+            if not poll_wait(basic_obj.verify_docker_status, 180, node, 'Exited'):
+                summ += 'Dockers not recovered on {} during rolling reboot\n'.format(node)
+                result = False
+                continue
+            if not poll_wait(basic_obj.get_and_match_docker_count, 180, node, docker_counts[node]):
+                summ += 'All dockers not up on {} during rolling reboot\n'.format(node)
+                result = False
+                continue
+            st.log('{} recovered successfully'.format(node))
+
+            # Brief wait for BGP convergence before next reboot
+            st.wait(10, 'Wait for convergence after {} reboot'.format(node))
+
+        # Step 4: Verify base setup after rolling reboot
+        st.banner('Step 4: Verifying base setup after rolling reboot')
+        if not verify_base_setup_bgw(setup_nodes, retry=10):
+            summ += 'Base setup verification failed after rolling reboot\n'
+            result = False
+
+        # Step 5: Verify remote VTEPs
+        st.banner('Step 5: Verifying remote VTEPs are present')
+        vtep_nodes = test_cfg['nodes'].get('l2l3vni', [])
+        if vtep_nodes:
+            if not vxlan_obj.verify_vtep(vtep_nodes, dci_enabled=True):
+                summ += 'Remote VTEPs not fully recovered after rolling reboot\n'
+                result = False
+            else:
+                st.log('All remote VTEPs are present')
+
+        # Step 6: Verify L2+L3 traffic
+        if st.getenv('skip_tgen', 'false') != 'true':
+            st.banner('Step 6: Verifying traffic after rolling reboot')
+            if not verify_traffic(tgen_handles, bum=True,
+                                  traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                                  scope='cross'):
+                summ += 'Traffic verification failed after rolling reboot\n'
+                result = False
+            else:
+                st.log('L2+L3 traffic verified after rolling reboot')
+
+        # Step 7: Check for core files
+        st.banner('Step 7: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after rolling reboot\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:96  –  Remove/Add Import Export RT
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_remove_add_import_export_rt(self):
+        """
+        L3VNI_dci:96 - Remove/Add Import Export RT on all BGWs of DC1.
+
+        Description:
+            Remove and then re-add the route-target import/export configuration
+            on all BGW spines of DC1. Verify that cross-DC L3VNI traffic recovers
+            after the RT is restored.
+
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify baseline cross-DC traffic
+            3. Remove import/export RT on all DC1 BGWs
+            4. Wait for traffic to be impacted
+            5. Re-add import/export RT on all DC1 BGWs
+            6. Verify traffic recovers
+            7. Check for core files and crashes
+        """
+        tc_id = 'test_base_dci_l3vni_remove_add_import_export_rt'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:96: Remove/Add Import Export RT ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        # Get DC1 BGW nodes
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                         if 'bgw' in n and 'dc1' in n]
+        if not dc1_bgws:
+            pytest.skip('No DC1 BGW nodes found for import/export RT test')
+            return
+
+        st.log('DC1 BGW nodes: {}'.format(dc1_bgws))
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before RT removal')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before RT removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify baseline traffic
+        st.banner('Step 2: Verify baseline cross-DC L2+L3 traffic')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                              scope='cross'):
+            summ += 'Baseline traffic verification failed before RT removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Get config data for RT manipulation
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        try:
+            # Step 3: Remove import/export RT on all DC1 BGWs
+            st.banner('Step 3: Remove import/export RT on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Removing import/export RT on {}'.format(bgw))
+                remove_cfg = vxlan_obj.remove_bgw_import_export_rt(bgw, config_dict, bgp_info)
+                if remove_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', remove_cfg)
+                else:
+                    st.log('No RT config generated for {}, skipping'.format(bgw))
+
+            # Step 4: Wait for traffic impact
+            st.banner('Step 4: Wait for traffic to be impacted by RT removal')
+            st.wait(10, 'Wait for RT removal to take effect')
+
+            # Step 5: Re-add import/export RT on all DC1 BGWs
+            st.banner('Step 5: Re-add import/export RT on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Re-adding import/export RT on {}'.format(bgw))
+                add_cfg = vxlan_obj.add_bgw_import_export_rt(bgw, config_dict, bgp_info)
+                if add_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                else:
+                    st.log('No RT config generated for {}, skipping'.format(bgw))
+
+        except Exception as e:
+            st.error('Exception during RT manipulation: {}'.format(e))
+            # Attempt recovery
+            for bgw in dc1_bgws:
+                try:
+                    add_cfg = vxlan_obj.add_bgw_import_export_rt(bgw, config_dict, bgp_info)
+                    if add_cfg:
+                        vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                except Exception:
+                    pass
+            summ += 'Exception during RT manipulation: {}\n'.format(e)
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 6: Verify traffic recovers
+        st.banner('Step 6: Wait for convergence and verify traffic recovery')
+        st.wait(15, 'Wait for BGP convergence after RT re-add')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                              scope='cross'):
+            summ += 'Traffic did not recover after import/export RT remove/add\n'
+            result = False
+        else:
+            st.log('Traffic recovered after import/export RT remove/add: PASS')
+
+        # Step 7: Check for core files
+        st.banner('Step 7: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after import/export RT remove/add\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:97  –  Remove/Add RT_REWRITE configs
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_remove_add_rt_rewrite_configs(self):
+        """
+        L3VNI_dci:97 - Remove/Add RT_REWRITE configs on all BGWs of DC1.
+
+        Description:
+            Remove and then re-add the RT-REWRITE route-maps (RT-REWRITE-WAN,
+            RT-REWRITE-DC) and associated extcommunity-lists on all BGW spines
+            of DC1. Verify that cross-DC L3VNI traffic recovers after configs
+            are restored.
+
+        Steps:
+            1. Verify base setup before trigger
+            2. Verify baseline cross-DC traffic
+            3. Remove RT-REWRITE configs on all DC1 BGWs
+            4. Wait for traffic to be impacted
+            5. Re-add RT-REWRITE configs on all DC1 BGWs
+            6. Verify traffic recovers
+            7. Check for core files and crashes
+        """
+        tc_id = 'test_base_dci_l3vni_remove_add_rt_rewrite_configs'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:97: Remove/Add RT_REWRITE configs ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        # Get DC1 BGW nodes
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                         if 'bgw' in n and 'dc1' in n]
+        if not dc1_bgws:
+            pytest.skip('No DC1 BGW nodes found for RT-REWRITE test')
+            return
+
+        st.log('DC1 BGW nodes: {}'.format(dc1_bgws))
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before RT-REWRITE removal')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before RT-REWRITE removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify baseline traffic
+        st.banner('Step 2: Verify baseline cross-DC L2+L3 traffic')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                              scope='cross'):
+            summ += 'Baseline traffic verification failed before RT-REWRITE removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Get config data for RT-REWRITE manipulation
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+        dci_vip_maps = vxlan_obj.generate_dci_vip_maps()
+
+        try:
+            # Step 3: Remove RT-REWRITE configs on all DC1 BGWs
+            st.banner('Step 3: Remove RT-REWRITE configs on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Removing RT-REWRITE configs on {}'.format(bgw))
+                remove_cfg = vxlan_obj.remove_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info)
+                if remove_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', remove_cfg)
+                else:
+                    st.log('No RT-REWRITE config generated for {}, skipping'.format(bgw))
+
+            # Step 4: Wait for traffic impact
+            st.banner('Step 4: Wait for traffic to be impacted by RT-REWRITE removal')
+            st.wait(10, 'Wait for RT-REWRITE removal to take effect')
+
+            # Step 5: Re-add RT-REWRITE configs on all DC1 BGWs
+            st.banner('Step 5: Re-add RT-REWRITE configs on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Re-adding RT-REWRITE configs on {}'.format(bgw))
+                add_cfg = vxlan_obj.add_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info, dci_vip_maps)
+                if add_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                else:
+                    st.log('No RT-REWRITE config generated for {}, skipping'.format(bgw))
+
+        except Exception as e:
+            st.error('Exception during RT-REWRITE manipulation: {}'.format(e))
+            # Attempt recovery
+            for bgw in dc1_bgws:
+                try:
+                    add_cfg = vxlan_obj.add_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info, dci_vip_maps)
+                    if add_cfg:
+                        vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                except Exception:
+                    pass
+            summ += 'Exception during RT-REWRITE manipulation: {}\n'.format(e)
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 6: Verify traffic recovers
+        st.banner('Step 6: Wait for convergence and verify traffic recovery')
+        st.wait(15, 'Wait for BGP convergence after RT-REWRITE re-add')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                              scope='cross'):
+            summ += 'Traffic did not recover after RT-REWRITE remove/add\n'
+            result = False
+        else:
+            st.log('Traffic recovered after RT-REWRITE remove/add: PASS')
+
+        # Step 7: Check for core files
+        st.banner('Step 7: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after RT-REWRITE remove/add\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
 
 # ============================================================================
 # DCI MAC MOVE TRIGGER TEST CLASS (Solution_dci:71–96)

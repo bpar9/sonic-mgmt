@@ -871,8 +871,6 @@ global:
         l3_gateway_v6: "8000:13::1"
         l3_src_ipv4: "80.13.0.99"
         l3_src_ipv6: "8000:13::99"
-        l3_dst_ipv4: "80.13.0.50"
-        l3_dst_ipv6: "8000:13::50"
     l2l3:
         pkts_per_burst: 100
         rate_percent: 0.01

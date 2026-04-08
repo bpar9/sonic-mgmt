@@ -4829,8 +4829,6 @@ def _get_dci_mac_move_cfg():
         'l3_gateway_v6': cfg.get('l3_gateway_v6', '8000:13::1'),
         'l3_src_ipv4': cfg.get('l3_src_ipv4', '80.13.0.99'),
         'l3_src_ipv6': cfg.get('l3_src_ipv6', '8000:13::99'),
-        'l3_dst_ipv4': cfg.get('l3_dst_ipv4', '80.13.0.50'),
-        'l3_dst_ipv6': cfg.get('l3_dst_ipv6', '8000:13::50'),
     }
 
 
@@ -6893,38 +6891,41 @@ class TestVxlanDciMacMoveTriggers():
                          transmit_mode='single_burst', pkts_per_burst=pkts, rate_percent=rate,
                          circuit_type='raw', frame_size=1000, vlan_id=l3_vlan,
                          src_dest_mesh='one_to_one', track_by='endpoint_pair')
+            # L3 dst IPs = host IPs on vlan12 (inter-VLAN routed: src vlan13 -> dst vlan12)
+            l3_dst_ip1 = stream_info['src1']['ip_dst']
+            l3_dst_ip2 = stream_info['src2']['ip_dst']
             if host_type in ipv4_host_types:
                 st.log("################################################################################")
-                st.log("#  [L3 src1] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv4'], mm_cfg['l3_dst_ipv4']))
+                st.log("#  [L3 src1] vlan=%s src_ip=%s dst_ip=%s (inter-vlan)" % (l3_vlan, mm_cfg['l3_src_ipv4'], l3_dst_ip1))
                 st.log("################################################################################")
                 l3_src1 = stream_info['src']['tg_handle'].tg_traffic_config(
                     emulation_dst_handle=stream_info['src']['dest_handle1'],
                     mac_src=l3_mac_src, mac_dst=l3_mac_dst,
-                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=mm_cfg['l3_dst_ipv4'], **l3_kw)
+                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=l3_dst_ip1, **l3_kw)
                 st.wait(2)
                 st.log("################################################################################")
-                st.log("#  [L3 src2] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv4'], mm_cfg['l3_dst_ipv4']))
+                st.log("#  [L3 src2] vlan=%s src_ip=%s dst_ip=%s (inter-vlan)" % (l3_vlan, mm_cfg['l3_src_ipv4'], l3_dst_ip2))
                 st.log("################################################################################")
                 l3_src2 = stream_info['src']['tg_handle'].tg_traffic_config(
                     emulation_dst_handle=stream_info['src']['dest_handle2'],
                     mac_src=l3_mac_src, mac_dst=l3_mac_dst,
-                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=mm_cfg['l3_dst_ipv4'], **l3_kw)
+                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=l3_dst_ip2, **l3_kw)
             else:
                 st.log("################################################################################")
-                st.log("#  [L3 src1] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv6'], mm_cfg['l3_dst_ipv6']))
+                st.log("#  [L3 src1] vlan=%s src_ip=%s dst_ip=%s (inter-vlan)" % (l3_vlan, mm_cfg['l3_src_ipv6'], l3_dst_ip1))
                 st.log("################################################################################")
                 l3_src1 = stream_info['src']['tg_handle'].tg_traffic_config(
                     emulation_dst_handle=stream_info['src']['dest_handle1'],
                     mac_src=l3_mac_src, mac_dst=l3_mac_dst,
-                    ipv6_src_addr=mm_cfg['l3_src_ipv6'], ipv6_dst_addr=mm_cfg['l3_dst_ipv6'], **l3_kw)
+                    ipv6_src_addr=mm_cfg['l3_src_ipv6'], ipv6_dst_addr=l3_dst_ip1, **l3_kw)
                 st.wait(2)
                 st.log("################################################################################")
-                st.log("#  [L3 src2] vlan=%s src_ip=%s dst_ip=%s" % (l3_vlan, mm_cfg['l3_src_ipv6'], mm_cfg['l3_dst_ipv6']))
+                st.log("#  [L3 src2] vlan=%s src_ip=%s dst_ip=%s (inter-vlan)" % (l3_vlan, mm_cfg['l3_src_ipv6'], l3_dst_ip2))
                 st.log("################################################################################")
                 l3_src2 = stream_info['src']['tg_handle'].tg_traffic_config(
                     emulation_dst_handle=stream_info['src']['dest_handle2'],
                     mac_src=l3_mac_src, mac_dst=l3_mac_dst,
-                    ipv6_src_addr=mm_cfg['l3_src_ipv6'], ipv6_dst_addr=mm_cfg['l3_dst_ipv6'], **l3_kw)
+                    ipv6_src_addr=mm_cfg['l3_src_ipv6'], ipv6_dst_addr=l3_dst_ip2, **l3_kw)
             st.wait(2)
             my_stream_handles['l3_src1_stream_handle'] = l3_src1.get('stream_id')
             my_stream_handles['l3_src2_stream_handle'] = l3_src2.get('stream_id')

@@ -867,7 +867,7 @@ global:
         rate_percent_hw: 10
     l2l3:
         pkts_per_burst: 100
-        rate_percent: 0.01
+        rate_percent: 0.1
     bum:
         pkts_per_burst: 10
-        rate_percent: 0.01
+        rate_percent: 0.1

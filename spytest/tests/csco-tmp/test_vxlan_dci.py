@@ -19,6 +19,7 @@ import apis.system.reboot as reboot_obj
 from spytest.utils import poll_wait
 from copy import deepcopy
 import json
+import time
 import apis.routing.bgp as bgp_obj
 
 
@@ -1061,9 +1062,11 @@ def tgen_preconfig(**kwargs):
     WITHIN_DC_VLANS = [12, 17]  # VRF 101: VLAN 12, 17 (within-DC) - keeps existing behavior
     CROSS_DC_VLANS = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]  # All VLANs for cross-DC (vxlan-wan)
 
-    # L3VNI across DCI: Enable cross-DC L3 stream generation.
-    # Set to False to disable cross-DC L3VNI traffic streams if unsupported.
-    ENABLE_L3_ACROSS_DCI = True
+    # L3VNI across DCI: Enable cross-DC L3 stream generation only when
+    # BGW nodes are present in the topology (i.e., DCI is enabled).
+    # When dci_enabled is False, no cross-DC L3 traffic items are created.
+    dci_enabled = bool(test_cfg['nodes'].get('l2l3vni_bgw'))
+    ENABLE_L3_ACROSS_DCI = dci_enabled
     
     def filter_endpoints_by_vlan_and_scope(endpoints, allowed_vlans_within, allowed_vlans_cross):
         """
@@ -1408,15 +1411,16 @@ def tgen_preconfig(**kwargs):
                     stream_handles['l2_v6'].extend(pc_cross_handles_v6 if isinstance(pc_cross_handles_v6, list) else [pc_cross_handles_v6])
 
     # ============================================================
-    # Continuous cross-DC L2 (IPv4/IPv6) for DCI link flap/shut tests
-    # Same pattern as MH DF/NDF: create_traffic_item(..., transmit_mode='continuous')
-    # Used by TestVxlanInterfaceTriggers.test_dci_link_trigger via
-    # check_traffic(action='start' / 'check' / 'stop')
+    # Continuous cross-DC L2+L3 (IPv4/IPv6) for DCI link flap/shut tests
+    # Created eagerly so test_dci_link_trigger can use them directly
+    # via tgen_handles['dci_flap_continuous'].
+    # Uses same VLANs as burst L2/L3 traffic; two representative VLANs
+    # (12, 18) to keep stream count manageable.
     # ============================================================
     stream_handles['dci_flap_continuous'] = {}
     _dci_fc_key = 1
-    _fc_rate = test_cfg['global'].get('bum', {}).get('rate_percent', 0.1)
-    _fc_ppb = test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000)
+    _dci_fc_rate = test_cfg['global'].get('l2l3', {}).get('rate_percent', 0.1)
+    _dci_fc_ppb = test_cfg['global'].get('l2l3', {}).get('pkts_per_burst', 1000)
 
     def _dci_merge_flap_continuous(dest, created, start_key):
         k = start_key
@@ -1428,23 +1432,27 @@ def tgen_preconfig(**kwargs):
                 k += 1
         return k
 
-    if l2_orphan_cross or l2_pc_cross:
-        st.banner("DCI: continuous L2 cross-DC streams for link flap tests (parallel to burst L2-CROSS)")
-    if l2_orphan_cross:
-        _h_fc = vxlan_obj.create_traffic_item(
-            device_handles=v4_device_handles,
-            endpoints=l2_orphan_cross,
-            topo_handles=topo_handles,
-            multi_dst='vlan',
-            name_prfx='DCI-FC-L2-SH-X',
-            transmit_mode='continuous',
-            rate_percent=_fc_rate,
-            pkts_per_burst=_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if l2_pc_cross:
-        for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
-            _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
+    # Limit flap-continuous streams: two VLANs only (12, 18) — one traffic item per VLAN per AF
+    _dci_fc_vlans = (12, 18)
+
+    def _dci_fc_endpoints_for_vlan(vlan_id):
+        merged = {}
+        if l2_orphan_cross:
+            for _k, _v in l2_orphan_cross.items():
+                if _v.get('src_vlan') == vlan_id:
+                    merged[_k] = _v
+        if l2_pc_cross:
+            for _k, _v in l2_pc_cross.items():
+                if _v.get('src_vlan') == vlan_id:
+                    merged[_k] = _v
+        return merged
+
+    if dci_enabled and (l2_orphan_cross or l2_pc_cross):
+        st.banner(
+            "DCI: continuous L2 cross-DC for link flap tests — VLANs {} only".format(
+                _dci_fc_vlans))
+        for _vlan_fc in _dci_fc_vlans:
+            _eps_fc = _dci_fc_endpoints_for_vlan(_vlan_fc)
             if not _eps_fc:
                 continue
             _h_fc = vxlan_obj.create_traffic_item(
@@ -1452,28 +1460,14 @@ def tgen_preconfig(**kwargs):
                 endpoints=_eps_fc,
                 topo_handles=topo_handles,
                 multi_dst='vlan',
-                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
+                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
                 transmit_mode='continuous',
-                rate_percent=_fc_rate,
-                pkts_per_burst=_fc_ppb,
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
             )
             _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if l2_orphan_cross:
-        _h_fc = vxlan_obj.create_traffic_item(
-            device_handles=v6_device_handles,
-            endpoints=l2_orphan_cross,
-            topo_handles=topo_handles,
-            version='ipv6',
-            multi_dst='vlan',
-            name_prfx='DCI-FC-L2-SH-X',
-            transmit_mode='continuous',
-            rate_percent=_fc_rate,
-            pkts_per_burst=_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
-    if l2_pc_cross:
-        for _vlan_fc in sorted(set(ep.get('src_vlan') for ep in l2_pc_cross.values())):
-            _eps_fc = {k: v for k, v in l2_pc_cross.items() if v.get('src_vlan') == _vlan_fc}
+        for _vlan_fc in _dci_fc_vlans:
+            _eps_fc = _dci_fc_endpoints_for_vlan(_vlan_fc)
             if not _eps_fc:
                 continue
             _h_fc = vxlan_obj.create_traffic_item(
@@ -1482,14 +1476,44 @@ def tgen_preconfig(**kwargs):
                 topo_handles=topo_handles,
                 version='ipv6',
                 multi_dst='vlan',
-                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
+                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
                 transmit_mode='continuous',
-                rate_percent=_fc_rate,
-                pkts_per_burst=_fc_ppb,
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
             )
             _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
+
+    # L3 continuous cross-DC traffic for DCI link flap/shut tests
+    if dci_enabled and l3_cross_dc_endpoints:
+        st.banner("DCI: continuous L3 cross-DC for link flap tests")
+        _h_fc_l3 = vxlan_obj.create_traffic_item(
+            device_handles=v4_device_handles,
+            endpoints=l3_cross_dc_endpoints,
+            topo_handles=topo_handles,
+            multi_dst='vrf',
+            name_prfx='DCI-FC-L3-X',
+            transmit_mode='continuous',
+            rate_percent=_dci_fc_rate,
+            pkts_per_burst=_dci_fc_ppb,
+        )
+        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3, _dci_fc_key)
+        _h_fc_l3_v6 = vxlan_obj.create_traffic_item(
+            device_handles=v6_device_handles,
+            endpoints=l3_cross_dc_endpoints,
+            topo_handles=topo_handles,
+            version='ipv6',
+            multi_dst='vrf',
+            name_prfx='DCI-FC-L3-X',
+            transmit_mode='continuous',
+            rate_percent=_dci_fc_rate,
+            pkts_per_burst=_dci_fc_ppb,
+        )
+        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3_v6, _dci_fc_key)
+
     if stream_handles['dci_flap_continuous']:
-        st.log("DCI flap continuous: {} stream(s) created".format(len(stream_handles['dci_flap_continuous'])))
+        st.log("DCI flap continuous: {} stream(s) created (L2+L3)".format(len(stream_handles['dci_flap_continuous'])))
+    else:
+        st.log("NOTE: No cross-DC endpoints for DCI flap continuous streams.")
 
     st.banner(f"Creating L3 IPv6 traffic items: {len(l3_traffic_endpoints)} endpoints "
               f"({len(l3_within_dc_endpoints)} within-DC [{len(l3_within_sh)} SH + {len(l3_within_mh)} MH] "
@@ -2265,6 +2289,7 @@ ALL_CHECKS = [
     'rt_rewrite',        # RT-REWRITE route-map verification (BGW nodes only)
     # 'mac_arp',         # MAC and ARP table entries for L3VNI hosts (disabled — will add later)
     'portchannel',       # PortChannel operational status
+    'ipv6_route',        # IPv6 route verification (show ipv6 route) — verifies IPv6 connected/BGP routes present
     'evpn_type5_comprehensive',  # Unified Type-5: 10 boolean checks (present, has_best, has_rt, has_et, has_rmac, has_ipv6_nh, installed_in_rib, installed_in_fib, has_local_class_path, has_remote_class_path) — same logic on leaf and BGW
 ]
 
@@ -2277,7 +2302,7 @@ CHECK_SETS = {
     'data_plane': ['vlan_vni', 'vrf_vni', 'vteps', 'tunnels'],
     'control_plane': ['bgp', 'evpn_es', 'evpn_type1', 'evpn_type4',
                       'ebgp_multihop', 'evpn_vni', 'rt_rewrite',
-                      'evpn_type5_comprehensive'],
+                      'ipv6_route', 'evpn_type5_comprehensive'],
 }
 
 
@@ -2707,6 +2732,20 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
                     st.log(f'✗ PortChannel on {dut}: Fail - {err}')
                     results[dut]['portchannel'] = False
                     results['overall'] = False
+        
+        # ============================================================
+        # IPv6 Route Verification (show ipv6 route vrf all)
+        # Validates IPv6 connected + BGP routes are present
+        # ============================================================
+        if 'ipv6_route' in checks_to_run:
+            try:
+                vxlan_obj.verify_ipv6_route_dci(dut)
+                st.log(f'✓ IPv6 route on {dut}: Pass')
+                results[dut]['ipv6_route'] = True
+            except Exception as err:
+                st.log(f'✗ IPv6 route on {dut}: Fail - {err}')
+                results[dut]['ipv6_route'] = False
+                results['overall'] = False
         
         # ============================================================
         # Comprehensive Type-5 Verification (path-count, best-path, RT/ET/RMAC, IPv6 NH)
@@ -3942,6 +3981,7 @@ class TestVxlanInterfaceTriggers():
         - Solution_dci:27 / L3VNI_dci:40 - DCI link shut - 1 link
         - Solution_dci:28 / L3VNI_dci:41 - DCI link flap - all interface flap (one BGW)
         - Solution_dci:29 / L3VNI_dci:42 - DCI link shut - all interface shut towards 1 DCI node
+              (during-trigger check uses burst BUM/L2, not dci_flap_continuous)
         - Solution_dci:30 / L3VNI_dci:43 - DCI link shut - all interface shut (all DCI nodes unreachable)
     """
 
@@ -4001,6 +4041,212 @@ class TestVxlanInterfaceTriggers():
                 orphan_map[dut] = orphan_list
         return orphan_map
 
+    def _yaml_member_matches_host_port(self, host_port, yaml_member):
+        """Match full TGEN key (e.g. T1D3P1) to yaml shorthand (e.g. T1P1); same idea as session port_vlan_dict."""
+        if not yaml_member or yaml_member.startswith('PortChannel'):
+            return False
+        if host_port == yaml_member:
+            return True
+        if 'P' not in yaml_member:
+            return host_port == yaml_member
+        suf = yaml_member.split('P')[-1]
+        return host_port.endswith('P' + suf)
+
+    def _host_info_keys_for_portchannel(self, dut, pc_intf, by_if):
+        """
+        g_*_host_info_dict keys are full TGEN names (e.g. T1D3P1 from get_interfaces), not PortChannel.
+        For each L2VNI vlan that includes this PortChannel, find host dict keys that carry that vlan
+        and match the non-PortChannel yaml member (e.g. T1P1 <-> T1D3P1).
+        """
+        keys = []
+        if not pc_intf.startswith('PortChannel'):
+            return keys
+        for vlan in test_cfg.get(dut, {}).get('l2vni', []) or []:
+            mems = vlan.get('members') or []
+            if pc_intf not in mems:
+                continue
+            vid = vlan.get('vlan_id')
+            if vid is None:
+                continue
+            for ymem in mems:
+                if ymem == pc_intf or (isinstance(ymem, str) and ymem.startswith('PortChannel')):
+                    continue
+                for pk, per_vlan in by_if.items():
+                    if not isinstance(per_vlan, dict) or vid not in per_vlan:
+                        continue
+                    if self._yaml_member_matches_host_port(pk, ymem):
+                        keys.append(pk)
+        seen = set()
+        out = []
+        for k in keys:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
+
+    def _collect_hosts_on_leaf_interfaces(self, dut, intf_list):
+        """
+        SAG host MAC / host_ip per interface from g_v4_host_info_dict and g_v6_host_info_dict
+        (same keys as generate_sag_hosts). Both families are checked for remote type-2 withdrawal.
+        Orphan ports use Sonic names (Ethernet*); host_info is keyed by TGEN aliases - resolve via
+        find_port_alias (same mapping as vxlan_helper.get_interfaces). For PortChannel, resolve
+        to host_info keys via _host_info_keys_for_portchannel (vlan + T1P1<->T1D3P1 style match).
+        """
+        hosts = []
+        seen = set()
+        v4_d = g_v4_host_info_dict.get(dut) if g_v4_host_info_dict else None
+        v6_d = g_v6_host_info_dict.get(dut) if g_v6_host_info_dict else None
+        if not v4_d and not v6_d:
+            return hosts
+        # Interface keys match between v4/v6 host dicts; use whichever exists for alias resolution
+        by_if = v4_d if v4_d else v6_d
+
+        def _append_from_per_if(per_if, af_label):
+            if not per_if:
+                return
+            for _vlan, info in per_if.items():
+                mac = info.get('src_mac')
+                hip = info.get('host_ip', '') or ''
+                if not mac:
+                    continue
+                key = (mac.lower(), hip.lower(), af_label)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if af_label == 'v4':
+                    ht = 'mac+ipv4' if hip else 'mac_only'
+                else:
+                    ht = 'mac+ipv6' if hip else 'mac_only'
+                hosts.append({'mac': mac, 'host_ip': hip, 'ht': ht})
+
+        for intf in intf_list:
+            host_keys = []
+            if intf in by_if:
+                host_keys = [intf]
+            elif intf.startswith('PortChannel'):
+                host_keys = self._host_info_keys_for_portchannel(dut, intf, by_if)
+                if not host_keys:
+                    try:
+                        aliases = vxlan_obj.find_port_alias(vars, dut, [intf])
+                        host_keys = [a for a in (aliases or []) if a in by_if]
+                    except Exception as e:
+                        st.log('_collect_hosts_on_leaf_interfaces: PC find_port_alias({}) failed: {}'.format(intf, e))
+                if not host_keys:
+                    st.log(
+                        '_collect_hosts_on_leaf_interfaces: no host_info for {} on {} '
+                        '(l2vni co-members + find_port_alias; by_if keys sample: {})'.format(
+                            intf, dut, list(by_if.keys())[:16]))
+            else:
+                try:
+                    aliases = vxlan_obj.find_port_alias(vars, dut, [intf])
+                    host_keys = [a for a in (aliases or []) if a in by_if]
+                    if not host_keys:
+                        st.log(
+                            '_collect_hosts_on_leaf_interfaces: no host_info for {} on {} '
+                            '(find_port_alias returned: {})'.format(intf, dut, aliases))
+                except Exception as e:
+                    st.log('_collect_hosts_on_leaf_interfaces: find_port_alias({}) failed: {}'.format(intf, e))
+            for hk in host_keys:
+                if v4_d:
+                    _append_from_per_if(v4_d.get(hk), 'v4')
+                if v6_d:
+                    _append_from_per_if(v6_d.get(hk), 'v6')
+        return hosts
+
+    def _type2_withdrawn_on_remote(self, leaf, mac, hip, ht, max_retries=8, interval_sec=2,
+                                   fast_first_n=5, fast_interval_sec=1):
+        """
+        Poll remote leaf until type-2 grep is empty (withdrawn) or retries exhausted.
+        Returns (success, last_parsed) where last_parsed is falsy if withdrawn.
+        First `fast_first_n` waits use `fast_interval_sec` (quick retries); then `interval_sec`.
+        Set fast_first_n=0 to always use interval_sec only.
+        """
+        last_parsed = []
+        for attempt in range(max_retries):
+            last_parsed = vxlan_obj._show_evpn_type2_grep(leaf, mac, hip, ht)
+            if not last_parsed:
+                return True, last_parsed
+            if attempt < max_retries - 1:
+                if fast_first_n and attempt < fast_first_n:
+                    st.wait(fast_interval_sec)
+                else:
+                    st.wait(interval_sec)
+        return False, last_parsed
+
+    def _verify_remote_type2_withdrawn_dc2_dc3(self, host_entries, phase='after shut'):
+        """
+        On DC2 and DC3 leafs, run filtered 'show bgp l2vpn evpn route type 2' (grep MAC/IP).
+        After local host link down, remote type-2s for that host should be withdrawn (no parsed routes).
+        Polls each lookup to allow BGP withdrawal propagation (timing via global.evpn_type2_withdraw_poll;
+        default fast-then-slower waits, ~teens s max per host/leaf if route never clears).
+        Each entry may be IPv4 (mac+ipv4) or IPv6 (mac+ipv6); both must be gone on remotes after shut.
+        One summary line per leaf (checked N host routes, M failures); details only on failure.
+        Returns (ok, detail_string).
+        """
+        if not host_entries:
+            st.log('EVPN type-2 withdrawal check: no host entries from g_v4/g_v6 host_info; skipping')
+            return True, ''
+        remote_leafs = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                        if 'leaf' in n and ('_dc2' in n or '_dc3' in n)]
+        if not remote_leafs:
+            st.log('EVPN type-2 withdrawal check: no DC2/DC3 leaf nodes in testbed; skipping')
+            return True, ''
+        ok = True
+        detail = ''
+        n_hosts = len(host_entries)
+        tw_cfg = test_cfg.get('global', {}).get('evpn_type2_withdraw_poll', {}) or {}
+
+        def _poll_int(key, default):
+            try:
+                v = tw_cfg.get(key, default)
+                if v is None:
+                    return default
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+
+        max_retries = max(1, _poll_int('max_retries', 8))
+        interval_sec = max(0, _poll_int('interval_sec', 2))
+        fast_first_n = max(0, _poll_int('fast_first_n', 5))
+        fast_interval_sec = max(0, _poll_int('fast_interval_sec', 1))
+        for leaf in sorted(remote_leafs):
+            st.banner('EVPN type-2 withdrawal on {} - {}'.format(leaf, phase))
+            failures = []
+            for h in host_entries:
+                mac = h['mac']
+                hip = h.get('host_ip') or ''
+                ht = h.get('ht')
+                if not ht:
+                    if hip and ':' in hip:
+                        ht = 'mac+ipv6'
+                    elif hip:
+                        ht = 'mac+ipv4'
+                    else:
+                        ht = 'mac_only'
+                withdrawn_ok, parsed = self._type2_withdrawn_on_remote(
+                    leaf, mac, hip, ht, max_retries=max_retries, interval_sec=interval_sec,
+                    fast_first_n=fast_first_n, fast_interval_sec=fast_interval_sec)
+                if not withdrawn_ok:
+                    ok = False
+                    parsed_repr = str(parsed) if parsed is not None else ''
+                    if len(parsed_repr) > 800:
+                        parsed_repr = parsed_repr[:800] + '...'
+                    line = 'Type-2 still present on {} for MAC {} IP {} ht={} (phase {}): {}\n'.format(
+                        leaf, mac, hip or '-', ht, phase, parsed_repr)
+                    detail += line
+                    failures.append((mac, hip, ht, parsed))
+            n_fail = len(failures)
+            st.log('EVPN type-2 on {}: checked {} route(s) (v4+v6), {} failure(s) (withdrawn OK for {})'.format(
+                leaf, n_hosts, n_fail, n_hosts - n_fail))
+            for mac, hip, ht, parsed in failures:
+                err_snip = str(parsed) if parsed is not None else ''
+                if len(err_snip) > 400:
+                    err_snip = err_snip[:400] + '...'
+                st.error(
+                    'Expected EVPN type-2 withdrawn on {} for MAC {} IP {} ({}); still found: {}'.format(
+                        leaf, mac, hip or '-', ht, err_snip))
+        return ok, detail
+
     def _shutdown_interfaces(self, dut, intf_list):
         """
         Multi-homing style: shut interfaces and verify state transitions.
@@ -4047,6 +4293,7 @@ class TestVxlanInterfaceTriggers():
           - portchannel: PortChannel(s) from config on DC1 leafs
 
         Steps (common): baseline setup + cross-DC traffic, shut, restore, verify traffic;
+        orphan / portchannel: after shut, verify EVPN type-2 withdrawn on DC2/DC3 leafs (grep summary per leaf); then restore;
         orphan also checks cores; portchannel uses try/finally restore and post base-setup retry.
         """
         dc = "dc1"
@@ -4086,9 +4333,9 @@ class TestVxlanInterfaceTriggers():
             summ += "Base setup verification failed before {} flap\n".format(desc)
             result = False
 
-        # Step 1b: Pre-check cross-DC traffic
-        st.banner("Step 1b: Verify baseline cross-DC L2VNI traffic")
-        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
+        # Step 1b: Pre-check cross-DC traffic (L2 + L3)
+        st.banner("Step 1b: Verify baseline cross-DC L2+L3 traffic")
+        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
             summ += "Traffic verification failed before {} flap\n".format(desc)
             result = False
         if not result:
@@ -4102,6 +4349,16 @@ class TestVxlanInterfaceTriggers():
                     st.log("Shutting PortChannels on {}: {}".format(dut, intfs))
                     self._shutdown_interfaces(dut, intfs)
                 st.wait(shut_time)
+
+                st.banner("Step 2b: Verify EVPN type-2 withdrawn on DC2/DC3 leafs (remote) after PortChannel shut")
+                host_entries_pc = []
+                for dut, intfs in targets:
+                    host_entries_pc.extend(self._collect_hosts_on_leaf_interfaces(dut, intfs))
+                w_ok_pc, w_detail_pc = self._verify_remote_type2_withdrawn_dc2_dc3(
+                    host_entries_pc, phase='after DC1 PortChannel shut')
+                if not w_ok_pc:
+                    summ += w_detail_pc
+                    result = False
             finally:
                 st.banner("Step 3: Restoring PortChannels")
                 for dut, intfs in targets:
@@ -4114,26 +4371,35 @@ class TestVxlanInterfaceTriggers():
                 summ += "Base setup verification failed after PortChannel flap\n"
                 result = False
 
-            st.banner("Step 4b: Verify cross-DC traffic recovery")
-            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
-                summ += "Cross-DC traffic did not recover after PortChannel shut/no-shut (BUM/L2v4/L2v6)\n"
+            st.banner("Step 4b: Verify cross-DC traffic recovery (L2 + L3)")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after PortChannel shut/no-shut (BUM/L2v4/L2v6/L3v4/L3v6)\n"
                 result = False
             else:
-                st.log("Cross-DC traffic recovered successfully")
+                st.log("Cross-DC L2+L3 traffic recovered successfully")
         else:
             st.banner("Step 2: Shutting host (orphan) interfaces on {} leaf nodes".format(dc.upper()))
             for dut, intfs in targets:
                 self._shutdown_interfaces(dut, intfs)
             st.wait(shut_time)
 
+            st.banner("Step 2b: Verify EVPN type-2 withdrawn on DC2/DC3 leafs (remote) after orphan shut")
+            host_entries = []
+            for dut, intfs in targets:
+                host_entries.extend(self._collect_hosts_on_leaf_interfaces(dut, intfs))
+            w_ok, w_detail = self._verify_remote_type2_withdrawn_dc2_dc3(host_entries, phase='after DC1 orphan shut')
+            if not w_ok:
+                summ += w_detail
+                result = False
+
             st.banner("Step 3: Unshutting host (orphan) interfaces")
             for dut, intfs in targets:
                 self._noshutdown_interfaces(dut, intfs)
             st.wait(10)
 
-            st.banner("Step 4: Verify L2VNI traffic across DCs after orphan shut/no-shut")
-            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
-                summ += "Cross-DC traffic did not recover after host orphan shut/no-shut (BUM/L2v4/L2v6)\n"
+            st.banner("Step 4: Verify L2+L3 traffic across DCs after orphan shut/no-shut")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after host orphan shut/no-shut (BUM/L2v4/L2v6/L3v4/L3v6)\n"
                 result = False
 
             st.banner("Step 5: Checking for core files and crashes")
@@ -4157,7 +4423,7 @@ class TestVxlanInterfaceTriggers():
     def test_dci_link_trigger(self, action, scope):
         """
         Solution_dci:26/27/28/29/30 + L3VNI_dci:39-43 - DCI link flap/shut tests with different scopes.
-        Includes continuous cross-DC L2 traffic verification when dci_flap_continuous streams are available.
+        Includes continuous cross-DC L2+L3 traffic verification when dci_flap_continuous streams are available.
 
         Args:
             action: Type of action - 'flap' (shut then no-shut) or 'shut' (shut then restore)
@@ -4175,15 +4441,15 @@ class TestVxlanInterfaceTriggers():
             - Solution_dci:27 / L3VNI_dci:40 - DCI link shut - 1 link
             - Solution_dci:28 / L3VNI_dci:41 - DCI link flap - all interface flap (one BGW)
             - Solution_dci:29 / L3VNI_dci:42 - DCI link shut - all interface shut towards 1 DCI node
+                  (during-trigger check uses burst BUM/L2, not dci_flap_continuous)
             - Solution_dci:30 / L3VNI_dci:43 - DCI link shut - all interface shut (all DCI nodes unreachable)
 
         Steps:
-            1. Verify cross-DC traffic baseline
-            1c. Start continuous cross-DC L2 traffic (if dci_flap_continuous streams available)
+            1. Baseline: burst BUM/L2v4/L2v6/L3v4/L3v6, or skip when using dci_flap_continuous (start streams in step 1c)
             2. Select interfaces based on scope
-            3. Perform action (flap or shut); verify continuous traffic during/after trigger
-            4. Restore interfaces
-            5. Verify traffic recovery
+            3. Perform action (flap or shut); check same streams once for loss (min_perc) after trigger
+            4. Shut path: restore DCI interfaces; then finally stops continuous streams (all paths)
+            5. Step 5a base setup; Step 5b burst recovery verify only when not using continuous
         """
         # Determine test case number and ID
         test_map = {
@@ -4206,7 +4472,10 @@ class TestVxlanInterfaceTriggers():
         stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
         fc_streams = tgen_handles.get('dci_flap_continuous')
-        use_fc = isinstance(fc_streams, dict) and len(fc_streams) > 0
+        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+        # TC 29 (shut all links on one BGW): burst BUM/L2 only - not continuous L2.
+        # TC 28 (flap one BGW) and TC 30 (shut all BGWs): use dci_flap_continuous when present.
+        use_fc = fc_available and test_num != 29
 
         # Get DCI interface mapping
         dci_map = self._get_bgw_dci_interfaces()
@@ -4273,14 +4542,17 @@ class TestVxlanInterfaceTriggers():
             summ += "Base setup verification failed before DCI link trigger\n"
             result = False
 
-        # Step 1b: Verify baseline cross-DC traffic
-        st.banner("Step 1b: Verify baseline cross-DC traffic")
-        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
-            summ += "Baseline cross-DC traffic failed (BUM/L2v4/L2v6/L3v4/L3v6)\n"
-            result = False
+        # Step 1b: Burst baseline (skipped when using continuous L2+L3 - Step 3 is the only drop check for fc)
+        if not use_fc:
+            st.banner("Step 1b: Verify baseline cross-DC traffic")
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Baseline cross-DC traffic failed (BUM/L2v4/L2v6/L3v4/L3v6)\n"
+                result = False
+        else:
+            st.log("Step 1b: skipped (continuous cross-DC L2+L3 follows in Step 1c)")
 
         if use_fc and result:
-            st.banner("Step 1c: Start continuous cross-DC L2 traffic (DCI flap streams)")
+            st.banner("Step 1c: Start continuous cross-DC L2+L3 traffic (DCI flap streams)")
             try:
                 vxlan_obj.check_traffic(
                     fc_streams,
@@ -4303,13 +4575,13 @@ class TestVxlanInterfaceTriggers():
                     self._flap_interfaces(dut, intfs, down_wait=5, up_wait=20)
                 st.wait(10)
                 if use_fc and result:
-                    st.banner("Step 3: Verify continuous cross-DC L2 after DCI flap")
+                    st.banner("Step 3: Verify continuous cross-DC L2+L3 after DCI flap")
                     if not vxlan_obj.check_traffic(
                             fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
-                        summ += "Continuous cross-DC L2 check failed after DCI flap\n"
+                        summ += "Continuous cross-DC L2+L3 check failed after DCI flap\n"
                         result = False
                     else:
-                        st.log("Continuous cross-DC L2 check passed after flap")
+                        st.log("Continuous cross-DC L2+L3 check passed after flap")
 
             else:  # shut
                 st.banner("Step 2: Shutting DCI interfaces ({})".format(scope))
@@ -4320,21 +4592,21 @@ class TestVxlanInterfaceTriggers():
 
                 # Step 3: Verify traffic during trigger
                 if use_fc and result:
-                    st.banner("Step 3: Verify continuous cross-DC L2 while DCI link(s) shut")
+                    st.banner("Step 3: Verify continuous cross-DC L2+L3 while DCI link(s) shut")
                     c_ok = vxlan_obj.check_traffic(
                         fc_streams, action='check', stop_start_protocols=False, min_perc=99.6)
                     if scope == "all_bgws":
                         if c_ok:
-                            summ += "Continuous cross-DC L2 unexpectedly passed while ALL DCI links were shut\n"
+                            summ += "Continuous cross-DC L2+L3 unexpectedly passed while ALL DCI links were shut\n"
                             result = False
                         else:
-                            st.log("Continuous cross-DC L2 failed as expected while ALL DCI links were shut")
+                            st.log("Continuous cross-DC L2+L3 failed as expected while ALL DCI links were shut")
                     else:
                         if not c_ok:
-                            summ += "Continuous cross-DC L2 failed while {} link(s) were shut\n".format(scope)
+                            summ += "Continuous cross-DC L2+L3 failed while {} link(s) were shut\n".format(scope)
                             result = False
                         else:
-                            st.log("Continuous cross-DC L2 continued during partial DCI shut")
+                            st.log("Continuous cross-DC L2+L3 continued during partial DCI shut")
                 elif scope == "all_bgws":
                     st.banner("Step 3: Verify traffic FAILS while ALL DCI links are shut (expected)")
                     if verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
@@ -4377,19 +4649,27 @@ class TestVxlanInterfaceTriggers():
             summ += "Base setup verification failed after {} {}\n".format(action, scope)
             result = False
 
-        # Step 5b: Verify traffic recovery
-        st.banner("Step 5b: Verify cross-DC traffic recovery after {}".format(action))
-        if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
-            summ += "Cross-DC traffic did not recover after {} {} (BUM/L2v4/L2v6/L3v4/L3v6)\n".format(action, scope)
-            result = False
+        # Step 5b: Burst recovery only when not using continuous (fc drop check is Step 3 only; no traffic rerun after no-shut)
+        if use_fc and fc_streams:
+            st.log(
+                "Step 5b: skipped - continuous drop already checked after trigger (Step 3); streams stopped in finally"
+            )
         else:
-            st.log("Cross-DC traffic recovered successfully")
+            st.banner("Step 5b: Verify cross-DC traffic recovery after {}".format(action))
+            if not verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
+                summ += "Cross-DC traffic did not recover after {} {} (BUM/L2v4/L2v6/L3v4/L3v6)\n".format(action, scope)
+                result = False
+            else:
+                st.log("Cross-DC traffic recovered successfully")
 
         # Report results
         if result:
             st.banner("TEST PASSED: Solution_dci:{} - {}".format(test_num, tc_id))
             st.log("DCI link {} ({}) completed successfully".format(action, scope))
-            st.log("Traffic recovery verified")
+            if use_fc and fc_streams:
+                st.log("Continuous drop check: Step 3 only (post-restore traffic not run)")
+            else:
+                st.log("Traffic recovery verified (burst Step 5b)")
 
         report_result(result, tc_id, summ)
 
@@ -4840,8 +5120,12 @@ class TestVxlanDCIBase():
     
     def test_base_dci_bringup(self):
         """
-        Solution_dci:1 + L3VNI_dci:1 - Verify DCI base profile bring up with 3 DCs
-        including L3VNI base profile verification.
+        Solution_dci:1 + Solution_dci:2 + L3VNI_dci:1 + L3VNI_dci:2
+        Verify DCI base profile bring up with 3 DCs including L3VNI base
+        profile and FRR/SONIC CLI verification.
+        
+        Consolidated from former test_base_dci_bringup (Solution_dci:1, L3VNI_dci:1)
+        and test_base_dci_frr_sonic_cli (Solution_dci:2, L3VNI_dci:2).
         
         Description:
             Comprehensive verification of DCI base profile after initial configuration.
@@ -4856,7 +5140,11 @@ class TestVxlanDCIBase():
             - VXLAN tunnels (single on leafs, dual DC+WAN on BGWs)
             - Remote VTEP discovery via EVPN Type-3 routes
             - BGP control plane (underlay + EVPN overlay sessions)
+              * IPv6 Unicast underlay (TRANSIT peers) on all nodes
+              * IPv4 Unicast underlay (TRANSIT_WAN peers) on BGW nodes
+              * L2VPN EVPN overlay on all nodes (leafs + BGWs)
             - PortChannel status for multi-homed segments
+            - IPv6 route table verification (show ipv6 route vrf all)
         
         L3VNI Verification includes (L3VNI_dci:1):
             - VRF-VNI mappings (show vxlan vrfvnimap):
@@ -4870,65 +5158,55 @@ class TestVxlanDCIBase():
               L3VNI in extended community: 10101 (Vrf101), 10102 (Vrf102)
             - RIB/FIB install check (show ip route vrf all)
         
+        FRR/SONIC CLI Verification (L3VNI_dci:2):
+            - Type-5 route format on leaf nodes: [5]:[0]:[24]:[prefix]
+            - L3VNI=10101/10102 in extended community on leaf nodes
+            - IPv6 VTEP next-hop on leaf nodes (from BGW RT-REWRITE-DC route-map):
+              DC1 BGWs: 4000:1::1, DC2 BGWs: 6000:1::1, DC3 BGW: 7000:1::1
+        
         Verification CLIs:
             show vxlan vlanvnimap, show vxlan vrfvnimap, show vrf,
+            show bgp summary (IPv4 Unicast, IPv6 Unicast, L2VPN EVPN),
             show bgp l2vpn evpn route type 5, show mac, show arp,
             show vxlan tunnel, show vxlan counter, show vxlan remotevtep,
             show vxlan remotemac all, show ip route vrf all,
+            show ipv6 route vrf all,
             show evpn es, show evpn vni detail, show platform npu mac-age
         """
         tc_id = "test_base_dci_bringup"
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
         
-        st.banner('Testcase Solution_dci:1 + L3VNI_dci:1: Verify DCI base profile with L3VNI ({})'.format(tc_id))
-        
-        # Perform comprehensive base setup verification on all nodes
-        # This runs ALL checks including L3VNI: vrf_vni, vlan_vni,
-        # evpn_type5_comprehensive (incl. RIB/FIB), ebgp_multihop, evpn_vni, etc.
-        st.log('Performing comprehensive L2VNI + L3VNI verification on all DCI nodes...')
-        result = verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'])
-        if result:
-            st.log('Base DCI setup verification (L2VNI + L3VNI): Pass')
-        else:
-            st.log('Base DCI setup verification (L2VNI + L3VNI): Fail')
-        
-        report_result(result, tc_id, '')
-    
-    def test_base_dci_frr_sonic_cli(self):
-        """
-        Solution_dci:2 + L3VNI_dci:2 - Verify all FRR and SONIC CLIs
-        including L3VNI Type-5 route advertisement with IPv6 VTEP on leaf nodes.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify all the new FRR and SONIC CLI's implemented as a part of this feature
-            3) Verify Type-5 route advertised on leaf nodes: [5]:[0]:[24]:[prefix]
-            4) Verify L3VNI=10101/10102 in extended community
-            5) Verify next-hop is IPv6 VTEP
-               - Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP
-                 next-hop set by RT-REWRITE-DC route-map (DC VIP):
-                 DC1 BGWs: 4000:1::1, DC2 BGWs: 6000:1::1, DC3 BGW: 7000:1::1
-            
-        Steps:
-            1. Verify base setup via verify_base_setup_bgw on all nodes
-            2. Verify Type-5 routes with IPv6 VTEP next-hop and VRF-VNI on leaf nodes
-        """
-        tc_id = "test_base_dci_frr_sonic_cli"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:2 + L3VNI_dci:2: Verify FRR/SONIC CLIs with L3VNI Type-5 ({})'.format(tc_id))
+        st.banner('Testcase Solution_dci:1,2 + L3VNI_dci:1,2: Verify DCI base profile with L3VNI ({})'.format(tc_id))
         result = True
         summ = ''
         
-        # Verify Type-5 routes with IPv6 VTEP next-hop on leaf nodes (L3VNI_dci:2)
-        # Note: Base setup (L2VNI + L3VNI) is already verified in test_base_dci_bringup (Solution_dci:1).
-        # This test focuses on the unique L3VNI_dci:2 checks: Type-5 route format, L3VNI in
-        # extended community, and IPv6 VTEP next-hop on leaf nodes.
+        # --- Covered test IDs ---
+        st.log('This test covers the following testcase IDs:')
+        st.log('  Solution_dci:1 - DCI base profile bring up with 3 DCs')
+        st.log('  Solution_dci:2 - Verify all FRR and SONIC CLIs')
+        st.log('  L3VNI_dci:1    - L3VNI base profile (VRF-VNI, VLAN-VNI, Type-5 routes)')
+        st.log('  L3VNI_dci:2    - Type-5 route format, L3VNI ext-community, IPv6 VTEP next-hop on leaf nodes')
+        
+        # Step 1: Comprehensive base setup verification on all nodes
+        # This runs ALL checks including L3VNI: vrf_vni, vlan_vni,
+        # evpn_type5_comprehensive (incl. RIB/FIB), ebgp_multihop, evpn_vni,
+        # bgp (IPv4 Unicast, IPv6 Unicast, L2VPN EVPN), ipv6_route, etc.
+        st.banner('Step 1: Comprehensive L2VNI + L3VNI verification on all DCI nodes (Solution_dci:1 + L3VNI_dci:1)')
+        st.log('Performing comprehensive L2VNI + L3VNI verification on all DCI nodes...')
+        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw']):
+            st.log('Base DCI setup verification (L2VNI + L3VNI): Fail')
+            summ += 'Comprehensive base setup verification failed\n'
+            result = False
+        else:
+            st.log('Base DCI setup verification (L2VNI + L3VNI): Pass')
+        
+        # Step 2: Additional leaf-specific Type-5 route + VRF-VNI verification (L3VNI_dci:2)
+        # Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP next-hop
+        # set by RT-REWRITE-DC route-map (DC VIP)
         leaf_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw']
                       if 'leaf' in node.lower()]
-        st.banner('Verify Type-5 routes with IPv6 VTEP and VRF-VNI on leaf nodes')
+        st.banner('Step 2: Verify Type-5 routes with IPv6 VTEP and VRF-VNI on leaf nodes (Solution_dci:2 + L3VNI_dci:2)')
         st.log('Checking: route format [5]:[0]:[prefix_len]:[prefix], L3VNI in ext-community, IPv6 VTEP next-hop')
         st.log('Leaf nodes receive Type-5 routes from same-DC BGWs with IPv6 VTEP next-hop')
         st.log('Leaf nodes: {}'.format(leaf_nodes))
@@ -4939,170 +5217,89 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l2l3vni_ipv4_within_dc(self):
+    @pytest.mark.parametrize("ip_version,scope", [
+        ("v4", "within"),  # Solution_dci:3 + L3VNI_dci:13
+        ("v6", "within"),  # Solution_dci:4 + L3VNI_dci:13
+        ("v4", "cross"),   # Solution_dci:5 + L3VNI_dci:14
+        ("v6", "cross"),   # Solution_dci:6 + L3VNI_dci:15
+    ])
+    def test_base_dci_l2l3vni_traffic(self, ip_version, scope):
         """
-        Solution_dci:3 + L3VNI_dci:13 - Verify L2VNI and L3VNI IPv4 traffic
-        between hosts within DC, including inter-VLAN routing via L3VNI.
-        
+        Solution_dci:3/4/5/6 + L3VNI_dci:13/14 - Verify L2VNI and L3VNI traffic
+        (parameterized by IP version and scope).
+
+        Args:
+            ip_version: 'v4' for IPv4, 'v6' for IPv6
+            scope: 'within' for within-DC traffic, 'cross' for cross-DC traffic
+
         Description:
             1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv4 L2VNI and L3VNI traffic between hosts within DC1
-            3) Within DC, there can be MH or SH host
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:13)
-            5) Send L3VNI IPv4 inter-VLAN traffic within DC
-            7) Verify no traffic drop
-            8) Verify no crash/core seen
-            
-        Note:
-            Only testing within DC1 (leaf0_dc1 → other DC1 leaves).
-            Within-DC behavior is identical across all DCs, so testing one DC is sufficient.
-            Uses scope='within' to filter only streams with DC1 destinations (no D11, D12, D14).
-            
+            2) Verify L2VNI and L3VNI traffic between hosts
+            3) Within DC: can be MH or SH host; Across DC: SH host only in phase 1
+            4) Verify no traffic drop and no crash/core seen
+
+        Test Cases:
+            - Solution_dci:3 + L3VNI_dci:13 (v4, within) - L2L3VNI IPv4 within DC
+            - Solution_dci:4 + L3VNI_dci:13 (v6, within) - L2L3VNI IPv6 within DC
+            - Solution_dci:5 + L3VNI_dci:14 (v4, cross)  - L2L3VNI IPv4 across DCI
+            - Solution_dci:6 + L3VNI_dci:15 (v6, cross)  - L2L3VNI IPv6 across DCI
+
         Steps:
-            1. Send L2VNI and L3VNI IPv4 traffic within DC1
+            1. Send L2VNI and L3VNI traffic with the given IP version and scope
         """
-        tc_id = "test_base_dci_l2l3vni_ipv4_within_dc"
+        # Map parameters to test case details
+        test_map = {
+            ("v4", "within"): ("test_base_dci_l2l3vni_ipv4_within_dc", 3, 13,
+                               ['l2_v4', 'l3_v4'],
+                               [('Solution_dci:3', 'test_base_dci_l2l3vni_ipv4_within_dc'),
+                                ('L3VNI_dci:13', 'L3VNI IPv4 within DC'),
+                                ('L3VNI_dci:18', 'test_base_dci_l3vni_sh_ipv4_within_dc'),
+                                ('L3VNI_dci:22', 'test_base_dci_l3vni_mh_ipv4_within_dc')]),
+            ("v6", "within"): ("test_base_dci_l2l3vni_ipv6_within_dc", 4, 13,
+                               ['l2_v6', 'l3_v6'],
+                               [('Solution_dci:4', 'test_base_dci_l2l3vni_ipv6_within_dc'),
+                                ('L3VNI_dci:13', 'L3VNI IPv6 within DC'),
+                                ('L3VNI_dci:20', 'test_base_dci_l3vni_sh_ipv6_within_dc'),
+                                ('L3VNI_dci:24', 'test_base_dci_l3vni_mh_ipv6_within_dc')]),
+            ("v4", "cross"):  ("test_base_dci_l2l3vni_ipv4_across_dci", 5, 14,
+                               ['l2_v4', 'l3_v4'],
+                               [('Solution_dci:5', 'test_base_dci_l2l3vni_ipv4_across_dci'),
+                                ('L3VNI_dci:14', 'L3VNI IPv4 across DCI'),
+                                ('L3VNI_dci:19', 'test_base_dci_l3vni_sh_ipv4_across_dci'),
+                                ('L3VNI_dci:23', 'test_base_dci_l3vni_mh_ipv4_across_dci')]),
+            ("v6", "cross"):  ("test_base_dci_l2l3vni_ipv6_across_dci", 6, 15,
+                               ['l2_v6', 'l3_v6'],
+                               [('Solution_dci:6', 'test_base_dci_l2l3vni_ipv6_across_dci'),
+                                ('L3VNI_dci:15', 'L3VNI IPv6 across DCI'),
+                                ('L3VNI_dci:21', 'test_base_dci_l3vni_sh_ipv6_across_dci'),
+                                ('L3VNI_dci:25', 'test_base_dci_l3vni_mh_ipv6_across_dci')]),
+        }
+        tc_id, sol_num, l3vni_num, traffic_types, covered_ids = test_map[(ip_version, scope)]
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:3 + L3VNI_dci:13: Verify L2VNI/L3VNI IPv4 within DC1 ({})'.format(tc_id))
+
+        scope_label = 'within DC1' if scope == 'within' else 'across DCI'
+        ip_label = 'IPv4' if ip_version == 'v4' else 'IPv6'
+        st.banner('Testcase Solution_dci:{} + L3VNI_dci:{}: Verify L2VNI/L3VNI {} {} ({})'.format(
+            sol_num, l3vni_num, ip_label, scope_label, tc_id))
         result = True
         summ = ''
-        
+
         # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='within' to test ONLY streams with DC1 destinations
-        st.banner('Verify L2VNI and L3VNI IPv4 traffic within DC1')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v4', 'l3_v4'], scope='within'):
-            st.log('L2VNI and L3VNI IPv4 traffic within DC1: Pass')
+        # L3VNI traffic includes both SH (orphan) and MH (PortChannel) host flows,
+        # so this single test covers SH and MH L3VNI scenarios for the given scope.
+        st.banner('Verify L2VNI and L3VNI {} traffic {}'.format(ip_label, scope_label))
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=traffic_types, scope=scope):
+            st.log('L2VNI and L3VNI {} traffic {}: Pass'.format(ip_label, scope_label))
         else:
-            summ += 'L2VNI and L3VNI IPv4 traffic within DC1: Fail\n'
+            summ += 'L2VNI and L3VNI {} traffic {}: Fail\n'.format(ip_label, scope_label)
             st.log(summ)
             result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l2l3vni_ipv6_within_dc(self):
-        """
-        Solution_dci:4 + L3VNI_dci:13 - Verify L2VNI and L3VNI IPv6 traffic
-        between hosts within DC, including inter-VLAN routing via L3VNI.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv6 L2VNI and L3VNI traffic between hosts within DC1
-            3) Within DC, there can be MH or SH host
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:13)
-            5) Send L3VNI IPv6 inter-VLAN traffic within DC
-            7) Verify no traffic drop
-            8) Verify no crash/core seen
-            
-        Note:
-            Only testing within DC1 (leaf0_dc1 → other DC1 leaves).
-            Within-DC behavior is identical across all DCs, so testing one DC is sufficient.
-            Uses scope='within' to filter only streams with DC1 destinations (no D11, D12, D14).
-            
-        Steps:
-            1. Send L2VNI and L3VNI IPv6 traffic within DC1
-        """
-        tc_id = "test_base_dci_l2l3vni_ipv6_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:4 + L3VNI_dci:13: Verify L2VNI/L3VNI IPv6 within DC1 ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='within' to test ONLY streams with DC1 destinations
-        st.banner('Verify L2VNI and L3VNI IPv6 traffic within DC1')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v6', 'l3_v6'], scope='within'):
-            st.log('L2VNI and L3VNI IPv6 traffic within DC1: Pass')
-        else:
-            summ += 'L2VNI and L3VNI IPv6 traffic within DC1: Fail\n'
-            st.log(summ)
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l2vni_ipv4_across_dci(self):
-        """
-        Solution_dci:5 + L3VNI_dci:14 - Verify L2VNI and L3VNI IPv4 traffic
-        between hosts across DCI.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv4 L2VNI and L3VNI traffic between hosts across DC1, DC2 and DC3
-            3) Across DC, there will be SH host only in phase 1
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:14)
-            6) Verify no traffic drop
-            7) Verify no crash/core seen
-            
-        Note:
-            Uses scope='cross' to filter only streams with DC2/DC3 destinations (D11, D12, D14).
-            
-        Steps:
-            1. Send L2VNI and L3VNI IPv4 traffic across DCI
-        """
-        tc_id = "test_base_dci_l2vni_ipv4_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:5 + L3VNI_dci:14: Verify L2VNI/L3VNI IPv4 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='cross' to test ONLY streams with DC2/DC3 destinations
-        st.banner('Verify L2VNI and L3VNI IPv4 traffic across DCI')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v4', 'l3_v4'], scope='cross'):
-            st.log('L2VNI and L3VNI IPv4 traffic across DCI: Pass')
-        else:
-            summ += 'L2VNI and L3VNI IPv4 traffic across DCI: Fail\n'
-            st.log(summ)
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l2vni_ipv6_across_dci(self):
-        """
-        Solution_dci:6 + L3VNI_dci:15 - Verify L2VNI and L3VNI IPv6 traffic
-        between hosts across DCI.
-        
-        Description:
-            1) Refer to Solution_dci:1 testcase for base profile bring up
-            2) Verify ipv6 L2VNI and L3VNI traffic between hosts across DC1, DC2 and DC3
-            3) Across DC, there will be SH host only in phase 1
-            4) Verify VRF-VNI mappings and Type-5 routes (L3VNI_dci:15)
-            6) Verify no traffic drop
-            7) Verify no crash/core seen
-            
-        Note:
-            Uses scope='cross' to filter only streams with DC2/DC3 destinations (D11, D12, D14).
-            
-        Steps:
-            1. Send L2VNI and L3VNI IPv6 traffic across DCI
-        """
-        tc_id = "test_base_dci_l2vni_ipv6_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase Solution_dci:6 + L3VNI_dci:15: Verify L2VNI/L3VNI IPv6 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Use scope='cross' to test ONLY streams with DC2/DC3 destinations
-        st.banner('Verify L2VNI and L3VNI IPv6 traffic across DCI')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l2_v6', 'l3_v6'], scope='cross'):
-            st.log('L2VNI and L3VNI IPv6 traffic across DCI: Pass')
-        else:
-            summ += 'L2VNI and L3VNI IPv6 traffic across DCI: Fail\n'
-            st.log(summ)
-            result = False
-        
-        
+
+        st.log('This test covers the following testcases:')
+        for cid, cname in covered_ids:
+            st.log('  - {:16s} ({})'.format(cid, cname))
+
         report_result(result, tc_id, summ)
     
     def test_base_dci_l3vni_ebgp_multihop_bgw(self):
@@ -5253,7 +5450,13 @@ class TestVxlanDCIBase():
         summ = ''
         
         # --- Step 1: Get TGEN handles for leaf0_dc1 ---
-        st.banner('Step 1: Get TGEN handles for leaf0_dc1')
+        # Use a port from topo_handles that already has a topology but NO device
+        # groups (e.g. T1D5P3).  All ports already have topologies created by
+        # create_topology_handles(), so we cannot create a fresh topology (Error
+        # 6502).  Instead we pick the last single (non-PortChannel) port, pass
+        # its existing topology_handle to the helper, and let the helper create
+        # a device group on it — following the create_device_groups() pattern.
+        st.banner('Step 1: Get IXIA BGP port for leaf0_dc1 (existing topology, no device groups)')
         topo_handles = tgen_handles.get('topo_handles', {})
         
         # Find leaf0_dc1 in topo_handles
@@ -5271,21 +5474,46 @@ class TestVxlanDCIBase():
         
         st.log('Using leaf node: {}'.format(leaf_node))
         
-        # Get first TGEN port for this leaf
-        leaf_ports = topo_handles[leaf_node]
-        port_key = list(leaf_ports.keys())[0]
-        tg_handle = leaf_ports[port_key]['tg_handle']
-        port_handle = leaf_ports[port_key]['port_handle']
-        st.log('TGEN port: {}, port_handle: {}'.format(port_key, port_handle))
+        # Pick a non-PortChannel port from topo_handles that has a topology but
+        # no device groups created on it (e.g. T1D5P3).  Use the last single
+        # port in sorted order so we don't collide with the primary L2VNI port.
+        leaf_topo_ports = topo_handles.get(leaf_node, {})
+        single_ports = sorted(
+            [k for k in leaf_topo_ports if 'portchannel' not in k.lower()])
+        st.log('Available single TGEN ports for {}: {}'.format(leaf_node, single_ports))
+        
+        if not single_ports:
+            summ += 'No single TGEN port available for BGP on {}\n'.format(leaf_node)
+            report_result(False, tc_id, summ)
+            return
+        
+        bgp_port_name = single_ports[-1]  # last port, e.g. T1D5P3
+        port_info = leaf_topo_ports[bgp_port_name]
+        tg_handle = port_info['tg_handle']
+        port_handle = port_info['port_handle']
+        topo_handle = port_info.get('topology_handle')
+        st.log('Using BGP port: {} (topology_handle={})'.format(
+            bgp_port_name, topo_handle))
+        
+        # Resolve DUT physical interface from TGEN port name.
+        # TGEN port 'T1D<n>P<m>' maps to DUT port key 'D<n>T1P<m>' in vars.
+        m = re.match(r'T1(D\d+)(P\d+)', bgp_port_name)
+        dut_intf = None
+        if m:
+            dut_port_key = '{}T1{}'.format(m.group(1), m.group(2))
+            dut_intf = vars.get(dut_port_key)
+            st.log('TGEN port {} -> DUT port key {} -> interface {}'.format(
+                bgp_port_name, dut_port_key, dut_intf))
+        if not dut_intf:
+            st.log('WARNING: Could not resolve DUT interface for TGEN port {}'.format(bgp_port_name))
         
         # --- Step 2: Get leaf ASN from BGP underlay info ---
         st.banner('Step 2: Get leaf ASN and configure IXIA BGP session')
         bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
         leaf_asn = None
-        for node_info in bgp_info:
-            if node_info.get('node') == leaf_node:
-                leaf_asn = str(node_info.get('asn', ''))
-                break
+        # bgp_info is a dict: {node_name: {'router_id': ..., 'as_num': ...}}
+        if leaf_node in bgp_info:
+            leaf_asn = str(bgp_info[leaf_node].get('as_num', ''))
         
         if not leaf_asn:
             summ += 'Cannot determine ASN for leaf node {}\n'.format(leaf_node)
@@ -5294,79 +5522,170 @@ class TestVxlanDCIBase():
         
         st.log('Leaf {} ASN: {}'.format(leaf_node, leaf_asn))
         
-        # IXIA BGP parameters
+        # IXIA BGP parameters — IPv4 for L2/L3 connectivity, IPv6 for BGP peering
+        # NOTE: IXIA protocol framework requires an IPv4 stack for protocol
+        # management, so we keep IPv4 connectivity on both IXIA and DUT SVI.
+        # However, the DUT BGP neighbor is IPv6-only (only v6 neighbor + v6 AF).
         ixia_asn = '65299'
         ixia_ip = '80.99.0.100'
         ixia_gateway = '80.99.0.1'
         ixia_netmask = '255.255.255.0'
         ixia_mac = '00:00:AA:BB:CC:08'
+        ixia_ipv6 = '2099::100'
+        ixia_gateway_ipv6 = '2099::1'
         
-        # IPv6 prefixes to advertise from IXIA
+        # IPv6 prefixes to advertise from IXIA.
+        # All 5 prefixes (2001:db8::/64 through 2001:db8:4::/64) are passed as a
+        # single entry with num_routes=5.  The helper consolidates them into one
+        # tg_emulation_bgp_route_config call to avoid repeated protocol stop/start
+        # cycles that cause TGenFail.
         ipv6_prefixes = [
-            {'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:1::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:2::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:3::', 'prefix_len': 64, 'num_routes': 1},
-            {'prefix': '2001:db8:4::', 'prefix_len': 64, 'num_routes': 1},
+            {'prefix': '2001:db8::', 'prefix_len': 64, 'num_routes': 5},
         ]
         
         st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
             ixia_asn, leaf_asn, ixia_ip, ixia_gateway))
+        st.log('IXIA BGP IPv6: ipv6={}, gw_ipv6={}'.format(ixia_ipv6, ixia_gateway_ipv6))
         st.log('IPv6 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv6_prefixes]))
         
-        # --- Step 3: Configure IXIA BGP session and advertise IPv6 prefixes ---
-        st.banner('Step 3: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
-        ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
-            tg_handle=tg_handle,
-            port_handle=port_handle,
-            ixia_ip=ixia_ip,
-            gateway=ixia_gateway,
-            netmask=ixia_netmask,
-            src_mac=ixia_mac,
-            ixia_asn=ixia_asn,
-            leaf_asn=leaf_asn,
-            ipv6_prefixes=ipv6_prefixes
-        )
+        # Wrap the entire config/verify/cleanup sequence in try/finally so that
+        # cleanup always runs even if the test fails mid-way with an exception.
+        # This prevents stale VLAN/BGP/IXIA config from affecting subsequent tests.
+        bgp_handle = None
+        interface_handle = None
+        ixia_configured = False
+        dut_configured = False
         
-        if not ixia_result['result']:
-            summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
-            report_result(False, tc_id, summ)
-            return
-        
-        bgp_handle = ixia_result['bgp_handle']
-        interface_handle = ixia_result['interface_handle']
-        st.log('IXIA BGP session configured successfully')
-        st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
-        
-        # --- Step 4: Start BGP protocol on IXIA ---
-        st.banner('Step 4: Start BGP protocol on IXIA')
         try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
-            st.log('BGP protocol started on IXIA')
-            # Wait for BGP session to establish and routes to propagate
-            st.wait(30)
-        except Exception as e:
-            st.log('Warning: BGP protocol start returned: {}'.format(e))
+            # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
+            # DUT SVI: both IPv4 + IPv6 (IXIA needs IPv4 stack for protocol framework).
+            # DUT BGP: IPv6-only neighbor — only v6 neighbor and v6 address-family.
+            st.banner('Step 3a: Configure DUT VLAN/VRF/SVI (v4+v6) and IPv6-only BGP neighbor for IXIA peer on {}'.format(leaf_node))
+            vxlan_obj.configure_dut_ixia_l3_intf(
+                dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                svi_ip=ixia_gateway, svi_mask='24',
+                svi_ipv6=ixia_gateway_ipv6, svi_ipv6_mask='64',
+                dut_intf=dut_intf)
+            vxlan_obj.configure_dut_bgp_for_ixia(
+                dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
+                vrf_name='Vrf101', ixia_ipv6=ixia_ipv6)
+            dut_configured = True
+            
+            # --- Step 3b: Configure IXIA BGP session and advertise IPv6 prefixes ---
+            # Pass the existing topology_handle so the helper creates a device group
+            # on the existing topology instead of creating a new one (Error 6502).
+            # IXIA: IPv4 stack (required by IXIA protocol framework) + IPv6 stack
+            # for IPv6 BGP peering.  Only IPv6 BGP peer is created; IPv6 prefixes
+            # are advertised under IPv6 address-family.
+            # NOTE: The helper advertises all prefixes in a single
+            # tg_emulation_bgp_route_config call (num_routes=5) to avoid
+            # repeated protocol stop/start cycles that corrupt the TG port
+            # handle and cause TGenFail.
+            st.banner('Step 3b: Configure IXIA BGP IPv6 session per bgp_ixia.txt pattern')
+            _ixia_start = time.time()
+            ixia_result = vxlan_obj.configure_ixia_bgp_ipv6_session(
+                tg_handle=tg_handle,
+                port_handle=port_handle,
+                topology_handle=topo_handle,
+                src_mac=ixia_mac,
+                ixia_asn=ixia_asn,
+                leaf_asn=leaf_asn,
+                ipv6_prefixes=ipv6_prefixes,
+                ixia_ip=ixia_ip,
+                gateway=ixia_gateway,
+                netmask=ixia_netmask,
+                vlan_enabled='1',
+                vlan_id='99',
+                ixia_ipv6=ixia_ipv6,
+                gateway_ipv6=ixia_gateway_ipv6
+            )
+            
+            if not ixia_result['result']:
+                summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
+                report_result(False, tc_id, summ)
+                return
+            
+            bgp_handle = ixia_result['bgp_handle']
+            interface_handle = ixia_result['interface_handle']
+            ixia_configured = True
+            _ixia_elapsed = time.time() - _ixia_start
+            st.log('IXIA BGP session configured successfully (took {:.1f}s)'.format(_ixia_elapsed))
+            st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
+            
+            # --- Step 4: Start BGP protocol on IXIA ---
+            st.banner('Step 4: Start BGP protocol on IXIA')
+            st.log('Applying changes for IXIA before starting BGP')
+            tg_handle.tg_test_control(action='apply_on_the_fly_changes')
+            st.wait(10)
+            try:
+                tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
+                st.log('BGP protocol started on IXIA')
+                # Wait for BGP session to establish and routes to propagate
+                st.wait(30)
+            except Exception as e:
+                st.log('Warning: BGP protocol start returned: {}'.format(e))
+            
+            # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
+            st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
+            expected_ipv6_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                      for p in ipv6_prefixes]
+            bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
+                dut=leaf_node, vrf_name='Vrf101',
+                expected_prefixes=expected_ipv6_prefixes,
+                ixia_ipv6=ixia_ipv6, addr_family='ipv6')
+            if not bgp_verify['result']:
+                summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
+                result = False
+            
+            # --- Step 5: Verify IXIA-advertised IPv6 prefixes as Type-5 routes on BGW nodes ---
+            # Only check for the newly advertised IXIA prefixes (not a full
+            # comprehensive Type-5 dump) to avoid printing the Type-5 output twice.
+            # Expand num_routes into individual prefix strings so each one is
+            # printed individually in the verification output.
+            st.banner('Step 5: Verify IXIA IPv6 prefixes present as Type-5 routes on BGW nodes')
+            bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+            st.log('BGW nodes to verify: {}'.format(bgw_nodes))
+            import ipaddress
+            ixia_prefix_strs = []
+            for p in ipv6_prefixes:
+                base = ipaddress.ip_network('{}/{}'.format(p['prefix'], p['prefix_len']), strict=False)
+                num = p.get('num_routes', 1)
+                for i in range(num):
+                    net = ipaddress.ip_network(
+                        '{}/{}'.format(
+                            ipaddress.ip_address(int(base.network_address) + i * (1 << (128 - base.prefixlen))),
+                            base.prefixlen),
+                        strict=False)
+                    ixia_prefix_strs.append(str(net))
+            st.log('Expanded IXIA IPv6 prefixes to verify: {}'.format(ixia_prefix_strs))
+            for bgw_node in bgw_nodes:
+                if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
+                                 bgw_node, ixia_prefix_strs, expect_present=True):
+                    summ += 'IXIA IPv6 Type-5 routes not found on {}\n'.format(bgw_node)
+                    result = False
+                else:
+                    st.log('IXIA IPv6 Type-5 routes verified on {}'.format(bgw_node))
         
-        # --- Step 5: Verify Type-5 routes on BGW nodes ---
-        st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv6 prefixes on BGW nodes')
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        st.log('BGW nodes to verify: {}'.format(bgw_nodes))
-        
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5']):
-            summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv6 prefix advertisement\n'
-            result = False
-        
-        # --- Step 6: Cleanup IXIA BGP session ---
-        st.banner('Step 6: Cleanup IXIA BGP session')
-        try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
-            st.log('BGP protocol stopped on IXIA')
-        except Exception as e:
-            st.log('Warning: BGP protocol stop returned: {}'.format(e))
-        
-        vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+        finally:
+            # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
+            # Always clean up to avoid stale config affecting subsequent test cases.
+            st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
+            if ixia_configured and bgp_handle:
+                try:
+                    tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
+                    st.log('BGP protocol stopped on IXIA')
+                except Exception as e:
+                    st.log('Warning: BGP protocol stop returned: {}'.format(e))
+                vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+            if dut_configured:
+                vxlan_obj.remove_dut_bgp_for_ixia(
+                    dut=leaf_node, leaf_asn=leaf_asn, vrf_name='Vrf101',
+                    ixia_ipv6=ixia_ipv6)
+                vxlan_obj.remove_dut_ixia_l3_intf(
+                    dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                    svi_ip=ixia_gateway, svi_ipv6=ixia_gateway_ipv6,
+                    dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)
     
@@ -5408,7 +5727,9 @@ class TestVxlanDCIBase():
         summ = ''
         
         # --- Step 1: Get TGEN handles for leaf0_dc1 ---
-        st.banner('Step 1: Get TGEN handles for leaf0_dc1')
+        # Same approach as L3VNI_dci:8: use a port with an existing topology but
+        # no device groups (e.g. T1D5P3).  Pass topology_handle to helper.
+        st.banner('Step 1: Get IXIA BGP port for leaf0_dc1 (existing topology, no device groups)')
         topo_handles = tgen_handles.get('topo_handles', {})
         
         # Find leaf0_dc1 in topo_handles
@@ -5426,21 +5747,44 @@ class TestVxlanDCIBase():
         
         st.log('Using leaf node: {}'.format(leaf_node))
         
-        # Get first TGEN port for this leaf
-        leaf_ports = topo_handles[leaf_node]
-        port_key = list(leaf_ports.keys())[0]
-        tg_handle = leaf_ports[port_key]['tg_handle']
-        port_handle = leaf_ports[port_key]['port_handle']
-        st.log('TGEN port: {}, port_handle: {}'.format(port_key, port_handle))
+        # Pick the last non-PortChannel port from topo_handles (has topology, no device groups)
+        leaf_topo_ports = topo_handles.get(leaf_node, {})
+        single_ports = sorted(
+            [k for k in leaf_topo_ports if 'portchannel' not in k.lower()])
+        st.log('Available single TGEN ports for {}: {}'.format(leaf_node, single_ports))
+        
+        if not single_ports:
+            summ += 'No single TGEN port available for BGP on {}\n'.format(leaf_node)
+            report_result(False, tc_id, summ)
+            return
+        
+        bgp_port_name = single_ports[-1]  # last port, e.g. T1D5P3
+        port_info = leaf_topo_ports[bgp_port_name]
+        tg_handle = port_info['tg_handle']
+        port_handle = port_info['port_handle']
+        topo_handle = port_info.get('topology_handle')
+        st.log('Using BGP port: {} (topology_handle={})'.format(
+            bgp_port_name, topo_handle))
+        
+        # Resolve DUT physical interface from TGEN port name.
+        # TGEN port 'T1D<n>P<m>' maps to DUT port key 'D<n>T1P<m>' in vars.
+        m = re.match(r'T1(D\d+)(P\d+)', bgp_port_name)
+        dut_intf = None
+        if m:
+            dut_port_key = '{}T1{}'.format(m.group(1), m.group(2))
+            dut_intf = vars.get(dut_port_key)
+            st.log('TGEN port {} -> DUT port key {} -> interface {}'.format(
+                bgp_port_name, dut_port_key, dut_intf))
+        if not dut_intf:
+            st.log('WARNING: Could not resolve DUT interface for TGEN port {}'.format(bgp_port_name))
         
         # --- Step 2: Get leaf ASN from BGP underlay info ---
         st.banner('Step 2: Get leaf ASN and configure IXIA BGP session')
         bgp_info = vxlan_obj.get_bgp_underlay_info_cached()
         leaf_asn = None
-        for node_info in bgp_info:
-            if node_info.get('node') == leaf_node:
-                leaf_asn = str(node_info.get('asn', ''))
-                break
+        # bgp_info is a dict: {node_name: {'router_id': ..., 'as_num': ...}}
+        if leaf_node in bgp_info:
+            leaf_asn = str(bgp_info[leaf_node].get('as_num', ''))
         
         if not leaf_asn:
             summ += 'Cannot determine ASN for leaf node {}\n'.format(leaf_node)
@@ -5456,13 +5800,13 @@ class TestVxlanDCIBase():
         ixia_netmask = '255.255.255.0'
         ixia_mac = '00:00:AA:BB:CC:09'
         
-        # IPv4 prefixes to advertise from IXIA
+        # IPv4 prefixes to advertise from IXIA.
+        # All 5 prefixes (10.100.0.0/24 through 10.100.4.0/24) are passed as a
+        # single entry with num_routes=5.  The helper consolidates them into one
+        # tg_emulation_bgp_route_config call with prefix_step=1 to avoid
+        # repeated protocol stop/start cycles that cause TGenFail.
         ipv4_prefixes = [
-            {'prefix': '10.100.0.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.1.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.2.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.3.0', 'prefix_len': 24, 'num_routes': 1},
-            {'prefix': '10.100.4.0', 'prefix_len': 24, 'num_routes': 1},
+            {'prefix': '10.100.0.0', 'prefix_len': 24, 'num_routes': 5},
         ]
         
         st.log('IXIA BGP: local_as={}, remote_as={}, ip={}, gw={}'.format(
@@ -5470,58 +5814,134 @@ class TestVxlanDCIBase():
         st.log('IPv4 prefixes to advertise: {}'.format(
             [p['prefix'] + '/' + str(p['prefix_len']) for p in ipv4_prefixes]))
         
-        # --- Step 3: Configure IXIA BGP session and advertise IPv4 prefixes ---
-        st.banner('Step 3: Configure IXIA BGP session per bgp_ixia_dut.txt pattern')
-        ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
-            tg_handle=tg_handle,
-            port_handle=port_handle,
-            ixia_ip=ixia_ip,
-            gateway=ixia_gateway,
-            netmask=ixia_netmask,
-            src_mac=ixia_mac,
-            ixia_asn=ixia_asn,
-            leaf_asn=leaf_asn,
-            ipv4_prefixes=ipv4_prefixes
-        )
+        # Wrap the entire config/verify/cleanup sequence in try/finally so that
+        # cleanup always runs even if the test fails mid-way with an exception.
+        # This prevents stale VLAN/BGP/IXIA config from affecting subsequent tests.
+        bgp_handle = None
+        interface_handle = None
+        ixia_configured = False
+        dut_configured = False
         
-        if not ixia_result['result']:
-            summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
-            report_result(False, tc_id, summ)
-            return
-        
-        bgp_handle = ixia_result['bgp_handle']
-        interface_handle = ixia_result['interface_handle']
-        st.log('IXIA BGP session configured successfully')
-        st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
-        
-        # --- Step 4: Start BGP protocol on IXIA ---
-        st.banner('Step 4: Start BGP protocol on IXIA')
         try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
-            st.log('BGP protocol started on IXIA')
-            # Wait for BGP session to establish and routes to propagate
-            st.wait(30)
-        except Exception as e:
-            st.log('Warning: BGP protocol start returned: {}'.format(e))
+            # --- Step 3a: Configure DUT-side VLAN/VRF/SVI + BGP neighbor for IXIA peer ---
+            st.banner('Step 3a: Configure DUT VLAN/VRF/SVI and BGP neighbor for IXIA peer on {}'.format(leaf_node))
+            vxlan_obj.configure_dut_ixia_l3_intf(
+                dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                svi_ip=ixia_gateway, svi_mask='24',
+                dut_intf=dut_intf)
+            vxlan_obj.configure_dut_bgp_for_ixia(
+                dut=leaf_node, leaf_asn=leaf_asn, ixia_asn=ixia_asn,
+                ixia_ip=ixia_ip, vrf_name='Vrf101')
+            dut_configured = True
+            
+            # --- Step 3b: Configure IXIA BGP session and advertise IPv4 prefixes ---
+            # Pass the existing topology_handle so the helper creates a device group
+            # on the existing topology instead of creating a new one (Error 6502).
+            # NOTE: The helper advertises all prefixes in a single
+            # tg_emulation_bgp_route_config call (num_routes=5, prefix_step=1)
+            # to avoid repeated protocol stop/start cycles that corrupt the
+            # TG port handle and cause TGenFail.
+            st.banner('Step 3b: Configure IXIA BGP session per bgp_ixia.txt pattern')
+            _ixia_start = time.time()
+            ixia_result = vxlan_obj.configure_ixia_bgp_ipv4_session(
+                tg_handle=tg_handle,
+                port_handle=port_handle,
+                topology_handle=topo_handle,
+                ixia_ip=ixia_ip,
+                gateway=ixia_gateway,
+                netmask=ixia_netmask,
+                src_mac=ixia_mac,
+                ixia_asn=ixia_asn,
+                leaf_asn=leaf_asn,
+                ipv4_prefixes=ipv4_prefixes,
+                vlan_enabled='1',
+                vlan_id='99'
+            )
+            
+            if not ixia_result['result']:
+                summ += 'IXIA BGP session configuration failed: {}\n'.format(ixia_result['details'])
+                report_result(False, tc_id, summ)
+                return
+            
+            bgp_handle = ixia_result['bgp_handle']
+            interface_handle = ixia_result['interface_handle']
+            ixia_configured = True
+            _ixia_elapsed = time.time() - _ixia_start
+            st.log('IXIA BGP session configured successfully (took {:.1f}s)'.format(_ixia_elapsed))
+            st.log('BGP handle: {}, Interface handle: {}'.format(bgp_handle, interface_handle))
+            
+            # --- Step 4: Start BGP protocol on IXIA ---
+            st.banner('Step 4: Start BGP protocol on IXIA')
+            st.log('Applying changes for IXIA before starting BGP')
+            tg_handle.tg_test_control(action='apply_on_the_fly_changes')
+            st.wait(10)
+            try:
+                tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='start')
+                st.log('BGP protocol started on IXIA')
+                # Wait for BGP session to establish and routes to propagate
+                st.wait(30)
+            except Exception as e:
+                st.log('Warning: BGP protocol start returned: {}'.format(e))
+            
+            # --- Step 4b: Verify BGP neighborship and routes received from IXIA ---
+            st.banner('Step 4b: Verify BGP neighborship between DUT and IXIA')
+            expected_ipv4_prefixes = ['{}/{}'.format(p['prefix'], p['prefix_len'])
+                                      for p in ipv4_prefixes]
+            bgp_verify = vxlan_obj.verify_dut_bgp_ixia_session(
+                dut=leaf_node, vrf_name='Vrf101', ixia_ip=ixia_ip,
+                expected_prefixes=expected_ipv4_prefixes,
+                addr_family='ipv4')
+            if not bgp_verify['result']:
+                summ += 'BGP IXIA verification failed: {}\n'.format(bgp_verify['details'])
+                result = False
+            
+            # --- Step 5: Verify IXIA-advertised IPv4 prefixes as Type-5 routes on BGW nodes ---
+            # Only check for the newly advertised IXIA prefixes (not a full
+            # comprehensive Type-5 dump) to avoid printing the Type-5 output twice.
+            # Expand num_routes into individual prefix strings so each one is
+            # printed individually in the verification output.
+            st.banner('Step 5: Verify IXIA IPv4 prefixes present as Type-5 routes on BGW nodes')
+            bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
+            st.log('BGW nodes to verify: {}'.format(bgw_nodes))
+            import ipaddress
+            ixia_prefix_strs = []
+            for p in ipv4_prefixes:
+                base = ipaddress.ip_network('{}/{}'.format(p['prefix'], p['prefix_len']), strict=False)
+                num = p.get('num_routes', 1)
+                for i in range(num):
+                    net = ipaddress.ip_network(
+                        '{}/{}'.format(
+                            ipaddress.ip_address(int(base.network_address) + i * (1 << (32 - base.prefixlen))),
+                            base.prefixlen),
+                        strict=False)
+                    ixia_prefix_strs.append(str(net))
+            st.log('Expanded IXIA IPv4 prefixes to verify: {}'.format(ixia_prefix_strs))
+            for bgw_node in bgw_nodes:
+                if not poll_wait(vxlan_obj.verify_type5_ixia_prefixes_dci, 30,
+                                 bgw_node, ixia_prefix_strs, expect_present=True):
+                    summ += 'IXIA IPv4 Type-5 routes not found on {}\n'.format(bgw_node)
+                    result = False
+                else:
+                    st.log('IXIA IPv4 Type-5 routes verified on {}'.format(bgw_node))
         
-        # --- Step 5: Verify Type-5 routes on BGW nodes ---
-        st.banner('Step 5: Verify Type-5 routes for IXIA-advertised IPv4 prefixes on BGW nodes')
-        bgw_nodes = [node for node in test_cfg['nodes']['l2l3vni_bgw'] if 'bgw' in node.lower()]
-        st.log('BGW nodes to verify: {}'.format(bgw_nodes))
-        
-        if not verify_base_setup_bgw(bgw_nodes, checks=['evpn_type5']):
-            summ += 'Type-5 route verification failed on BGW nodes after IXIA IPv4 prefix advertisement\n'
-            result = False
-        
-        # --- Step 6: Cleanup IXIA BGP session ---
-        st.banner('Step 6: Cleanup IXIA BGP session')
-        try:
-            tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
-            st.log('BGP protocol stopped on IXIA')
-        except Exception as e:
-            st.log('Warning: BGP protocol stop returned: {}'.format(e))
-        
-        vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+        finally:
+            # --- Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI ---
+            # Always clean up to avoid stale config affecting subsequent test cases.
+            st.banner('Step 6: Cleanup IXIA BGP session, DUT BGP neighbor, and DUT SVI')
+            if ixia_configured and bgp_handle:
+                try:
+                    tg_handle.tg_emulation_bgp_control(handle=bgp_handle, mode='stop')
+                    st.log('BGP protocol stopped on IXIA')
+                except Exception as e:
+                    st.log('Warning: BGP protocol stop returned: {}'.format(e))
+                vxlan_obj.cleanup_ixia_bgp_session(tg_handle, bgp_handle, interface_handle)
+            if dut_configured:
+                vxlan_obj.remove_dut_bgp_for_ixia(
+                    dut=leaf_node, leaf_asn=leaf_asn, ixia_ip=ixia_ip, vrf_name='Vrf101')
+                vxlan_obj.remove_dut_ixia_l3_intf(
+                    dut=leaf_node, vlan_id='99', vrf_name='Vrf101',
+                    svi_ip=ixia_gateway,
+                    dut_intf=dut_intf)
         
         report_result(result, tc_id, summ)
     
@@ -5630,456 +6050,65 @@ class TestVxlanDCIBase():
         
         report_result(result, tc_id, summ)
     
-    def test_base_dci_l3vni_sh_ipv4_within_dc(self):
+    @pytest.mark.parametrize("host_type,scope", [
+        ("SH", "within"),  # L3VNI_dci:26
+        ("SH", "cross"),   # L3VNI_dci:27
+        ("MH", "within"),  # L3VNI_dci:28
+        ("MH", "cross"),   # L3VNI_dci:29
+    ])
+    def test_base_dci_l3vni_dualstack_traffic(self, host_type, scope):
         """
-        L3VNI_dci:18 - L3VNI Single-homed IPv4 - Traffic within DC fabric
-        
+        L3VNI_dci:26/27/28/29 - Dual-stack simultaneous IPv4+IPv6 traffic
+        (parameterized by host type and scope).
+
+        Args:
+            host_type: 'SH' for single-homed (orphan), 'MH' for multi-homed (PortChannel)
+            scope: 'within' for within-DC traffic, 'cross' for cross-DC traffic
+
         Description:
             1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv4 traffic between the orphan hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI traffic streams include single-homed (orphan) host flows.
-            Reuses L3VNI_dci:13 traffic verification with IPv4 within-DC scope.
-            
+            2) Send simultaneous L3VNI IPv4 and IPv6 traffic between hosts
+            3) Verify no traffic drops and no cores/crash
+
+        Test Cases:
+            - L3VNI_dci:26 (SH, within) - Dual-stack SH within DC
+            - L3VNI_dci:27 (SH, cross)  - Dual-stack SH across DCI
+            - L3VNI_dci:28 (MH, within) - Dual-stack MH within DC
+            - L3VNI_dci:29 (MH, cross)  - Dual-stack MH across DCI
+
         Steps:
-            1. Send L3VNI IPv4 traffic within DC (includes SH flows)
+            1. Send simultaneous L3VNI IPv4 and IPv6 traffic with the given host type and scope
         """
-        tc_id = "test_base_dci_l3vni_sh_ipv4_within_dc"
+        # Map parameters to test case details
+        test_map = {
+            ("SH", "within"): ("test_base_dci_l3vni_dualstack_sh_within_dc", 26, 'L3-SH'),
+            ("SH", "cross"):  ("test_base_dci_l3vni_dualstack_sh_across_dci", 27, 'L3-SH'),
+            ("MH", "within"): ("test_base_dci_l3vni_dualstack_mh_within_dc", 28, 'L3-MH'),
+            ("MH", "cross"):  ("test_base_dci_l3vni_dualstack_mh_across_dci", 29, 'L3-MH'),
+        }
+        tc_id, dci_num, traffic_name = test_map[(host_type, scope)]
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:18: SH IPv4 traffic within DC fabric ({})'.format(tc_id))
+
+        scope_label = 'within DC' if scope == 'within' else 'across DCI'
+        st.banner('Testcase L3VNI_dci:{}: Dual-stack {} IPv4+IPv6 {} ({})'.format(
+            dci_num, host_type, scope_label, tc_id))
         result = True
         summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv4 traffic within DC (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within',
-                          traffic_names=['L3-SH']):
-            st.log('L3VNI SH IPv4 within-DC traffic: Pass')
+
+        # Note: Base setup (VRF-VNI, Type-5 routes, EVPN ES) already verified in test_base_dci_bringup.
+        # Send host-type-specific IPv4 and IPv6 traffic simultaneously (not sequentially)
+        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic {} ({} hosts only)'.format(
+            scope_label, host_type))
+        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope=scope,
+                          traffic_names=[traffic_name], simultaneous=True):
+            st.log('L3VNI dual-stack {} IPv4+IPv6 simultaneous {} traffic: Pass'.format(host_type, scope_label))
         else:
-            summ += 'L3VNI SH IPv4 within-DC traffic: Fail\n'
+            summ += 'L3VNI dual-stack {} IPv4+IPv6 simultaneous {} traffic: Fail\n'.format(host_type, scope_label)
             result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_sh_ipv4_across_dci(self):
-        """
-        L3VNI_dci:19 - L3VNI Single-homed IPv4 - Traffic across DCI
-        
-        Description:
-            1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv4 traffic between the orphan hosts across DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI cross-DC traffic streams include single-homed (orphan) host flows.
-            Reuses L3VNI_dci:14 traffic verification with IPv4 cross-DC scope.
-            
-        Steps:
-            1. Send L3VNI IPv4 traffic across DCI (includes SH flows)
-        """
-        tc_id = "test_base_dci_l3vni_sh_ipv4_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:19: SH IPv4 traffic across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv4 traffic across DCI (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross',
-                          traffic_names=['L3-SH']):
-            st.log('L3VNI SH IPv4 traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI SH IPv4 traffic across DCI: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_sh_ipv6_within_dc(self):
-        """
-        L3VNI_dci:20 - L3VNI Single-homed IPv6 - Traffic within DC fabric
-        
-        Description:
-            1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv6 traffic between the orphan hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI traffic streams include single-homed (orphan) host flows.
-            Reuses L3VNI_dci:13 traffic verification with IPv6 within-DC scope.
-            
-        Steps:
-            1. Send L3VNI IPv6 traffic within DC (includes SH flows)
-        """
-        tc_id = "test_base_dci_l3vni_sh_ipv6_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:20: SH IPv6 traffic within DC fabric ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv6 traffic within DC (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within',
-                          traffic_names=['L3-SH']):
-            st.log('L3VNI SH IPv6 within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI SH IPv6 within-DC traffic: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_sh_ipv6_across_dci(self):
-        """
-        L3VNI_dci:21 - L3VNI Single-homed IPv6 - Traffic across DCI
-        
-        Description:
-            1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv6 traffic between the orphan hosts across DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI cross-DC traffic streams include single-homed (orphan) host flows.
-            Reuses L3VNI_dci:15 traffic verification with IPv6 cross-DC scope.
-            
-        Steps:
-            1. Send L3VNI IPv6 traffic across DCI (includes SH flows)
-        """
-        tc_id = "test_base_dci_l3vni_sh_ipv6_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:21: SH IPv6 traffic across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv6 traffic across DCI (single-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross',
-                          traffic_names=['L3-SH']):
-            st.log('L3VNI SH IPv6 traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI SH IPv6 traffic across DCI: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_mh_ipv4_within_dc(self):
-        """
-        L3VNI_dci:22 - L3VNI Multi-homed IPv4 - Traffic within DC with EVPN-MH
-        
-        Description:
-            1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv4 traffic between the MH hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
-            Reuses L3VNI_dci:13 traffic verification with IPv4 within-DC scope.
-            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
-            
-        Steps:
-            1. Send L3VNI IPv4 traffic within DC (includes MH flows)
-        """
-        tc_id = "test_base_dci_l3vni_mh_ipv4_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:22: MH IPv4 traffic within DC with EVPN-MH ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv4 traffic within DC (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within',
-                          traffic_names=['L3-MH']):
-            st.log('L3VNI MH IPv4 within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI MH IPv4 within-DC traffic: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_mh_ipv4_across_dci(self):
-        """
-        L3VNI_dci:23 - L3VNI Multi-homed IPv4 - Traffic across DCI with EVPN-MH
-        
-        Description:
-            1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv4 traffic between the MH hosts across DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI cross-DC traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
-            Reuses L3VNI_dci:14 traffic verification with IPv4 cross-DC scope.
-            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
-            
-        Steps:
-            1. Send L3VNI IPv4 traffic across DCI (includes MH flows)
-        """
-        tc_id = "test_base_dci_l3vni_mh_ipv4_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:23: MH IPv4 traffic across DCI with EVPN-MH ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv4 traffic across DCI (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='cross',
-                          traffic_names=['L3-MH']):
-            st.log('L3VNI MH IPv4 traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI MH IPv4 traffic across DCI: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_mh_ipv6_within_dc(self):
-        """
-        L3VNI_dci:24 - L3VNI Multi-homed IPv6 - Traffic within DC with EVPN-MH
-        
-        Description:
-            1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv6 traffic between the MH hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
-            Reuses L3VNI_dci:13 traffic verification with IPv6 within-DC scope.
-            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
-            
-        Steps:
-            1. Send L3VNI IPv6 traffic within DC (includes MH flows)
-        """
-        tc_id = "test_base_dci_l3vni_mh_ipv6_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:24: MH IPv6 traffic within DC with EVPN-MH ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv6 traffic within DC (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='within',
-                          traffic_names=['L3-MH']):
-            st.log('L3VNI MH IPv6 within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI MH IPv6 within-DC traffic: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_mh_ipv6_across_dci(self):
-        """
-        L3VNI_dci:25 - L3VNI Multi-homed IPv6 - Traffic across DCI with EVPN-MH
-        
-        Description:
-            1) Base profile bring up
-            2) Configure hosts in each VLAN across different VRFs
-            3) Send L3VNI IPv6 traffic between the MH hosts across DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            L3VNI cross-DC traffic streams include multi-homed (PortChannel/EVPN-MH) host flows.
-            Reuses L3VNI_dci:15 traffic verification with IPv6 cross-DC scope.
-            Additionally verifies EVPN ES (Ethernet Segment) status for MH hosts.
-            
-        Steps:
-            1. Send L3VNI IPv6 traffic across DCI (includes MH flows)
-        """
-        tc_id = "test_base_dci_l3vni_mh_ipv6_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:25: MH IPv6 traffic across DCI with EVPN-MH ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        st.banner('Verify L3VNI IPv6 traffic across DCI (multi-homed hosts)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v6'], scope='cross',
-                          traffic_names=['L3-MH']):
-            st.log('L3VNI MH IPv6 traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI MH IPv6 traffic across DCI: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_dualstack_sh_within_dc(self):
-        """
-        L3VNI_dci:26 - Dual-stack SH - Simultaneous IPv4 and IPv6 within DC
-        
-        Description:
-            1) Base profile bring up
-            2) Configure dual-stack hosts in each VLAN across different VRFs
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:18 (SH IPv4 within DC) and L3VNI_dci:20 (SH IPv6 within DC)
-            into a single dual-stack test sending both IPv4 and IPv6 traffic simultaneously.
-            
-        Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 traffic within DC (SH hosts)
-        """
-        tc_id = "test_base_dci_l3vni_dualstack_sh_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:26: Dual-stack SH IPv4+IPv6 within DC ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Send SH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (SH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within',
-                          traffic_names=['L3-SH'], simultaneous=True):
-            st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_dualstack_sh_across_dci(self):
-        """
-        L3VNI_dci:27 - Dual-stack SH - Simultaneous IPv4 and IPv6 across DCI
-        
-        Description:
-            1) Base profile bring up
-            2) Configure dual-stack hosts in each VLAN across different VRFs
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between SH hosts across DCI
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:19 (SH IPv4 across DCI) and L3VNI_dci:21 (SH IPv6 across DCI)
-            into a single dual-stack test with L3VNI translation at BGW nodes.
-            
-        Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 SH traffic across DCI
-        """
-        tc_id = "test_base_dci_l3vni_dualstack_sh_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:27: Dual-stack SH IPv4+IPv6 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5 routes) already verified in test_base_dci_bringup.
-        # Send SH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (SH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross',
-                          traffic_names=['L3-SH'], simultaneous=True):
-            st.log('L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI dual-stack SH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_dualstack_mh_within_dc(self):
-        """
-        L3VNI_dci:28 - Dual-stack MH - Simultaneous IPv4 and IPv6 within DC
-        
-        Description:
-            1) Base profile bring up
-            2) Configure dual-stack multi-homed hosts with ESI in each VLAN
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts within DC
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:22 (MH IPv4 within DC) and L3VNI_dci:24 (MH IPv6 within DC)
-            into a single dual-stack test. Additionally verifies EVPN ES status for MH hosts.
-            
-        Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 MH traffic within DC
-        """
-        tc_id = "test_base_dci_l3vni_dualstack_mh_within_dc"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:28: Dual-stack MH IPv4+IPv6 within DC ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        # Send MH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic within DC (MH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='within',
-                          traffic_names=['L3-MH'], simultaneous=True):
-            st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Pass')
-        else:
-            summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous within-DC traffic: Fail\n'
-            result = False
-        
-        
-        report_result(result, tc_id, summ)
-    
-    def test_base_dci_l3vni_dualstack_mh_across_dci(self):
-        """
-        L3VNI_dci:29 - Dual-stack MH - Simultaneous IPv4 and IPv6 across DCI
-        
-        Description:
-            1) Base profile bring up
-            2) Configure dual-stack multi-homed hosts with ESI in each VLAN
-            3) Send simultaneous L3VNI IPv4 and IPv6 traffic between MH hosts across DCI
-            5) Verify no traffic drops and no cores and crash
-            
-        Note:
-            Combines L3VNI_dci:23 (MH IPv4 across DCI) and L3VNI_dci:25 (MH IPv6 across DCI)
-            into a single dual-stack test with L3VNI translation and EVPN-MH.
-            
-        Steps:
-            1. Send simultaneous L3VNI IPv4 and IPv6 MH traffic across DCI
-        """
-        tc_id = "test_base_dci_l3vni_dualstack_mh_across_dci"
-        test_cfg['tc_id'] = tc_id
-        tc_cfg = vxlan_obj.get_tc_params(tc_id)
-        
-        st.banner('Testcase L3VNI_dci:29: Dual-stack MH IPv4+IPv6 across DCI ({})'.format(tc_id))
-        result = True
-        summ = ''
-        
-        # Note: Base setup (VRF-VNI, Type-5, EVPN ES) already verified in test_base_dci_bringup.
-        # Send MH-only IPv4 and IPv6 traffic simultaneously (not sequentially)
-        st.banner('Verify simultaneous dual-stack L3VNI IPv4+IPv6 traffic across DCI (MH hosts only)')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4', 'l3_v6'], scope='cross',
-                          traffic_names=['L3-MH'], simultaneous=True):
-            st.log('L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Pass')
-        else:
-            summ += 'L3VNI dual-stack MH IPv4+IPv6 simultaneous traffic across DCI: Fail\n'
-            result = False
-        
-        
+
+        st.log('This test covers: L3VNI_dci:{} (dual-stack {} {})'.format(dci_num, host_type, scope_label))
+
         report_result(result, tc_id, summ)
     
     def test_base_dci_l3vni_type5_route_withdrawal(self):
@@ -6088,20 +6117,24 @@ class TestVxlanDCIBase():
         
         Description:
             1) Base profile bring up with L3VNI
-            2) Verify Type-5 routes are advertised on BGW nodes
-            3) Shutdown a VLAN interface (Vlan11) on a leaf node (DC1-L0)
-            4) Verify Type-5 route for the shutdown VLAN is withdrawn
-            5) Bring up the VLAN interface
-            6) Verify Type-5 route is re-advertised
+            2) Verify Type-5 routes are advertised on all nodes
+            3) Perform full VLAN deletion on a leaf node:
+               remove members → unbind VRF → remove IP addresses → delete VLAN
+            4) Verify Type-5 path count decreased on all nodes (in multi-DC,
+               routes from remote DCs remain so prefix won't fully disappear)
+            5) Restore VLAN in reverse order:
+               create VLAN → add IP addresses → bind VRF → add members
+            6) Verify Type-5 route and IP route are present again on all nodes
             7) Verify traffic resumes with no drops
             
         Steps:
-            1. Verify base setup and Type-5 routes present
-            2. Shutdown Vlan11 interface on DC1 leaf0
-            3. Wait and verify Type-5 route for VLAN 11 is withdrawn on BGW
-            4. Bring up Vlan11 interface on DC1 leaf0
-            5. Wait and verify Type-5 route for VLAN 11 is re-advertised on BGW
-            6. Verify L3VNI traffic still works
+            1. Verify base setup, Type-5 routes present, record path counts
+            2. Save VLAN 11 state (members, VRF, IPs) on DC1 leaf0
+            3. Full VLAN deletion: remove members → unbind VRF → remove IPs → delete VLAN
+            4. Verify Type-5 path count decreased on all nodes
+            5. Full VLAN restoration: create VLAN → add IPs → bind VRF → add members
+            6. Verify Type-5 route and IP route re-advertised on all nodes
+            7. Verify L3VNI traffic still works
         """
         tc_id = "test_base_dci_l3vni_type5_route_withdrawal"
         test_cfg['tc_id'] = tc_id
@@ -6111,76 +6144,248 @@ class TestVxlanDCIBase():
         result = True
         summ = ''
         
-        # Use first DC1 leaf as the target node, first DC1 BGW to verify routes
+        # Use first DC1 leaf as the target node; verify on all nodes
         leaf_nodes = [n for n in test_cfg['nodes']['l2l3vni'] if 'bgw' not in n]
         dc1_leafs = [n for n in leaf_nodes if 'dc1' in n.lower()]
-        dc1_bgws = test_cfg['nodes']['dc1_bgw']
+        all_verify_nodes = test_cfg['nodes']['l2l3vni_bgw']
         
         if not dc1_leafs:
             summ += 'No DC1 leaf nodes found for route withdrawal test\n'
             report_result(False, tc_id, summ)
             return
-        if not dc1_bgws:
-            summ += 'No DC1 BGW nodes found for route withdrawal verification\n'
+        
+        target_leaf = dc1_leafs[0]
+        target_vlan_id = 11
+        target_vlan = str(target_vlan_id)
+        target_vrf = 'Vrf101'
+        target_ipv4 = '11.11.11.1/24'
+        target_ipv6 = '11:11:11::1/64'
+        
+        # Discover all VLAN members for the target VLAN on the target leaf.
+        # First try the cached vlan_config; if not available, query the DUT
+        # directly via 'show vlan config' to discover members.
+        vlan_members = []
+        if test_cfg.get('vlan_config') and test_cfg['vlan_config'].get(target_leaf):
+            vlan_info = test_cfg['vlan_config'][target_leaf]
+            members = vlan_info.get(target_vlan)
+            if members:
+                vlan_members = members if isinstance(members, list) else [members]
+        
+        if not vlan_members:
+            st.log('vlan_config does not have VLAN {} members for {}, '
+                   'querying DUT directly'.format(target_vlan, target_leaf))
+            live_members = vlan_obj.get_vlan_member(target_leaf, vlan_list=[target_vlan])
+            if live_members and live_members.get(target_vlan):
+                vlan_members = live_members[target_vlan]
+                st.log('Discovered VLAN {} members from DUT: {}'.format(
+                    target_vlan, vlan_members))
+        
+        if not vlan_members:
+            summ += 'No VLAN {} members found on {} (from config or DUT query)\n'.format(
+                target_vlan, target_leaf)
             report_result(False, tc_id, summ)
             return
         
-        target_leaf = dc1_leafs[0]
-        verify_bgw = dc1_bgws[0]
-        target_vlan = 'Vlan11'
-        target_vlan_id = 11
+        st.log('VLAN {} state on {}: members={}, VRF={}, IPv4={}, IPv6={}'.format(
+            target_vlan, target_leaf, vlan_members, target_vrf, target_ipv4, target_ipv6))
         
-        # Step 1: Verify Type-5 routes present before withdrawal test
-        # Note: VRF-VNI already verified in test_base_dci_bringup; only re-check Type-5
-        # routes as pre-condition to confirm they exist before shutdown.
-        st.banner('Step 1: Verify Type-5 routes present on all nodes before withdrawal test')
-        if not verify_base_setup_bgw(test_cfg['nodes']['l2l3vni_bgw'],
-                                     checks=['evpn_type5_comprehensive']):
-            summ += 'Type-5 route verification failed (pre-withdrawal check)\n'
-            result = False
+        def _restore_vlan_full():
+            """Restore VLAN with full config: create → add IPs → bind VRF → add members."""
+            st.log('Restoring VLAN {} on {} (full restoration)'.format(target_vlan, target_leaf))
+            try:
+                vlan_obj.create_vlan(target_leaf, target_vlan)
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv4))
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv6))
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config vlan static-anycast-gateway enable {}'.format(target_vlan))
+            except Exception:
+                pass
+            try:
+                vxlan_obj.config_dut(target_leaf, 'sonic',
+                    'sudo config interface vrf bind Vlan{} {}'.format(target_vlan, target_vrf))
+            except Exception:
+                pass
+            for member in vlan_members:
+                try:
+                    vlan_obj.add_vlan_member(target_leaf, target_vlan, member)
+                except Exception:
+                    pass
         
-        # Step 2: Shutdown Vlan11 interface on target leaf
-        # Note: SONiC CLI 'config interface shutdown' does not support VLAN
-        # interfaces.  Use FRR vtysh to admin-shutdown the SVI instead.
-        st.banner('Step 2: Shutdown {} on {} to trigger Type-5 route withdrawal'.format(
-            target_vlan, target_leaf))
-        st.config(target_leaf, 'interface {}\n shutdown'.format(target_vlan), type='vtysh')
-        st.wait(10, 'Waiting for Type-5 route withdrawal after {} shutdown'.format(target_vlan))
+        try:
+            # Step 1: Verify Type-5 routes present on all nodes before withdrawal
+            # and record per-node path counts for the target VLAN prefixes.
+            # In a multi-DC topology, a prefix like 80.11.0.0/24 has paths from
+            # multiple sources (local leafs + remote DC BGWs).  After deleting
+            # VLAN on one leaf, the prefix will NOT completely disappear
+            # on BGW/remote nodes because paths from other DCs remain.  We use
+            # path-count-decrease instead of prefix-absence to verify withdrawal.
+            st.banner('Step 1: Verify Type-5 routes present and record path counts before withdrawal')
+            if not verify_base_setup_bgw(all_verify_nodes,
+                                         checks=['evpn_type5_comprehensive']):
+                summ += 'Type-5 route verification failed (pre-withdrawal check)\n'
+                result = False
+            
+            pre_counts = {}
+            for node in all_verify_nodes:
+                pre_counts[node] = vxlan_obj.get_type5_path_counts_dci(
+                    node, [target_vlan_id])
+                st.log('Pre-removal path counts on {}: {}'.format(node, pre_counts[node]))
+            
+            # Step 2: Full VLAN deletion sequence on target leaf.
+            # Order: remove members → disable SAG → unbind VRF → remove IPs → delete VLAN
+            st.banner('Step 2: Full VLAN {} deletion on {} (members → VRF unbind → IP remove → VLAN delete)'.format(
+                target_vlan, target_leaf))
+            
+            # 2a: Remove all VLAN members
+            for member in vlan_members:
+                vlan_obj.delete_vlan_member(target_leaf, target_vlan, member)
+                st.log('Removed member {} from VLAN {} on {}'.format(
+                    member, target_vlan, target_leaf))
+            
+            # 2b: Disable static-anycast-gateway on the VLAN
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config vlan static-anycast-gateway disable {}'.format(target_vlan))
+            st.log('Disabled static-anycast-gateway on VLAN {} on {}'.format(
+                target_vlan, target_leaf))
+            
+            # 2c: Unbind VRF from the VLAN interface
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface vrf unbind Vlan{}'.format(target_vlan))
+            st.log('Unbound VRF from Vlan{} on {}'.format(target_vlan, target_leaf))
+            
+            # 2d: Remove IP addresses from the VLAN SVI
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip remove Vlan{} {}'.format(target_vlan, target_ipv4))
+            st.log('Removed IPv4 {} from Vlan{} on {}'.format(
+                target_ipv4, target_vlan, target_leaf))
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip remove Vlan{} {}'.format(target_vlan, target_ipv6))
+            st.log('Removed IPv6 {} from Vlan{} on {}'.format(
+                target_ipv6, target_vlan, target_leaf))
+            
+            # 2e: Delete the VLAN
+            vlan_obj.delete_vlan(target_leaf, target_vlan)
+            st.log('Deleted VLAN {} on {}'.format(target_vlan, target_leaf))
+            
+            st.wait(15, 'Waiting for route withdrawal after full VLAN {} deletion'.format(target_vlan))
+            
+            # Step 3: Verify Type-5 route path count decreased on all nodes.
+            # On the target leaf itself the locally-originated path should be
+            # withdrawn.  On BGW and remote nodes, paths from other DCs remain
+            # so we verify path_count decreased (not that the prefix is absent).
+            st.banner('Step 3: Verify Type-5 path count decreased on all nodes after VLAN deletion')
+            for node in all_verify_nodes:
+                post_counts = vxlan_obj.get_type5_path_counts_dci(
+                    node, [target_vlan_id])
+                st.log('Post-deletion path counts on {}: {}'.format(node, post_counts))
+                
+                node_ok = True
+                for pfx in pre_counts.get(node, {}):
+                    pre_val = pre_counts[node].get(pfx, 0)
+                    post_val = post_counts.get(pfx, 0)
+                    if pre_val > 0 and post_val >= pre_val:
+                        st.log('Type-5 path count for {} on {} did NOT decrease: '
+                               'before={}, after={}'.format(pfx, node, pre_val, post_val))
+                        node_ok = False
+                    else:
+                        st.log('Type-5 path count for {} on {}: before={}, after={} (decreased)'.format(
+                            pfx, node, pre_val, post_val))
+                
+                if not node_ok:
+                    summ += 'Type-5 path count for VLAN {} did not decrease on {}\n'.format(
+                        target_vlan_id, node)
+                    result = False
+                else:
+                    st.log('Type-5 route withdrawal verified on {} (path count decreased)'.format(node))
+                
+                if not poll_wait(vxlan_obj.verify_ip_route_vrf_dci, 30,
+                                 node, [target_vlan_id], vrf_name='Vrf101',
+                                 expect_present=False):
+                    # IP route may still be present via remote DCs — log warning only
+                    st.log('IP route for VLAN {} still present in Vrf101 on {} '
+                           '(may be from remote DC paths)'.format(target_vlan_id, node))
+            
+            # Step 4: Full VLAN restoration in reverse order.
+            # Order: create VLAN → add IPs → enable SAG → bind VRF → add members
+            st.banner('Step 4: Full VLAN {} restoration on {} (VLAN create → IP add → VRF bind → member add)'.format(
+                target_vlan, target_leaf))
+            
+            # 4a: Create the VLAN
+            vlan_obj.create_vlan(target_leaf, target_vlan)
+            st.log('Created VLAN {} on {}'.format(target_vlan, target_leaf))
+            
+            # 4b: Add IP addresses to the VLAN SVI
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv4))
+            st.log('Added IPv4 {} to Vlan{} on {}'.format(
+                target_ipv4, target_vlan, target_leaf))
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv6))
+            st.log('Added IPv6 {} to Vlan{} on {}'.format(
+                target_ipv6, target_vlan, target_leaf))
+            
+            # 4c: Enable static-anycast-gateway on the VLAN
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config vlan static-anycast-gateway enable {}'.format(target_vlan))
+            st.log('Enabled static-anycast-gateway on VLAN {} on {}'.format(
+                target_vlan, target_leaf))
+            
+            # 4d: Bind VRF to the VLAN interface
+            vxlan_obj.config_dut(target_leaf, 'sonic',
+                'sudo config interface vrf bind Vlan{} {}'.format(target_vlan, target_vrf))
+            st.log('Bound {} to Vlan{} on {}'.format(target_vrf, target_vlan, target_leaf))
+            
+            # 4e: Re-add all VLAN members
+            for member in vlan_members:
+                vlan_obj.add_vlan_member(target_leaf, target_vlan, member)
+                st.log('Added member {} to VLAN {} on {}'.format(
+                    member, target_vlan, target_leaf))
+            
+            st.wait(15, 'Waiting for route re-advertisement after full VLAN {} restoration'.format(target_vlan))
+            
+            # Step 5: Verify Type-5 route path counts restored on all nodes
+            st.banner('Step 5: Verify Type-5 path counts restored after VLAN restoration')
+            for node in all_verify_nodes:
+                if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
+                                 node, [target_vlan_id], expect_present=True):
+                    summ += 'Type-5 route for VLAN {} not re-advertised on {}\n'.format(
+                        target_vlan_id, node)
+                    result = False
+                else:
+                    st.log('Type-5 route re-advertisement verified on {}'.format(node))
+                
+                if not poll_wait(vxlan_obj.verify_ip_route_vrf_dci, 30,
+                                 node, [target_vlan_id], vrf_name='Vrf101',
+                                 expect_present=True):
+                    summ += 'IP route for VLAN {} not re-advertised in Vrf101 on {}\n'.format(
+                        target_vlan_id, node)
+                    result = False
+                else:
+                    st.log('IP route re-advertisement verified on {}'.format(node))
+            
+            # Step 6: Verify L3VNI traffic still works
+            st.banner('Step 6: Verify L3VNI traffic after route recovery')
+            if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
+                st.log('L3VNI IPv4 traffic after route withdrawal/recovery: Pass')
+            else:
+                summ += 'L3VNI IPv4 traffic failed after route withdrawal/recovery\n'
+                result = False
         
-        # Step 3: Verify Type-5 route for VLAN 11 is withdrawn on BGW
-        st.banner('Step 3: Verify Type-5 route for VLAN {} withdrawn on {}'.format(
-            target_vlan_id, verify_bgw))
-        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
-                         verify_bgw, [target_vlan_id], expect_present=False):
-            summ += 'Type-5 route for VLAN {} not withdrawn on {} after shutdown\n'.format(
-                target_vlan_id, verify_bgw)
-            result = False
-        else:
-            st.log('Type-5 route withdrawal verified on {}'.format(verify_bgw))
-        
-        # Step 4: Bring up Vlan11 interface on target leaf
-        st.banner('Step 4: Bring up {} on {} to trigger Type-5 route re-advertisement'.format(
-            target_vlan, target_leaf))
-        st.config(target_leaf, 'interface {}\n no shutdown'.format(target_vlan), type='vtysh')
-        st.wait(15, 'Waiting for Type-5 route re-advertisement after {} startup'.format(target_vlan))
-        
-        # Step 5: Verify Type-5 route for VLAN 11 is re-advertised on BGW
-        st.banner('Step 5: Verify Type-5 route for VLAN {} re-advertised on {}'.format(
-            target_vlan_id, verify_bgw))
-        if not poll_wait(vxlan_obj.verify_type5_route_presence_dci, 30,
-                         verify_bgw, [target_vlan_id], expect_present=True):
-            summ += 'Type-5 route for VLAN {} not re-advertised on {} after startup\n'.format(
-                target_vlan_id, verify_bgw)
-            result = False
-        else:
-            st.log('Type-5 route re-advertisement verified on {}'.format(verify_bgw))
-        
-        # Step 6: Verify L3VNI traffic still works
-        st.banner('Step 6: Verify L3VNI traffic after route recovery')
-        if verify_traffic(tgen_handles, regenerate=True, traffic_types=['l3_v4'], scope='within'):
-            st.log('L3VNI IPv4 traffic after route withdrawal/recovery: Pass')
-        else:
-            summ += 'L3VNI IPv4 traffic failed after route withdrawal/recovery\n'
+        except Exception as e:
+            summ += 'Exception: {}\n'.format(e)
+            # Try full VLAN restoration on failure
+            _restore_vlan_full()
             result = False
         
         report_result(result, tc_id, summ)

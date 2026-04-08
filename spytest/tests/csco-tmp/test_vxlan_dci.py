@@ -4825,12 +4825,12 @@ def _get_dci_mac_move_cfg():
         'rate_percent_hw': cfg.get('rate_percent_hw', 10),
         # L3VNI config: same source, different VLAN (vlan13 in Vrf101)
         'l3_vlan': cfg.get('l3_vlan', 13),
-        'l3_gateway_v4': cfg.get('l3_gateway_v4', '13.13.13.1'),
-        'l3_gateway_v6': cfg.get('l3_gateway_v6', '13:13:13::1'),
-        'l3_src_ipv4': cfg.get('l3_src_ipv4', '13.13.13.99'),
-        'l3_src_ipv6': cfg.get('l3_src_ipv6', '13:13:13::99'),
-        'l3_dst_ipv4': cfg.get('l3_dst_ipv4', '13.13.13.50'),
-        'l3_dst_ipv6': cfg.get('l3_dst_ipv6', '13:13:13::50'),
+        'l3_gateway_v4': cfg.get('l3_gateway_v4', '80.13.0.1'),
+        'l3_gateway_v6': cfg.get('l3_gateway_v6', '8000:13::1'),
+        'l3_src_ipv4': cfg.get('l3_src_ipv4', '80.13.0.99'),
+        'l3_src_ipv6': cfg.get('l3_src_ipv6', '8000:13::99'),
+        'l3_dst_ipv4': cfg.get('l3_dst_ipv4', '80.13.0.50'),
+        'l3_dst_ipv6': cfg.get('l3_dst_ipv6', '8000:13::50'),
     }
 
 

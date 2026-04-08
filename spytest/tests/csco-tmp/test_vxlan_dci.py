@@ -4829,6 +4829,7 @@ def _get_dci_mac_move_cfg():
         'l3_gateway_v6': cfg.get('l3_gateway_v6', '8000:13::1'),
         'l3_src_ipv4': cfg.get('l3_src_ipv4', '80.13.0.99'),
         'l3_src_ipv6': cfg.get('l3_src_ipv6', '8000:13::99'),
+        'l3_rmac': cfg.get('l3_rmac', '00:11:22:33:44:55'),
     }
 
 
@@ -6886,7 +6887,7 @@ class TestVxlanDciMacMoveTriggers():
             # Create L3 traffic streams on vlan13 (L3VNI) inline — same src port, different VLAN
             l3_vlan = mm_cfg['l3_vlan']
             l3_mac_src = "02:00:00:13:{:02x}:99".format(sf)
-            l3_mac_dst = "02:00:00:13:{:02x}:{:02x}".format(sf, ht1)
+            l3_mac_dst = mm_cfg['l3_rmac']  # SAG gateway MAC — switch does L3 routing lookup
             l3_kw = dict(emulation_src_handle=stream_info['src']['src_handle'], mode='create',
                          transmit_mode='single_burst', pkts_per_burst=pkts, rate_percent=rate,
                          circuit_type='raw', frame_size=1000, vlan_id=l3_vlan,

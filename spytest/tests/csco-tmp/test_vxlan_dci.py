@@ -7223,20 +7223,6 @@ class TestVxlanDciMacMoveTriggers():
         result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv6_changes")
         report_result(result, tc_id)
 
-    @pytest.mark.skip(reason="Solution_dci:80 deferred")
-    def test_dci_mac_move_orphan_across_dc_ipv4_only(self):
-        """Verify mac move between orphan ports ipv4_only across DC (Solution_dci:80)."""
-        tc_id = "ipv4_only move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv4_only")
-        report_result(result, tc_id)
-
-    @pytest.mark.skip(reason="Solution_dci:81 deferred")
-    def test_dci_mac_move_orphan_across_dc_ipv6_only(self):
-        """Verify mac move between orphan ports ipv6_only across DC (Solution_dci:81)."""
-        tc_id = "ipv6_only move between orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "orphan_to_orphan_across_dc", "ipv6_only")
-        report_result(result, tc_id)
-
     # Cross-DC MAC move (Solution_dci:82-88): MH ports, DC1-L0 -> DC2-L1
     def test_dci_mac_move_mh_across_dc_mac_and_ipv4(self):
         """Verify mac move between MH ports mac+ipv4 across DC (Solution_dci:82)."""
@@ -7266,20 +7252,6 @@ class TestVxlanDciMacMoveTriggers():
         """Verify mac move between MH ports ipv6_changes across DC (Solution_dci:86)."""
         tc_id = "ipv6_changes move between MH ports across DC"
         result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv6_changes")
-        report_result(result, tc_id)
-
-    @pytest.mark.skip(reason="Solution_dci:87 deferred")
-    def test_dci_mac_move_mh_across_dc_ipv4_only(self):
-        """Verify mac move between MH ports ipv4_only across DC (Solution_dci:87)."""
-        tc_id = "ipv4_only move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv4_only")
-        report_result(result, tc_id)
-
-    @pytest.mark.skip(reason="Solution_dci:88 deferred")
-    def test_dci_mac_move_mh_across_dc_ipv6_only(self):
-        """Verify mac move between MH ports ipv6_only across DC (Solution_dci:88)."""
-        tc_id = "ipv6_only move between MH ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "ipv6_only")
         report_result(result, tc_id)
 
     # Cross-DC MAC move (Solution_dci:89-95): MH-to-orphan ports, DC1-L0 -> DC2-L1
@@ -7312,24 +7284,3 @@ class TestVxlanDciMacMoveTriggers():
         tc_id = "ipv6_changes move between MH and orphan ports across DC"
         result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv6_changes")
         report_result(result, tc_id)
-
-    @pytest.mark.skip(reason="Solution_dci:94 deferred")
-    def test_dci_mac_move_mh_to_orphan_across_dc_ipv4_only(self):
-        """Verify mac move between MH and orphan ports ipv4_only across DC (Solution_dci:94)."""
-        tc_id = "ipv4_only move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv4_only")
-        report_result(result, tc_id)
-
-    @pytest.mark.skip(reason="Solution_dci:95 deferred")
-    def test_dci_mac_move_mh_to_orphan_across_dc_ipv6_only(self):
-        """Verify mac move between MH and orphan ports ipv6_only across DC (Solution_dci:95)."""
-        tc_id = "ipv6_only move between MH and orphan ports across DC"
-        result = self.verify_mac_move_dci(tc_id, "mh_to_orphan_across_dc", "ipv6_only")
-        report_result(result, tc_id)
-
-    def test_dci_mac_move_vlan_change_l2_to_l3_across_dc(self):
-        """Verify host in VLAN 11 DC1 moving to VLAN 12 DC2 becomes L3; traffic via Border spine (Solution_dci:96)."""
-        tc_id = "VLAN 11->12 L2->L3 move across DC (traffic via Border spine)"
-        st.log("Solution_dci:96 - L3VNI across DCI not supported; traffic flows via Border spine Northbound peering")
-        st.log("Skipping: requires separate VLAN/VNI setup and Border spine traffic verification")
-        report_result(True, tc_id)  # Placeholder: pass for now; implement when topology/config ready

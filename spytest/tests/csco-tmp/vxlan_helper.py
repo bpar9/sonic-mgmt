@@ -5375,6 +5375,8 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
     learn_type = ""
     found_on_node = None
     found_seq = None
+    mac_found = False
+    ip_found = False
     if host_type == 'mac_only':
         mac_addr = host_info
         ip_addr = ''

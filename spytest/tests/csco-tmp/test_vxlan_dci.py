@@ -6985,13 +6985,26 @@ class TestVxlanDciMacMoveTriggers():
             return False
 
         st.log("")
-        st.log("--- PHASE 3: Traffic BEFORE move (host at {}) ---".format(dest1_node))
-        self._send_traffic_dci(tg_handle, [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']])
+        has_l3 = mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle')
+        st.log("--- PHASE 3: L2{} traffic BEFORE move (host at {}) ---".format(
+            "+L3" if has_l3 else "", dest1_node))
+        all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
+        if has_l3:
+            all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+        self._send_traffic_dci(tg_handle, all_streams)
         out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
         out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
-        st.log("  Stream to {} (host here):  rx={}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
-        st.log("  Stream to {} (host away):  rx={}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
-        if not (out1 and not out2):
+        st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
+        st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
+        l2_ok = out1 and not out2
+        l3_ok = True
+        if has_l3:
+            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+            st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+            st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+            l3_ok = l3_out1
+        if not (l2_ok and l3_ok):
             st.log("[FAIL] Traffic should reach dest1 only (host at dest1)")
             self._cleanup_tgen_dci(mm_handles)
             st.banner("{} : traffic failed when no host move".format(host_type))
@@ -6999,25 +7012,6 @@ class TestVxlanDciMacMoveTriggers():
             return False
         st.log("  Traffic check: PASS")
         st.banner("{} : traffic passed as expected when no host move".format(host_type))
-
-        # L3VNI traffic verification before move (auto for non-mac_only)
-        if mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle'):
-            st.log("")
-            st.log("--- PHASE 3b: L3VNI traffic BEFORE move (host at {}) ---".format(dest1_node))
-            st.banner("Verify L3VNI traffic before host move (vlan13 inline streams)")
-            self._send_traffic_dci(tg_handle, [mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
-            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
-            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
-            st.log("  L3 stream to {} (host here): {}  L3 stream to {} (host away): {}".format(
-                dest1_node, "PASS" if l3_out1 else "FAIL", dest2_node, "PASS" if l3_out2 else "FAIL"))
-            if not l3_out1:
-                st.log("[FAIL] L3VNI traffic failed before host move")
-                if host_type != 'mac_only':
-                    tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
-                    st.wait(2)
-                self._cleanup_tgen_dci(mm_handles)
-                st.banner("DCI MAC MOVE FAILED: {} (Phase 3b: L3VNI traffic before move)".format(tc_id))
-                return False
 
         st.log("")
         st.log("--- PHASE 4: Move host from {} to {} ---".format(dest1_node, dest2_node))
@@ -7052,13 +7046,25 @@ class TestVxlanDciMacMoveTriggers():
             return False
 
         st.log("")
-        st.log("--- PHASE 6: Traffic AFTER 1st move (host at {}) ---".format(dest2_node))
-        self._send_traffic_dci(tg_handle, [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']])
+        st.log("--- PHASE 6: L2{} traffic AFTER 1st move (host at {}) ---".format(
+            "+L3" if has_l3 else "", dest2_node))
+        all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
+        if has_l3:
+            all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+        self._send_traffic_dci(tg_handle, all_streams)
         out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
         out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
-        st.log("  Stream to {} (host away):  rx={}  [expect FAIL]".format(dest1_node, "PASS" if out1 else "FAIL"))
-        st.log("  Stream to {} (host here):  rx={}  [expect PASS]".format(dest2_node, "PASS" if out2 else "FAIL"))
-        if not (not out1 and out2):
+        st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest1_node, "PASS" if out1 else "FAIL"))
+        st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if out2 else "FAIL"))
+        l2_ok = not out1 and out2
+        l3_ok = True
+        if has_l3:
+            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+            st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+            st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+            l3_ok = l3_out2
+        if not (l2_ok and l3_ok):
             st.log("[FAIL] Traffic should reach dest2 only (host moved to dest2)")
             if host_type != 'mac_only':
                 tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest2_handle'])
@@ -7069,25 +7075,6 @@ class TestVxlanDciMacMoveTriggers():
             return False
         st.log("  Traffic check: PASS")
         st.banner("{} : traffic passed as expected after first move".format(host_type))
-
-        # L3VNI traffic verification after 1st move (auto for non-mac_only)
-        if mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle'):
-            st.log("")
-            st.log("--- PHASE 6b: L3VNI traffic AFTER 1st move (host at {}) ---".format(dest2_node))
-            st.banner("Verify L3VNI traffic after host move to {} (vlan13 inline streams)".format(dest2_node))
-            self._send_traffic_dci(tg_handle, [mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
-            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
-            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
-            st.log("  L3 stream to {} (host away): {}  L3 stream to {} (host here): {}".format(
-                dest1_node, "PASS" if l3_out1 else "FAIL", dest2_node, "PASS" if l3_out2 else "FAIL"))
-            if not l3_out2:
-                st.log("[FAIL] L3VNI traffic failed after host move to dest2")
-                if host_type != 'mac_only':
-                    tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest2_handle'])
-                    st.wait(2)
-                self._cleanup_tgen_dci(mm_handles)
-                st.banner("DCI MAC MOVE FAILED: {} (Phase 6b: L3VNI traffic after move)".format(tc_id))
-                return False
 
         st.log("")
         st.log("--- PHASE 7: Move host back from {} to {} ---".format(dest2_node, dest1_node))
@@ -7121,13 +7108,25 @@ class TestVxlanDciMacMoveTriggers():
             return False
 
         st.log("")
-        st.log("--- PHASE 9: Traffic AFTER move back (host at {}) ---".format(dest1_node))
-        self._send_traffic_dci(tg_handle, [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']])
+        st.log("--- PHASE 9: L2{} traffic AFTER move back (host at {}) ---".format(
+            "+L3" if has_l3 else "", dest1_node))
+        all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
+        if has_l3:
+            all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+        self._send_traffic_dci(tg_handle, all_streams)
         out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
         out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
-        st.log("  Stream to {} (host here):  rx={}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
-        st.log("  Stream to {} (host away):  rx={}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
-        if not (out1 and not out2):
+        st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
+        st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
+        l2_ok = out1 and not out2
+        l3_ok = True
+        if has_l3:
+            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+            st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+            st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+            l3_ok = l3_out1
+        if not (l2_ok and l3_ok):
             st.log("[FAIL] Traffic should reach dest1 only (host moved back to dest1)")
             if host_type != 'mac_only':
                 tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
@@ -7138,25 +7137,6 @@ class TestVxlanDciMacMoveTriggers():
             return False
         st.log("  Traffic check: PASS")
         st.banner("{} : traffic passed as expected after mac move to original location".format(host_type))
-
-        # L3VNI traffic verification after move back (auto for non-mac_only)
-        if mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle'):
-            st.log("")
-            st.log("--- PHASE 9b: L3VNI traffic AFTER move back (host at {}) ---".format(dest1_node))
-            st.banner("Verify L3VNI traffic after host move back to {} (vlan13 inline streams)".format(dest1_node))
-            self._send_traffic_dci(tg_handle, [mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
-            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
-            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
-            st.log("  L3 stream to {} (host here): {}  L3 stream to {} (host away): {}".format(
-                dest1_node, "PASS" if l3_out1 else "FAIL", dest2_node, "PASS" if l3_out2 else "FAIL"))
-            if not l3_out1:
-                st.log("[FAIL] L3VNI traffic failed after host move back to dest1")
-                if host_type != 'mac_only':
-                    tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
-                    st.wait(2)
-                self._cleanup_tgen_dci(mm_handles)
-                st.banner("DCI MAC MOVE FAILED: {} (Phase 9b: L3VNI traffic after move back)".format(tc_id))
-                return False
 
         result = True
         if host_type != 'mac_only':

@@ -6701,7 +6701,7 @@ class TestVxlanDCIBase():
     # ------------------------------------------------------------------
     # L3VNI_dci:57 / L3VNI_dci:58  –  DF Failover with L3VNI traffic
     # Uses continuous cross-DC traffic (dci_flap_continuous) per
-    # InterfaceTrigger pattern.
+    # InterfaceTrigger pattern.  Only v4 streams for TC57, v6 for TC58.
     # ------------------------------------------------------------------
     @pytest.mark.parametrize("ip_version", ["v4", "v6"])
     def test_base_dci_l3vni_mh_df_failover(self, ip_version):
@@ -6711,21 +6711,23 @@ class TestVxlanDCIBase():
         Description:
             Multi-homed host on DC2 (leaf0_dc2 + leaf1_dc2 form an EVPN MH pair).
             One leaf is the Designated Forwarder (DF) and the other is Non-DF.
-            Start continuous cross-DC traffic, shutdown the DF leaf's host-facing
-            PortChannel to trigger DF election to the peer leaf, then verify
-            continuous traffic continues without significant loss.
+            Start continuous cross-DC traffic (only the matching IP version),
+            shutdown the DF leaf's host-facing PortChannel to trigger DF
+            election to the peer leaf, then verify continuous traffic continues
+            without significant loss.
 
         Steps:
             1. Verify base setup
-            2. Pick Leaf0 and Leaf1 of DC2 (one DF, one NDF)
-            3. Start continuous cross-DC traffic (dci_flap_continuous)
+            2. Pick Leaf0 and Leaf1 of DC2; use 'show evpn es' to identify DF/NDF
+            3. Start continuous cross-DC traffic (filtered to v4 or v6 only)
             4. Shutdown DF link of multi-homed host
-            5. Verify DF election moves to peer leaf, continuous traffic continues
-            6. Restore PortChannel (no-shut), stop continuous traffic
+            5. Print 'show evpn es' after shutdown; verify continuous traffic
+            6. Restore PortChannel (no-shut), stop and disable continuous traffic
             7. Check for core files and crashes
         """
         tc_num = 57 if ip_version == 'v4' else 58
         ip_label = 'IPv4' if ip_version == 'v4' else 'IPv6'
+        ixia_version = 'ipv4' if ip_version == 'v4' else 'ipv6'
         tc_id = 'test_base_dci_l3vni_mh_{}_df_failover'.format(ip_version)
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
@@ -6736,8 +6738,18 @@ class TestVxlanDCIBase():
         summ = ''
         stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
-        fc_streams = tgen_handles.get('dci_flap_continuous')
+
+        # Get all dci_flap_continuous streams and filter to the requested IP version only
+        all_fc_streams = tgen_handles.get('dci_flap_continuous')
+        fc_streams = {}
+        if isinstance(all_fc_streams, dict):
+            for k, v in all_fc_streams.items():
+                if isinstance(v, dict) and v.get('version', '') == ixia_version:
+                    fc_streams[k] = v
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+        st.log('dci_flap_continuous {} streams: {} (total: {})'.format(
+            ip_version, len(fc_streams),
+            len(all_fc_streams) if isinstance(all_fc_streams, dict) else 0))
 
         # Step 1: Verify base setup
         st.banner('Step 1: Verify base setup before DF failover')
@@ -6747,7 +6759,7 @@ class TestVxlanDCIBase():
             report_result(False, tc_id, summ)
             return
 
-        # Step 2: Pick Leaf0 and Leaf1 of DC2 (DF/NDF pair)
+        # Step 2: Pick Leaf0 and Leaf1 of DC2 and determine DF/NDF via 'show evpn es'
         st.banner('Step 2: Pick Leaf0 and Leaf1 of DC2 as DF/NDF pair')
         dc2_leafs = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
                       if 'leaf' in n and 'dc2' in n]
@@ -6761,39 +6773,69 @@ class TestVxlanDCIBase():
         dc2_leafs = sorted(dc2_leafs)[:2]
         st.log('DC2 MH leaf pair: {}'.format(dc2_leafs))
 
-        # Get PortChannel interfaces on each DC2 leaf
-        config_dict = vxlan_obj.get_cfg_dict()
+        # Get PortChannel interfaces from test_cfg (port_channels key)
         pc_map = {}
         for leaf in dc2_leafs:
-            leaf_cfg = config_dict.get(leaf, {})
             pcs = []
-            if isinstance(leaf_cfg, dict) and leaf_cfg.get('port_channel'):
-                for pc_item in leaf_cfg['port_channel']:
-                    pc_name = pc_item.get('name', '')
-                    if pc_name:
-                        pcs.append(pc_name)
-            if not pcs:
-                int_cfg = vxlan_obj.get_config_interfaces_list(st.get_testbed_vars())
-                l2vni_intfs = int_cfg.get(leaf, {}).get('l2vni_int', [])
-                pcs = [i for i in l2vni_intfs if i.startswith('PortChannel')]
+            for pc in (test_cfg.get(leaf, {}).get('port_channels', []) or []):
+                pc_num = pc.get('port_channel_num')
+                if pc_num is not None:
+                    pcs.append('PortChannel{}'.format(pc_num))
             pc_map[leaf] = pcs
             st.log('{} PortChannels: {}'.format(leaf, pcs))
 
-        df_leaf = dc2_leafs[0]
-        ndf_leaf = dc2_leafs[1]
+        # Use 'show evpn es' to determine DF vs NDF
+        # 'N' in Type column means non-DF for that ESI
+        df_leaf = None
+        ndf_leaf = None
+        for leaf in dc2_leafs:
+            es_output = vxlan_obj.get_evpn_es(leaf)
+            st.log('{} show evpn es output: {}'.format(leaf, es_output))
+            for es_entry in (es_output or []):
+                es_type = es_entry.get('type', '')
+                es_if = es_entry.get('es_if', '')
+                if es_if.startswith('PortChannel') and 'N' in es_type:
+                    ndf_leaf = leaf
+                elif es_if.startswith('PortChannel') and 'L' in es_type and 'N' not in es_type:
+                    df_leaf = leaf
+
+        # Fallback: if we could not determine DF/NDF, pick first leaf with PCs as DF
+        if not df_leaf:
+            for leaf in dc2_leafs:
+                if pc_map.get(leaf):
+                    df_leaf = leaf
+                    break
+        if not ndf_leaf:
+            ndf_leaf = [l for l in dc2_leafs if l != df_leaf][0] if df_leaf else dc2_leafs[1]
+        if not df_leaf:
+            df_leaf = dc2_leafs[0]
+
         df_pcs = pc_map.get(df_leaf, [])
         if not df_pcs:
             summ += 'No PortChannels found on DF leaf {}\n'.format(df_leaf)
             report_result(False, tc_id, summ)
             return
-        st.log('DF leaf: {} (PortChannels: {}), Peer leaf: {}'.format(df_leaf, df_pcs, ndf_leaf))
+        st.log('DF leaf: {} (PortChannels: {}), NDF leaf: {}'.format(df_leaf, df_pcs, ndf_leaf))
 
-        # Step 3: Start continuous cross-DC traffic
+        # Step 3: Start continuous cross-DC traffic (filtered to ip_version)
         st.banner('Step 3: Start continuous {} cross-DC traffic (dci_flap_continuous)'.format(ip_label))
         if not fc_available:
-            summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
+            summ += 'dci_flap_continuous {} streams not available, cannot run continuous traffic test\n'.format(ip_version)
             report_result(False, tc_id, summ)
             return
+
+        # Configure rate_percent to 0.01 on selected streams before starting
+        tg_handle = None
+        fc_stream_ids = []
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict) and _v.get('stream_id'):
+                fc_stream_ids.append(_v['stream_id'])
+                if not tg_handle:
+                    tg_handle = _v.get('tg_handle')
+        if tg_handle and fc_stream_ids:
+            for sid in fc_stream_ids:
+                tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(fc_stream_ids)))
 
         try:
             vxlan_obj.check_traffic(
@@ -6817,6 +6859,12 @@ class TestVxlanDCIBase():
                 intf_obj.interface_shutdown(dut=df_leaf, interfaces=pc)
             st.wait(10, 'Wait for DF election to move to peer leaf')
 
+            # Print 'show evpn es' after shutdown to confirm DF/NDF change
+            st.banner('Step 4b: Print show evpn es after PortChannel shutdown')
+            for leaf in dc2_leafs:
+                es_output = vxlan_obj.get_evpn_es(leaf)
+                st.log('{} show evpn es (after shutdown): {}'.format(leaf, es_output))
+
             # Step 5: Verify continuous traffic continues after DF failover
             st.banner('Step 5: Verify continuous {} cross-DC traffic after DF failover'.format(ip_label))
             if not vxlan_obj.check_traffic(
@@ -6827,7 +6875,7 @@ class TestVxlanDCIBase():
                 st.log('Continuous {} cross-DC traffic continues after DF failover: PASS'.format(ip_label))
 
         finally:
-            # Step 6: Restore PortChannel and stop continuous traffic
+            # Step 6: Restore PortChannel, stop and disable continuous traffic
             st.banner('Step 6: Restore PortChannel on DF leaf {} and stop continuous traffic'.format(df_leaf))
             for pc in df_pcs:
                 st.log('No-shutting PortChannel {} on {}'.format(pc, df_leaf))
@@ -6836,6 +6884,12 @@ class TestVxlanDCIBase():
                 vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
             except Exception:
                 pass
+            # Disable continuous streams so they are not left enabled
+            if tg_handle and fc_stream_ids:
+                try:
+                    tg_handle.tg_traffic_config(mode='disable', stream_id=fc_stream_ids)
+                except Exception:
+                    pass
             st.wait(15, 'Wait for PortChannel and DF election recovery')
 
         # Step 7: Check for core files and crashes
@@ -6916,7 +6970,20 @@ class TestVxlanDCIBase():
 
         # Step 3: Start continuous L2+L3 traffic across DC
         st.banner('Step 3: Start continuous L2+L3 traffic across DC (dci_flap_continuous)')
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
         if fc_available:
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _fc_stream_ids.append(_v['stream_id'])
+                    if not _fc_tg_handle:
+                        _fc_tg_handle = _v.get('tg_handle')
+            # Configure rate_percent to 0.01 on continuous streams
+            if _fc_tg_handle and _fc_stream_ids:
+                for sid in _fc_stream_ids:
+                    _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+                st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
             try:
                 vxlan_obj.check_traffic(
                     fc_streams,
@@ -6987,6 +7054,12 @@ class TestVxlanDCIBase():
                     vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
                 except Exception:
                     pass
+                # Disable continuous streams so they are not left enabled
+                if _fc_tg_handle and _fc_stream_ids:
+                    try:
+                        _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                    except Exception:
+                        pass
 
         # Step 7: Verify burst traffic l2_v4, l2_v6, l3_v4, l3_v6 across and within DC
         st.banner('Step 7: Verifying burst traffic across and within DC after simultaneous BGW reboot')
@@ -7085,7 +7158,20 @@ class TestVxlanDCIBase():
 
         # Step 3: Start continuous L2+L3 traffic across and within DC
         st.banner('Step 3: Start continuous L2+L3 traffic across and within DC (dci_flap_continuous)')
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
         if fc_available:
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _fc_stream_ids.append(_v['stream_id'])
+                    if not _fc_tg_handle:
+                        _fc_tg_handle = _v.get('tg_handle')
+            # Configure rate_percent to 0.01 on continuous streams
+            if _fc_tg_handle and _fc_stream_ids:
+                for sid in _fc_stream_ids:
+                    _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+                st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
             try:
                 vxlan_obj.check_traffic(
                     fc_streams,
@@ -7152,6 +7238,12 @@ class TestVxlanDCIBase():
                     vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
                 except Exception:
                     pass
+                # Disable continuous streams so they are not left enabled
+                if _fc_tg_handle and _fc_stream_ids:
+                    try:
+                        _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                    except Exception:
+                        pass
 
         # Step 7: Verify burst traffic l2_v4, l2_v6, l3_v4, l3_v6 across and within DC
         st.banner('Step 7: Verifying burst traffic across and within DC after rolling reboot')
@@ -7230,6 +7322,20 @@ class TestVxlanDCIBase():
             report_result(False, tc_id, summ)
             return
 
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict) and _v.get('stream_id'):
+                _fc_stream_ids.append(_v['stream_id'])
+                if not _fc_tg_handle:
+                    _fc_tg_handle = _v.get('tg_handle')
+        # Configure rate_percent to 0.01 on continuous streams
+        if _fc_tg_handle and _fc_stream_ids:
+            for sid in _fc_stream_ids:
+                _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
+
         try:
             vxlan_obj.check_traffic(
                 fc_streams,
@@ -7300,6 +7406,12 @@ class TestVxlanDCIBase():
                 vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
             except Exception:
                 pass
+            # Disable continuous streams so they are not left enabled
+            if _fc_tg_handle and _fc_stream_ids:
+                try:
+                    _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                except Exception:
+                    pass
 
         # Step 6: Check for core files
         st.banner('Step 6: Checking for core files and crashes')
@@ -7369,6 +7481,20 @@ class TestVxlanDCIBase():
             summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
             report_result(False, tc_id, summ)
             return
+
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict) and _v.get('stream_id'):
+                _fc_stream_ids.append(_v['stream_id'])
+                if not _fc_tg_handle:
+                    _fc_tg_handle = _v.get('tg_handle')
+        # Configure rate_percent to 0.01 on continuous streams
+        if _fc_tg_handle and _fc_stream_ids:
+            for sid in _fc_stream_ids:
+                _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
 
         try:
             vxlan_obj.check_traffic(
@@ -7441,6 +7567,12 @@ class TestVxlanDCIBase():
                 vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
             except Exception:
                 pass
+            # Disable continuous streams so they are not left enabled
+            if _fc_tg_handle and _fc_stream_ids:
+                try:
+                    _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                except Exception:
+                    pass
 
         # Step 6: Check for core files
         st.banner('Step 6: Checking for core files and crashes')

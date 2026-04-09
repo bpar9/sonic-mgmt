@@ -3208,6 +3208,8 @@ def create_traffic_item(device_handles, endpoints, topo_handles, transmit_mode="
         stream_handles[i]['tg_handle'] = tg_handle
         stream_handles[i]['port_handle'] = port_handle
         stream_handles[i]['dst_ports'] = emulation_dst_port
+        stream_handles[i]['name'] = name
+        stream_handles[i]['version'] = version
         i+=1
         st.wait(1) 
     return stream_handles

@@ -1433,23 +1433,21 @@ def tgen_preconfig(**kwargs):
         return k
 
     # Limit flap-continuous streams: two VLANs only (12, 18) — one traffic item per VLAN per AF
+    # Only PortChannel (MH) sources for continuous streams (DF failover / link flap tests)
     _dci_fc_vlans = (12, 18)
 
     def _dci_fc_endpoints_for_vlan(vlan_id):
         merged = {}
-        if l2_orphan_cross:
-            for _k, _v in l2_orphan_cross.items():
-                if _v.get('src_vlan') == vlan_id:
-                    merged[_k] = _v
+        # Only use PortChannel (MH) cross-DC endpoints for continuous streams
         if l2_pc_cross:
             for _k, _v in l2_pc_cross.items():
                 if _v.get('src_vlan') == vlan_id:
                     merged[_k] = _v
         return merged
 
-    if dci_enabled and (l2_orphan_cross or l2_pc_cross):
+    if dci_enabled and l2_pc_cross:
         st.banner(
-            "DCI: continuous L2 cross-DC for link flap tests — VLANs {} only".format(
+            "DCI: continuous L2 cross-DC (MH only) for link flap tests — VLANs {} only".format(
                 _dci_fc_vlans))
         for _vlan_fc in _dci_fc_vlans:
             _eps_fc = _dci_fc_endpoints_for_vlan(_vlan_fc)
@@ -1460,7 +1458,7 @@ def tgen_preconfig(**kwargs):
                 endpoints=_eps_fc,
                 topo_handles=topo_handles,
                 multi_dst='vlan',
-                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
+                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
                 transmit_mode='continuous',
                 rate_percent=_dci_fc_rate,
                 pkts_per_burst=_dci_fc_ppb,
@@ -1476,7 +1474,7 @@ def tgen_preconfig(**kwargs):
                 topo_handles=topo_handles,
                 version='ipv6',
                 multi_dst='vlan',
-                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
+                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
                 transmit_mode='continuous',
                 rate_percent=_dci_fc_rate,
                 pkts_per_burst=_dci_fc_ppb,
@@ -1484,31 +1482,47 @@ def tgen_preconfig(**kwargs):
             _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
 
     # L3 continuous cross-DC traffic for DCI link flap/shut tests
+    # Only PortChannel (MH) sources, limited to 1 VLAN per VRF
     if dci_enabled and l3_cross_dc_endpoints:
-        st.banner("DCI: continuous L3 cross-DC for link flap tests")
-        _h_fc_l3 = vxlan_obj.create_traffic_item(
-            device_handles=v4_device_handles,
-            endpoints=l3_cross_dc_endpoints,
-            topo_handles=topo_handles,
-            multi_dst='vrf',
-            name_prfx='DCI-FC-L3-X',
-            transmit_mode='continuous',
-            rate_percent=_dci_fc_rate,
-            pkts_per_burst=_dci_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3, _dci_fc_key)
-        _h_fc_l3_v6 = vxlan_obj.create_traffic_item(
-            device_handles=v6_device_handles,
-            endpoints=l3_cross_dc_endpoints,
-            topo_handles=topo_handles,
-            version='ipv6',
-            multi_dst='vrf',
-            name_prfx='DCI-FC-L3-X',
-            transmit_mode='continuous',
-            rate_percent=_dci_fc_rate,
-            pkts_per_burst=_dci_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3_v6, _dci_fc_key)
+        _l3_fc_pc_endpoints = {}
+        _l3_fc_seen_vrfs = set()
+        for _k, _v in l3_cross_dc_endpoints.items():
+            _src_int = _v.get('src_int', '')
+            _src_vrf = _v.get('src_vrf', '')
+            if not _src_int.startswith('PortChannel'):
+                continue
+            if _src_vrf in _l3_fc_seen_vrfs:
+                continue
+            _l3_fc_seen_vrfs.add(_src_vrf)
+            _l3_fc_pc_endpoints[_k] = _v
+        if _l3_fc_pc_endpoints:
+            st.banner("DCI: continuous L3 cross-DC (MH only, 1 VLAN/VRF) — {} endpoints".format(
+                len(_l3_fc_pc_endpoints)))
+            _h_fc_l3 = vxlan_obj.create_traffic_item(
+                device_handles=v4_device_handles,
+                endpoints=_l3_fc_pc_endpoints,
+                topo_handles=topo_handles,
+                multi_dst='vrf',
+                name_prfx='DCI-FC-L3-MH-X',
+                transmit_mode='continuous',
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3, _dci_fc_key)
+            _h_fc_l3_v6 = vxlan_obj.create_traffic_item(
+                device_handles=v6_device_handles,
+                endpoints=_l3_fc_pc_endpoints,
+                topo_handles=topo_handles,
+                version='ipv6',
+                multi_dst='vrf',
+                name_prfx='DCI-FC-L3-MH-X',
+                transmit_mode='continuous',
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3_v6, _dci_fc_key)
+        else:
+            st.log("NOTE: No PortChannel-sourced L3 cross-DC endpoints for continuous streams.")
 
     if stream_handles['dci_flap_continuous']:
         st.log("DCI flap continuous: {} stream(s) created (L2+L3)".format(len(stream_handles['dci_flap_continuous'])))
@@ -6739,34 +6753,47 @@ class TestVxlanDCIBase():
         stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
 
-        # Get all dci_flap_continuous streams and filter to the requested IP version only
+        # Get all dci_flap_continuous streams, filter to IP version, then pick
+        # 1 L2 stream + L3 streams (1 per VRF) — MH-only sources
         all_fc_streams = tgen_handles.get('dci_flap_continuous')
-        fc_streams = {}
+        _ver_streams = {}
         if isinstance(all_fc_streams, dict):
             for k, v in all_fc_streams.items():
                 if isinstance(v, dict) and v.get('version', '') == ixia_version:
-                    fc_streams[k] = v
+                    _ver_streams[k] = v
+        # Further filter: 1 L2 stream + L3 (1 per VRF)
+        fc_streams = {}
+        _fc_filt_key = 1
+        _l2_picked = False
+        _l3_vrfs_picked = set()
+        for k, v in _ver_streams.items():
+            if not isinstance(v, dict) or not v.get('stream_id'):
+                continue
+            _sname = v.get('name', '')
+            if 'L2' in _sname:
+                if not _l2_picked:
+                    fc_streams[_fc_filt_key] = v
+                    _fc_filt_key += 1
+                    _l2_picked = True
+                    st.log('TC{} picked L2 stream {}: name={}'.format(tc_num, k, _sname))
+            elif 'L3' in _sname:
+                _vrf_tag = ''
+                if '_vrf' in _sname:
+                    for _part in _sname.split('_'):
+                        if _part.startswith('vrf'):
+                            _vrf_tag = _part
+                            break
+                if not _vrf_tag:
+                    _vrf_tag = 'l3_{}'.format(k)
+                if _vrf_tag not in _l3_vrfs_picked:
+                    _l3_vrfs_picked.add(_vrf_tag)
+                    fc_streams[_fc_filt_key] = v
+                    _fc_filt_key += 1
+                    st.log('TC{} picked L3 stream {}: name={} vrf={}'.format(tc_num, k, _sname, _vrf_tag))
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
-        st.log('dci_flap_continuous {} streams: {} (total: {})'.format(
-            ip_version, len(fc_streams),
+        st.log('TC{}: {} version-filtered -> {} selected (1 L2 + L3/VRF) from {} total'.format(
+            tc_num, len(_ver_streams), len(fc_streams),
             len(all_fc_streams) if isinstance(all_fc_streams, dict) else 0))
-
-        # Ensure ALL continuous streams are disabled at the start of this TC
-        if isinstance(all_fc_streams, dict) and len(all_fc_streams) > 0:
-            _all_tg = None
-            _all_sids = []
-            for _k, _v in all_fc_streams.items():
-                if isinstance(_v, dict) and _v.get('stream_id'):
-                    _all_sids.append(_v['stream_id'])
-                    if not _all_tg:
-                        _all_tg = _v.get('tg_handle')
-            if _all_tg and _all_sids:
-                try:
-                    _all_tg.tg_traffic_control(action='stop', stream_handle=_all_sids, max_wait_timer='10')
-                except Exception:
-                    pass
-                _all_tg.tg_traffic_config(mode='disable', stream_id=_all_sids)
-                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_all_sids)))
 
         # Step 1: Verify base setup
         st.banner('Step 1: Verify base setup before DF failover')
@@ -6963,23 +6990,6 @@ class TestVxlanDCIBase():
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
-        # Ensure all continuous streams are disabled at the start of this TC
-        if fc_available:
-            _init_tg = None
-            _init_sids = []
-            for _k, _v in fc_streams.items():
-                if isinstance(_v, dict) and _v.get('stream_id'):
-                    _init_sids.append(_v['stream_id'])
-                    if not _init_tg:
-                        _init_tg = _v.get('tg_handle')
-            if _init_tg and _init_sids:
-                try:
-                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
-                except Exception:
-                    pass
-                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
-                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
-
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
         if not dc1_bgws:
@@ -7157,23 +7167,6 @@ class TestVxlanDCIBase():
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
-
-        # Ensure all continuous streams are disabled at the start of this TC
-        if fc_available:
-            _init_tg = None
-            _init_sids = []
-            for _k, _v in fc_streams.items():
-                if isinstance(_v, dict) and _v.get('stream_id'):
-                    _init_sids.append(_v['stream_id'])
-                    if not _init_tg:
-                        _init_tg = _v.get('tg_handle')
-            if _init_tg and _init_sids:
-                try:
-                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
-                except Exception:
-                    pass
-                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
-                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
 
         # Build ordered list of DC1 nodes for rolling reboot
         # Order: leaf1_dc1 -> leaf2_dc1 -> spine0_dc1 -> spine1_bgw (first DC1 BGW)
@@ -7354,23 +7347,6 @@ class TestVxlanDCIBase():
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
-        # Ensure all continuous streams are disabled at the start of this TC
-        if fc_available:
-            _init_tg = None
-            _init_sids = []
-            for _k, _v in fc_streams.items():
-                if isinstance(_v, dict) and _v.get('stream_id'):
-                    _init_sids.append(_v['stream_id'])
-                    if not _init_tg:
-                        _init_tg = _v.get('tg_handle')
-            if _init_tg and _init_sids:
-                try:
-                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
-                except Exception:
-                    pass
-                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
-                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
-
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
         if not dc1_bgws:
@@ -7390,55 +7366,28 @@ class TestVxlanDCIBase():
             report_result(False, tc_id, summ)
             return
 
-        # Step 2: Start continuous traffic — 1 VLAN per VRF (2 streams only)
-        st.banner('Step 2: Start continuous traffic (1 VLAN per VRF from dci_flap_continuous)')
+        # Step 2: Start continuous traffic — all L2 + L3 (v4+v6) streams
+        st.banner('Step 2: Start continuous L2 + L3 traffic (all dci_flap_continuous streams)')
         if not fc_available:
             summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
             report_result(False, tc_id, summ)
             return
 
-        # Filter fc_streams to 1 stream per VRF (2 streams total)
-        _seen_vrfs = set()
-        _fc_subset = {}
-        _fc_subset_key = 1
+        # Use ALL fc_streams (L2 and L3, v4+v6) — no VRF filtering
+        st.log('TC96: using all {} dci_flap_continuous streams (L2 + L3 v4/v6)'.format(len(fc_streams)))
         for _k, _v in fc_streams.items():
-            if not isinstance(_v, dict) or not _v.get('stream_id'):
-                continue
-            _sname = _v.get('name', '')
-            # Extract VRF from stream name (e.g. '_vrf101' or '_vrf102')
-            _vrf_tag = ''
-            if '_vrf' in _sname:
-                for _part in _sname.split('_'):
-                    if _part.startswith('vrf'):
-                        _vrf_tag = _part
-                        break
-            if not _vrf_tag:
-                # For streams without VRF in name, derive from VLAN
-                # VLAN 12 -> VRF 101, VLAN 18 -> VRF 102
-                if 'vlan12' in _sname or 'v12' in _sname:
-                    _vrf_tag = 'vrf101'
-                elif 'vlan18' in _sname or 'v18' in _sname:
-                    _vrf_tag = 'vrf102'
-                else:
-                    _vrf_tag = 'unknown_{}'.format(_k)
-            if _vrf_tag not in _seen_vrfs:
-                _seen_vrfs.add(_vrf_tag)
-                _fc_subset[_fc_subset_key] = _v
-                _fc_subset_key += 1
-                st.log('TC96 selected stream {}: name={} vrf={}'.format(_k, _sname, _vrf_tag))
-
-        st.log('TC96: filtered to {} streams (1 per VRF) from {} total'.format(
-            len(_fc_subset), len(fc_streams)))
+            if isinstance(_v, dict):
+                st.log('TC96 stream {}: name={}'.format(_k, _v.get('name', '')))
 
         # Collect stream IDs and tg_handle for rate config and later disable
         _fc_tg_handle = None
         _fc_stream_ids = []
-        for _k, _v in _fc_subset.items():
+        for _k, _v in fc_streams.items():
             if isinstance(_v, dict) and _v.get('stream_id'):
                 _fc_stream_ids.append(_v['stream_id'])
                 if not _fc_tg_handle:
                     _fc_tg_handle = _v.get('tg_handle')
-        # Configure rate_percent to 0.01 on selected streams
+        # Configure rate_percent to 0.01 on all continuous streams
         if _fc_tg_handle and _fc_stream_ids:
             for sid in _fc_stream_ids:
                 _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
@@ -7446,7 +7395,7 @@ class TestVxlanDCIBase():
 
         try:
             vxlan_obj.check_traffic(
-                _fc_subset,
+                fc_streams,
                 regenerate_traffic_items=True,
                 action='start',
                 stop_proto_wait=stop_pw,
@@ -7488,7 +7437,7 @@ class TestVxlanDCIBase():
             st.banner('Step 4: Verify continuous traffic recovers and drop is within threshold')
             st.wait(15, 'Wait for BGP convergence after RT re-add')
             if not vxlan_obj.check_traffic(
-                    _fc_subset, action='check', stop_start_protocols=False, min_perc=99.6):
+                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
                 summ += 'Continuous traffic did not recover after import/export RT remove/add\n'
                 result = False
             else:
@@ -7511,7 +7460,7 @@ class TestVxlanDCIBase():
             # Step 5: Stop continuous traffic
             st.banner('Step 5: Stopping continuous traffic')
             try:
-                vxlan_obj.check_traffic(_fc_subset, action='stop', stop_start_protocols=False)
+                vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
             except Exception:
                 pass
             # Disable continuous streams so they are not left enabled
@@ -7564,23 +7513,6 @@ class TestVxlanDCIBase():
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
-        # Ensure all continuous streams are disabled at the start of this TC
-        if fc_available:
-            _init_tg = None
-            _init_sids = []
-            for _k, _v in fc_streams.items():
-                if isinstance(_v, dict) and _v.get('stream_id'):
-                    _init_sids.append(_v['stream_id'])
-                    if not _init_tg:
-                        _init_tg = _v.get('tg_handle')
-            if _init_tg and _init_sids:
-                try:
-                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
-                except Exception:
-                    pass
-                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
-                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
-
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
         if not dc1_bgws:
@@ -7600,55 +7532,28 @@ class TestVxlanDCIBase():
             report_result(False, tc_id, summ)
             return
 
-        # Step 2: Start continuous traffic — 1 VLAN per VRF (2 streams only)
-        st.banner('Step 2: Start continuous traffic (1 VLAN per VRF from dci_flap_continuous)')
+        # Step 2: Start continuous traffic — all L2 + L3 (v4+v6) streams
+        st.banner('Step 2: Start continuous L2 + L3 traffic (all dci_flap_continuous streams)')
         if not fc_available:
             summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
             report_result(False, tc_id, summ)
             return
 
-        # Filter fc_streams to 1 stream per VRF (2 streams total)
-        _seen_vrfs = set()
-        _fc_subset = {}
-        _fc_subset_key = 1
+        # Use ALL fc_streams (L2 and L3, v4+v6) — no VRF filtering
+        st.log('TC97: using all {} dci_flap_continuous streams (L2 + L3 v4/v6)'.format(len(fc_streams)))
         for _k, _v in fc_streams.items():
-            if not isinstance(_v, dict) or not _v.get('stream_id'):
-                continue
-            _sname = _v.get('name', '')
-            # Extract VRF from stream name (e.g. '_vrf101' or '_vrf102')
-            _vrf_tag = ''
-            if '_vrf' in _sname:
-                for _part in _sname.split('_'):
-                    if _part.startswith('vrf'):
-                        _vrf_tag = _part
-                        break
-            if not _vrf_tag:
-                # For streams without VRF in name, derive from VLAN
-                # VLAN 12 -> VRF 101, VLAN 18 -> VRF 102
-                if 'vlan12' in _sname or 'v12' in _sname:
-                    _vrf_tag = 'vrf101'
-                elif 'vlan18' in _sname or 'v18' in _sname:
-                    _vrf_tag = 'vrf102'
-                else:
-                    _vrf_tag = 'unknown_{}'.format(_k)
-            if _vrf_tag not in _seen_vrfs:
-                _seen_vrfs.add(_vrf_tag)
-                _fc_subset[_fc_subset_key] = _v
-                _fc_subset_key += 1
-                st.log('TC97 selected stream {}: name={} vrf={}'.format(_k, _sname, _vrf_tag))
-
-        st.log('TC97: filtered to {} streams (1 per VRF) from {} total'.format(
-            len(_fc_subset), len(fc_streams)))
+            if isinstance(_v, dict):
+                st.log('TC97 stream {}: name={}'.format(_k, _v.get('name', '')))
 
         # Collect stream IDs and tg_handle for rate config and later disable
         _fc_tg_handle = None
         _fc_stream_ids = []
-        for _k, _v in _fc_subset.items():
+        for _k, _v in fc_streams.items():
             if isinstance(_v, dict) and _v.get('stream_id'):
                 _fc_stream_ids.append(_v['stream_id'])
                 if not _fc_tg_handle:
                     _fc_tg_handle = _v.get('tg_handle')
-        # Configure rate_percent to 0.01 on selected streams
+        # Configure rate_percent to 0.01 on all continuous streams
         if _fc_tg_handle and _fc_stream_ids:
             for sid in _fc_stream_ids:
                 _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
@@ -7656,7 +7561,7 @@ class TestVxlanDCIBase():
 
         try:
             vxlan_obj.check_traffic(
-                _fc_subset,
+                fc_streams,
                 regenerate_traffic_items=True,
                 action='start',
                 stop_proto_wait=stop_pw,
@@ -7699,7 +7604,7 @@ class TestVxlanDCIBase():
             st.banner('Step 4: Verify continuous traffic recovers and drop is within threshold')
             st.wait(15, 'Wait for BGP convergence after RT-REWRITE re-add')
             if not vxlan_obj.check_traffic(
-                    _fc_subset, action='check', stop_start_protocols=False, min_perc=99.6):
+                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
                 summ += 'Continuous traffic did not recover after RT-REWRITE remove/add\n'
                 result = False
             else:
@@ -7722,7 +7627,7 @@ class TestVxlanDCIBase():
             # Step 5: Stop continuous traffic
             st.banner('Step 5: Stopping continuous traffic')
             try:
-                vxlan_obj.check_traffic(_fc_subset, action='stop', stop_start_protocols=False)
+                vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
             except Exception:
                 pass
             # Disable continuous streams so they are not left enabled

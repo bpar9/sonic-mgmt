@@ -6751,6 +6751,23 @@ class TestVxlanDCIBase():
             ip_version, len(fc_streams),
             len(all_fc_streams) if isinstance(all_fc_streams, dict) else 0))
 
+        # Ensure ALL continuous streams are disabled at the start of this TC
+        if isinstance(all_fc_streams, dict) and len(all_fc_streams) > 0:
+            _all_tg = None
+            _all_sids = []
+            for _k, _v in all_fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _all_sids.append(_v['stream_id'])
+                    if not _all_tg:
+                        _all_tg = _v.get('tg_handle')
+            if _all_tg and _all_sids:
+                try:
+                    _all_tg.tg_traffic_control(action='stop', stream_handle=_all_sids, max_wait_timer='10')
+                except Exception:
+                    pass
+                _all_tg.tg_traffic_config(mode='disable', stream_id=_all_sids)
+                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_all_sids)))
+
         # Step 1: Verify base setup
         st.banner('Step 1: Verify base setup before DF failover')
         setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
@@ -6939,6 +6956,23 @@ class TestVxlanDCIBase():
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
+        # Ensure all continuous streams are disabled at the start of this TC
+        if fc_available:
+            _init_tg = None
+            _init_sids = []
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _init_sids.append(_v['stream_id'])
+                    if not _init_tg:
+                        _init_tg = _v.get('tg_handle')
+            if _init_tg and _init_sids:
+                try:
+                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
+                except Exception:
+                    pass
+                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
+                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
+
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
         if not dc1_bgws:
@@ -7116,6 +7150,23 @@ class TestVxlanDCIBase():
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+
+        # Ensure all continuous streams are disabled at the start of this TC
+        if fc_available:
+            _init_tg = None
+            _init_sids = []
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _init_sids.append(_v['stream_id'])
+                    if not _init_tg:
+                        _init_tg = _v.get('tg_handle')
+            if _init_tg and _init_sids:
+                try:
+                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
+                except Exception:
+                    pass
+                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
+                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
 
         # Build ordered list of DC1 nodes for rolling reboot
         # Order: leaf1_dc1 -> leaf2_dc1 -> spine0_dc1 -> spine1_bgw (first DC1 BGW)
@@ -7296,6 +7347,23 @@ class TestVxlanDCIBase():
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
+        # Ensure all continuous streams are disabled at the start of this TC
+        if fc_available:
+            _init_tg = None
+            _init_sids = []
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _init_sids.append(_v['stream_id'])
+                    if not _init_tg:
+                        _init_tg = _v.get('tg_handle')
+            if _init_tg and _init_sids:
+                try:
+                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
+                except Exception:
+                    pass
+                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
+                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
+
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
         if not dc1_bgws:
@@ -7455,6 +7523,23 @@ class TestVxlanDCIBase():
         start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
         fc_streams = tgen_handles.get('dci_flap_continuous')
         fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+
+        # Ensure all continuous streams are disabled at the start of this TC
+        if fc_available:
+            _init_tg = None
+            _init_sids = []
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _init_sids.append(_v['stream_id'])
+                    if not _init_tg:
+                        _init_tg = _v.get('tg_handle')
+            if _init_tg and _init_sids:
+                try:
+                    _init_tg.tg_traffic_control(action='stop', stream_handle=_init_sids, max_wait_timer='10')
+                except Exception:
+                    pass
+                _init_tg.tg_traffic_config(mode='disable', stream_id=_init_sids)
+                st.log('Disabled all {} dci_flap_continuous streams at TC start'.format(len(_init_sids)))
 
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])

@@ -28,7 +28,8 @@ from tests.packet_trimming.constants import (DEFAULT_SRC_PORT, DEFAULT_DST_PORT,
                                              SCHEDULER_TYPE, SCHEDULER_WEIGHT, SCHEDULER_PIR, MIRROR_SESSION_NAME,
                                              MIRROR_SESSION_SRC_IP, MIRROR_SESSION_DST_IP, MIRROR_SESSION_DSCP,
                                              MIRROR_SESSION_TTL, MIRROR_SESSION_GRE, MIRROR_SESSION_QUEUE,
-                                             SCHEDULER_CIR, SCHEDULER_METER_TYPE, PACKET_SIZE_MARGIN)
+                                             SCHEDULER_CIR, SCHEDULER_METER_TYPE, PACKET_SIZE_MARGIN,
+                                             TRIMMING_COUNTER_INTERVAL)
 from tests.packet_trimming.packet_trimming_config import PacketTrimmingConfig
 
 logger = logging.getLogger(__name__)
@@ -1552,29 +1553,24 @@ def cleanup_trimming_acl(duthost):
     logger.info("ACL rules cleanup completed successfully")
 
 
-def set_buffer_profiles_for_block_and_trim_queues(duthost, interfaces, block_queue_id,
-                                                  block_queue_profile, trim_queue_id=None,
-                                                  trim_queue_profile=TRIM_QUEUE_PROFILE):
+def set_buffer_profile_for_block_queue(duthost, interfaces, block_queue_id, block_queue_profile):
     """
-    Set buffer profiles for blocked queue and forward trimming packet queue.
+    Set buffer profile for the blocked queue of interfaces.
 
     Args:
         duthost: DUT host object
         interfaces (list or str): Port names to configure, can be a list or single string
         block_queue_id: Queue index used for blocking traffic
         block_queue_profile (str): Buffer profile name to apply for blocking queue
-        trim_queue_id (int): Queue index used for packet trimming (default: trim queue from packet_trimming_config)
-        trim_queue_profile (str): Buffer profile name to apply for trimming queue (default: TRIM_QUEUE_PROFILE)
 
     Raises:
-        RuntimeError: If any interface fails to be configured with the specified profiles
+        RuntimeError: If any interface fails to be configured with the specified profile.
     """
-    # Convert queue indices to string for Redis commands
+    # Convert the queue index to string for the Redis command
     block_queue_id = str(block_queue_id)
-    trim_queue_id = str(trim_queue_id) if trim_queue_id else str(PacketTrimmingConfig.get_trim_queue(duthost))
 
-    logger.info(f"Setting blocking queue ({block_queue_id}) buffer profile to '{block_queue_profile}' and "
-                f"trimming queue ({trim_queue_id}) buffer profile to '{trim_queue_profile}', ports: {interfaces}")
+    logger.info(f"Setting blocking queue ({block_queue_id}) buffer profile to '{block_queue_profile}', "
+                f"ports: {interfaces}")
 
     # Convert single interface to list
     if isinstance(interfaces, str):
@@ -1590,6 +1586,37 @@ def set_buffer_profiles_for_block_and_trim_queues(duthost, interfaces, block_que
                 f"Successfully set interface {interface} blocking queue {block_queue_id} "
                 f"profile to {block_queue_profile}")
 
+        except Exception as e:
+            if not isinstance(e, RuntimeError):
+                raise RuntimeError(f"Exception while configuring interface {interface} blocking queue: {str(e)}") from e
+            raise
+
+
+def set_buffer_profile_for_trim_queue(duthost, interfaces, trim_queue_id=None, trim_queue_profile=TRIM_QUEUE_PROFILE):
+    """
+    Set buffer profile for the forward trimming packet queue of interfaces.
+
+    Args:
+        duthost: DUT host object
+        interfaces (list or str): Port names to configure, can be a list or single string
+        trim_queue_id (int): Queue index used for packet trimming (default: trim queue from packet_trimming_config)
+        trim_queue_profile (str): Buffer profile name to apply for trimming queue (default: TRIM_QUEUE_PROFILE)
+
+    Raises:
+        RuntimeError: If any interface fails to be configured with the specified profile.
+    """
+    # Convert the queue index to string for the Redis command
+    trim_queue_id = str(trim_queue_id) if trim_queue_id else str(PacketTrimmingConfig.get_trim_queue(duthost))
+
+    logger.info(f"Setting trimming queue ({trim_queue_id}) buffer profile to '{trim_queue_profile}', "
+                f"ports: {interfaces}")
+
+    # Convert single interface to list
+    if isinstance(interfaces, str):
+        interfaces = [interfaces]
+
+    for interface in interfaces:
+        try:
             # Set buffer profile for the trimming queue
             trim_cmd = f"redis-cli -n 4 hset 'BUFFER_QUEUE|{interface}|{trim_queue_id}' profile {trim_queue_profile}"
             duthost.shell(trim_cmd)
@@ -1600,7 +1627,7 @@ def set_buffer_profiles_for_block_and_trim_queues(duthost, interfaces, block_que
 
         except Exception as e:
             if not isinstance(e, RuntimeError):
-                raise RuntimeError(f"Exception while configuring interface {interface} queues: {str(e)}") from e
+                raise RuntimeError(f"Exception while configuring interface {interface} trimming queue: {str(e)}") from e
             raise
 
 
@@ -2877,6 +2904,39 @@ def compare_counters(counter1, counter2, keys_to_compare):
     logger.info("All specified counters match")
 
 
+def check_trim_drop_counter_zero(duthost, port):
+    """
+    Check if TRIM_DRP_PKTS counter on the specified port is 0.
+
+    Args:
+        duthost: DUT host object
+        port (str): port name, e.g. "Ethernet96"
+
+    Returns:
+        bool: True if TRIM_DRP_PKTS is 0, False otherwise
+    """
+    trim_drop = get_port_trim_counters_json(duthost, port)['TRIM_DRP_PKTS']
+    logger.info(f"TRIM_DRP_PKTS on port {port}: {trim_drop}")
+    return trim_drop == 0
+
+
+def has_non_zero_trim_counters(duthost, port):
+    """
+    Checks if port level trim counters are non-zero.
+
+    Args:
+        duthost: DUT host object
+        port (str): port name, e.g. "Ethernet96"
+
+    Returns:
+        True if the counters are non-zero, otherwise False
+    """
+    port_trim_packets = get_port_trim_counters_json(duthost, port)
+    if 'TRIM_PKTS' not in port_trim_packets:
+        return False
+    return int(port_trim_packets['TRIM_PKTS']) > 0
+
+
 def verify_queue_and_port_trim_counter_consistency(duthost, port):
     """
     Verify the consistency of the trim counter on the queue and the port level.
@@ -2889,6 +2949,10 @@ def verify_queue_and_port_trim_counter_consistency(duthost, port):
         AssertionError: If the trim counter on the queue is not equal to the trim counter on the port level
     """
     logger.info(f"Verify the consistency of the trim counter on the queue and the port level for port {port}")
+
+    sleep_time = TRIMMING_COUNTER_INTERVAL / 1000 + 1
+    logger.info(f"Waiting {sleep_time} seconds for the trim counter to be updated")
+    time.sleep(sleep_time)
 
     # Get the trim counter information on the queue level
     queue_counters = get_queue_trim_counters_json(duthost, port)

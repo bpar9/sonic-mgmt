@@ -16,7 +16,7 @@ from tests.common.utilities import wait_until, delete_running_config
 from tests.common.utilities import is_ipv6_only_topology
 
 pytestmark = [
-    pytest.mark.topology('t0', 't1', 't2', 'm1', 'lt2', 'ft2'),
+    pytest.mark.topology('t0', 't1', 't2', 'm1', 'lt2', 'ft2', 'c0'),
 ]
 
 TEST_ITERATIONS = 5
@@ -152,9 +152,12 @@ def match_bgp_notification(packet, src_ip, dst_ip, action, bgp_session_down_time
 
     bgp_fields = packet[bgp.BGPNotification].fields
     if action == "cease":
-        # error_code 6: Cease, error_subcode 3: Peer De-configured. References: RFC 4271
+        # error_code 6: Cease. References: RFC 4271
+        # error_subcode 3: Peer De-configured — expected during admin shutdown
+        # error_subcode 7: Connection Collision Resolution — may occur transiently
+        #   if FRR attempts to reconnect while the old session is still clearing
         return (bgp_fields["error_code"] == 6 and
-                bgp_fields["error_subcode"] == 3 and
+                bgp_fields["error_subcode"] in (3, 7) and
                 (bgp_session_down_time is None or float(packet.time) < bgp_session_down_time))
     else:
         return False

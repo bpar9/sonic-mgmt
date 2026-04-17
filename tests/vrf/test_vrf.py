@@ -22,6 +22,7 @@ from tests.ptf_runner import ptf_runner
 from tests.common.utilities import wait_until
 from tests.common.reboot import reboot
 from tests.common.helpers.assertions import pytest_assert
+from tests.common.storage_backend.backend_utils import skip_test_module_over_backend_topologies  # noqa: F401
 
 """
     During vrf testing, a vrf basic configuration need to be setup before any tests,
@@ -497,8 +498,9 @@ def restore_config_db(localhost, duthost, ptfhost):
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_vrf(
-    tbinfo, duthosts, rand_one_dut_hostname, ptfhost, localhost, skip_test_module_over_backend_topologies
-):  # noqa: F811
+    tbinfo, duthosts, rand_one_dut_hostname, ptfhost, localhost,
+    skip_test_module_over_backend_topologies  # noqa: F811
+):
     duthost = duthosts[rand_one_dut_hostname]
 
     # backup config_db.json
@@ -1102,7 +1104,14 @@ class TestVrfLoopbackIntf:
         ptfhost.shell("pgrep exabgp")
 
         # make sure routes announced to bgp neighbors
-        time.sleep(10)
+        def _bgp_speaker_routes_announced():
+            bgp_facts = duthost.bgp_facts()['ansible_facts']
+            for nbr, info in bgp_facts['bgp_neighbors'].items():
+                if info.get('state') != 'established':
+                    return False
+            return True
+
+        wait_until(30, 2, 0, _bgp_speaker_routes_announced)
 
         # -------- Testing ----------
 
@@ -1492,7 +1501,12 @@ class TestVrfUnbindIntf:
         duthost.shell("config interface vrf unbind {}".format(PORTCHANNEL_TEMP_1))
 
         # wait for neigh/route flush
-        time.sleep(5)
+        def _pc1_ip_flushed():
+            output = duthost.shell("ip addr show {}".format(PORTCHANNEL_TEMP_1),
+                                   module_ignore_errors=True)['stdout']
+            return 'inet ' not in output
+
+        wait_until(30, 2, 0, _pc1_ip_flushed)
 
         # -------- Testing ----------
         yield
@@ -1656,7 +1670,12 @@ class TestVrfDeletion:
         gen_vrf_neigh_file("Vrf2", ptfhost, render_file="/tmp/vrf2_neigh.txt")
 
         duthost.shell("config vrf del Vrf1")
-        time.sleep(5)
+
+        def _vrf1_deleted():
+            output = duthost.shell("ip link show type vrf", module_ignore_errors=True)['stdout']
+            return 'Vrf1' not in output
+
+        wait_until(30, 2, 0, _vrf1_deleted)
 
         # -------- Testing ----------
         yield

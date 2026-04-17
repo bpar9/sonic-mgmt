@@ -4692,6 +4692,12 @@ srv6/test_srv6_dataplane.py:
     conditions:
       - "'t0-isolated-d256u256s2' in topo_name and platform in ['x86_64-nvidia_sn5640-r0']"
 
+srv6/test_srv6_dataplane.py::TestSRv6DataPlaneBase::test_srv6_full_func:
+  xfail:
+    reason: "Subnet decap tunnel is disabled on 202412."
+    conditions:
+      - "release in ['202412']"
+
 srv6/test_srv6_static_config.py:
   skip:
     reason: "Requires particular image support, skip in PR testing. Skip for non Arista-7060X6-64PE-B-* TH5 SKUs. Skip for t0-isolated-d96u32, t1-isolated-d32/128"

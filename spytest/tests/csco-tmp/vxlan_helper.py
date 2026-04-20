@@ -5246,7 +5246,7 @@ def verify_evpn_type4_routes(dut, exp_type4_routes, **kwargs):
     return act_type4_routes
 
 
-def _log_evpn_type2_route_table(node, item, host_type):
+def _log_evpn_type2_route_table(node, item, host_type, route_type='local'):
     """Log a single EVPN type-2 route as a table (for dci_enabled)."""
     mac = item.get('mac', '')
     ip = item.get('ip', '') or '-'
@@ -5266,7 +5266,7 @@ def _log_evpn_type2_route_table(node, item, host_type):
     if host_type == 'mac_only':
         rows = [r for r in rows if r[0] != 'IP']
     col_w = max(len(r[0]) for r in rows) + 1
-    st.log("EVPN type-2 route (local):")
+    st.log("EVPN type-2 route ({}):".format(route_type))
     for label, value in rows:
         st.log("  {} {}".format((label + ":").ljust(col_w), value))
 
@@ -5395,6 +5395,8 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
     learn_type = ""
     found_on_node = None
     found_seq = None
+    mac_found = False
+    ip_found = False
     if host_type == 'mac_only':
         mac_addr = host_info
         ip_addr = ''

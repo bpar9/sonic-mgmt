@@ -1433,23 +1433,21 @@ def tgen_preconfig(**kwargs):
         return k
 
     # Limit flap-continuous streams: two VLANs only (12, 18) — one traffic item per VLAN per AF
+    # Only PortChannel (MH) sources for continuous streams (DF failover / link flap tests)
     _dci_fc_vlans = (12, 18)
 
     def _dci_fc_endpoints_for_vlan(vlan_id):
         merged = {}
-        if l2_orphan_cross:
-            for _k, _v in l2_orphan_cross.items():
-                if _v.get('src_vlan') == vlan_id:
-                    merged[_k] = _v
+        # Only use PortChannel (MH) cross-DC endpoints for continuous streams
         if l2_pc_cross:
             for _k, _v in l2_pc_cross.items():
                 if _v.get('src_vlan') == vlan_id:
                     merged[_k] = _v
         return merged
 
-    if dci_enabled and (l2_orphan_cross or l2_pc_cross):
+    if dci_enabled and l2_pc_cross:
         st.banner(
-            "DCI: continuous L2 cross-DC for link flap tests — VLANs {} only".format(
+            "DCI: continuous L2 cross-DC (MH only) for link flap tests — VLANs {} only".format(
                 _dci_fc_vlans))
         for _vlan_fc in _dci_fc_vlans:
             _eps_fc = _dci_fc_endpoints_for_vlan(_vlan_fc)
@@ -1460,7 +1458,7 @@ def tgen_preconfig(**kwargs):
                 endpoints=_eps_fc,
                 topo_handles=topo_handles,
                 multi_dst='vlan',
-                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
+                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
                 transmit_mode='continuous',
                 rate_percent=_dci_fc_rate,
                 pkts_per_burst=_dci_fc_ppb,
@@ -1476,7 +1474,7 @@ def tgen_preconfig(**kwargs):
                 topo_handles=topo_handles,
                 version='ipv6',
                 multi_dst='vlan',
-                name_prfx='DCI-FC-L2-X-v{}'.format(_vlan_fc),
+                name_prfx='DCI-FC-L2-MH-X-v{}'.format(_vlan_fc),
                 transmit_mode='continuous',
                 rate_percent=_dci_fc_rate,
                 pkts_per_burst=_dci_fc_ppb,
@@ -1484,31 +1482,47 @@ def tgen_preconfig(**kwargs):
             _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc, _dci_fc_key)
 
     # L3 continuous cross-DC traffic for DCI link flap/shut tests
+    # Only PortChannel (MH) sources, limited to 1 VLAN per VRF
     if dci_enabled and l3_cross_dc_endpoints:
-        st.banner("DCI: continuous L3 cross-DC for link flap tests")
-        _h_fc_l3 = vxlan_obj.create_traffic_item(
-            device_handles=v4_device_handles,
-            endpoints=l3_cross_dc_endpoints,
-            topo_handles=topo_handles,
-            multi_dst='vrf',
-            name_prfx='DCI-FC-L3-X',
-            transmit_mode='continuous',
-            rate_percent=_dci_fc_rate,
-            pkts_per_burst=_dci_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3, _dci_fc_key)
-        _h_fc_l3_v6 = vxlan_obj.create_traffic_item(
-            device_handles=v6_device_handles,
-            endpoints=l3_cross_dc_endpoints,
-            topo_handles=topo_handles,
-            version='ipv6',
-            multi_dst='vrf',
-            name_prfx='DCI-FC-L3-X',
-            transmit_mode='continuous',
-            rate_percent=_dci_fc_rate,
-            pkts_per_burst=_dci_fc_ppb,
-        )
-        _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3_v6, _dci_fc_key)
+        _l3_fc_pc_endpoints = {}
+        _l3_fc_seen_vrfs = set()
+        for _k, _v in l3_cross_dc_endpoints.items():
+            _src_int = _v.get('src_int', '')
+            _src_vrf = _v.get('src_vrf', '')
+            if not _src_int.startswith('PortChannel'):
+                continue
+            if _src_vrf in _l3_fc_seen_vrfs:
+                continue
+            _l3_fc_seen_vrfs.add(_src_vrf)
+            _l3_fc_pc_endpoints[_k] = _v
+        if _l3_fc_pc_endpoints:
+            st.banner("DCI: continuous L3 cross-DC (MH only, 1 VLAN/VRF) — {} endpoints".format(
+                len(_l3_fc_pc_endpoints)))
+            _h_fc_l3 = vxlan_obj.create_traffic_item(
+                device_handles=v4_device_handles,
+                endpoints=_l3_fc_pc_endpoints,
+                topo_handles=topo_handles,
+                multi_dst='vrf',
+                name_prfx='DCI-FC-L3-MH-X',
+                transmit_mode='continuous',
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3, _dci_fc_key)
+            _h_fc_l3_v6 = vxlan_obj.create_traffic_item(
+                device_handles=v6_device_handles,
+                endpoints=_l3_fc_pc_endpoints,
+                topo_handles=topo_handles,
+                version='ipv6',
+                multi_dst='vrf',
+                name_prfx='DCI-FC-L3-MH-X',
+                transmit_mode='continuous',
+                rate_percent=_dci_fc_rate,
+                pkts_per_burst=_dci_fc_ppb,
+            )
+            _dci_fc_key = _dci_merge_flap_continuous(stream_handles['dci_flap_continuous'], _h_fc_l3_v6, _dci_fc_key)
+        else:
+            st.log("NOTE: No PortChannel-sourced L3 cross-DC endpoints for continuous streams.")
 
     if stream_handles['dci_flap_continuous']:
         st.log("DCI flap continuous: {} stream(s) created (L2+L3)".format(len(stream_handles['dci_flap_continuous'])))
@@ -6696,6 +6710,939 @@ class TestVxlanDCIBase():
             st.log(summ)
             result = False
         
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:57 / L3VNI_dci:58  –  DF Failover with L3VNI traffic
+    # Uses continuous cross-DC traffic (dci_flap_continuous) per
+    # InterfaceTrigger pattern.  Only v4 streams for TC57, v6 for TC58.
+    # ------------------------------------------------------------------
+    @pytest.mark.parametrize("ip_version", ["v4", "v6"])
+    def test_base_dci_l3vni_mh_df_failover(self, ip_version):
+        """
+        L3VNI_dci:57 (IPv4) / L3VNI_dci:58 (IPv6) - DF failover with L3VNI traffic.
+
+        Description:
+            Multi-homed host on DC2 (leaf0_dc2 + leaf1_dc2 form an EVPN MH pair).
+            One leaf is the Designated Forwarder (DF) and the other is Non-DF.
+            Start continuous cross-DC traffic (only the matching IP version),
+            shutdown the DF leaf's host-facing PortChannel to trigger DF
+            election to the peer leaf, then verify continuous traffic continues
+            without significant loss.
+
+        Steps:
+            1. Verify base setup
+            2. Pick Leaf0 and Leaf1 of DC2; use 'show evpn es' to identify DF/NDF
+            3. Start continuous cross-DC traffic (filtered to v4 or v6 only)
+            4. Shutdown DF link of multi-homed host
+            5. Print 'show evpn es' after shutdown; verify continuous traffic
+            6. Restore PortChannel (no-shut), stop and disable continuous traffic
+            7. Check for core files and crashes
+        """
+        tc_num = 57 if ip_version == 'v4' else 58
+        ip_label = 'IPv4' if ip_version == 'v4' else 'IPv6'
+        ixia_version = 'ipv4' if ip_version == 'v4' else 'ipv6'
+        tc_id = 'test_base_dci_l3vni_mh_{}_df_failover'.format(ip_version)
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:{}: L3VNI Multi-homed - DF failover with {} L3VNI traffic ({})'.format(
+            tc_num, ip_label, tc_id))
+        result = True
+        summ = ''
+        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
+        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
+
+        # Get all dci_flap_continuous streams, filter to IP version, then pick
+        # 1 L2 stream + L3 streams (1 per VRF) — MH-only sources
+        all_fc_streams = tgen_handles.get('dci_flap_continuous')
+        _ver_streams = {}
+        if isinstance(all_fc_streams, dict):
+            for k, v in all_fc_streams.items():
+                if isinstance(v, dict) and v.get('version', '') == ixia_version:
+                    _ver_streams[k] = v
+        # Further filter: 1 L2 stream + L3 (1 per VRF)
+        fc_streams = {}
+        _fc_filt_key = 1
+        _l2_picked = False
+        _l3_vrfs_picked = set()
+        for k, v in _ver_streams.items():
+            if not isinstance(v, dict) or not v.get('stream_id'):
+                continue
+            _sname = v.get('name', '')
+            if 'L2' in _sname:
+                if not _l2_picked:
+                    fc_streams[_fc_filt_key] = v
+                    _fc_filt_key += 1
+                    _l2_picked = True
+                    st.log('TC{} picked L2 stream {}: name={}'.format(tc_num, k, _sname))
+            elif 'L3' in _sname:
+                _vrf_tag = ''
+                if '_vrf' in _sname:
+                    for _part in _sname.split('_'):
+                        if _part.startswith('vrf'):
+                            _vrf_tag = _part
+                            break
+                if not _vrf_tag:
+                    _vrf_tag = 'l3_{}'.format(k)
+                if _vrf_tag not in _l3_vrfs_picked:
+                    _l3_vrfs_picked.add(_vrf_tag)
+                    fc_streams[_fc_filt_key] = v
+                    _fc_filt_key += 1
+                    st.log('TC{} picked L3 stream {}: name={} vrf={}'.format(tc_num, k, _sname, _vrf_tag))
+        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+        st.log('TC{}: {} version-filtered -> {} selected (1 L2 + L3/VRF) from {} total'.format(
+            tc_num, len(_ver_streams), len(fc_streams),
+            len(all_fc_streams) if isinstance(all_fc_streams, dict) else 0))
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before DF failover')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before DF failover\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Pick Leaf0 and Leaf1 of DC2 and determine DF/NDF via 'show evpn es'
+        st.banner('Step 2: Pick Leaf0 and Leaf1 of DC2 as DF/NDF pair')
+        dc2_leafs = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                      if 'leaf' in n and 'dc2' in n]
+        if len(dc2_leafs) < 2:
+            dc2_leafs = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                          if 'leaf' in n and 'dc2' in n]
+        if len(dc2_leafs) < 2:
+            # Fallback: search ALL leaf nodes for DC2 leafs with port_channels
+            dc2_leafs = [n for n in test_cfg['nodes'].get('leaf', [])
+                          if 'dc2' in n and test_cfg.get(n, {}).get('port_channels')]
+        if len(dc2_leafs) < 2:
+            pytest.skip('DC2 does not have 2 MH leafs for DF failover test')
+            return
+
+        dc2_leafs = sorted(dc2_leafs)[:2]
+        st.log('DC2 MH leaf pair: {}'.format(dc2_leafs))
+
+        # Get PortChannel interfaces from test_cfg (port_channels key)
+        pc_map = {}
+        for leaf in dc2_leafs:
+            pcs = []
+            for pc in (test_cfg.get(leaf, {}).get('port_channels', []) or []):
+                pc_num = pc.get('port_channel_num')
+                if pc_num is not None:
+                    pcs.append('PortChannel{}'.format(pc_num))
+            pc_map[leaf] = pcs
+            st.log('{} PortChannels: {}'.format(leaf, pcs))
+            if not pcs:
+                st.log('DEBUG: test_cfg keys for {}: {}'.format(
+                    leaf, list(test_cfg.get(leaf, {}).keys()) if test_cfg.get(leaf) else 'NOT IN test_cfg'))
+
+        # Use 'show evpn es' to determine DF vs NDF
+        # 'N' in Type column means non-DF for that ESI
+        df_leaf = None
+        ndf_leaf = None
+        for leaf in dc2_leafs:
+            es_output = vxlan_obj.get_evpn_es(leaf)
+            st.log('{} show evpn es output: {}'.format(leaf, es_output))
+            for es_entry in (es_output or []):
+                es_type = es_entry.get('type', '')
+                es_if = es_entry.get('es_if', '')
+                if es_if.startswith('PortChannel') and 'N' in es_type:
+                    ndf_leaf = leaf
+                elif es_if.startswith('PortChannel') and 'L' in es_type and 'N' not in es_type:
+                    df_leaf = leaf
+
+        # Fallback: if we could not determine DF/NDF, pick first leaf with PCs as DF
+        if not df_leaf:
+            for leaf in dc2_leafs:
+                if pc_map.get(leaf):
+                    df_leaf = leaf
+                    break
+        if not ndf_leaf:
+            ndf_leaf = [l for l in dc2_leafs if l != df_leaf][0] if df_leaf else dc2_leafs[1]
+        if not df_leaf:
+            df_leaf = dc2_leafs[0]
+
+        df_pcs = pc_map.get(df_leaf, [])
+        if not df_pcs:
+            summ += 'No PortChannels found on DF leaf {}\n'.format(df_leaf)
+            report_result(False, tc_id, summ)
+            return
+        st.log('DF leaf: {} (PortChannels: {}), NDF leaf: {}'.format(df_leaf, df_pcs, ndf_leaf))
+
+        # Step 3: Start continuous cross-DC traffic (filtered to ip_version)
+        st.banner('Step 3: Start continuous {} cross-DC traffic (dci_flap_continuous)'.format(ip_label))
+        if not fc_available:
+            summ += 'dci_flap_continuous {} streams not available, cannot run continuous traffic test\n'.format(ip_version)
+            report_result(False, tc_id, summ)
+            return
+
+        # Configure rate_percent to 0.01 on selected streams before starting
+        tg_handle = None
+        fc_stream_ids = []
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict) and _v.get('stream_id'):
+                fc_stream_ids.append(_v['stream_id'])
+                if not tg_handle:
+                    tg_handle = _v.get('tg_handle')
+        if tg_handle and fc_stream_ids:
+            for sid in fc_stream_ids:
+                tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(fc_stream_ids)))
+
+        try:
+            vxlan_obj.check_traffic(
+                fc_streams,
+                regenerate_traffic_items=True,
+                action='start',
+                stop_proto_wait=stop_pw,
+                start_proto_wait=start_pw,
+            )
+        except Exception as err:
+            st.error('Continuous traffic start failed: {}'.format(err))
+            summ += 'Continuous traffic start failed: {}\n'.format(err)
+            report_result(False, tc_id, summ)
+            return
+
+        try:
+            # Step 4: Shutdown DF link of multi-homed host
+            st.banner('Step 4: Shutdown PortChannel on DF leaf {} to trigger DF failover'.format(df_leaf))
+            for pc in df_pcs:
+                st.log('Shutting PortChannel {} on {}'.format(pc, df_leaf))
+                intf_obj.interface_shutdown(dut=df_leaf, interfaces=pc)
+            st.wait(10, 'Wait for DF election to move to peer leaf')
+
+            # Print 'show evpn es' after shutdown to confirm DF/NDF change
+            st.banner('Step 4b: Print show evpn es after PortChannel shutdown')
+            for leaf in dc2_leafs:
+                es_output = vxlan_obj.get_evpn_es(leaf)
+                st.log('{} show evpn es (after shutdown): {}'.format(leaf, es_output))
+
+            # Step 5: Verify continuous traffic continues after DF failover
+            st.banner('Step 5: Verify continuous {} cross-DC traffic after DF failover'.format(ip_label))
+            if not vxlan_obj.check_traffic(
+                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
+                summ += 'Continuous {} cross-DC traffic failed after DF failover\n'.format(ip_label)
+                result = False
+            else:
+                st.log('Continuous {} cross-DC traffic continues after DF failover: PASS'.format(ip_label))
+
+        finally:
+            # Step 6: Restore PortChannel, stop and disable continuous traffic
+            st.banner('Step 6: Restore PortChannel on DF leaf {} and stop continuous traffic'.format(df_leaf))
+            for pc in df_pcs:
+                st.log('No-shutting PortChannel {} on {}'.format(pc, df_leaf))
+                intf_obj.interface_noshutdown(dut=df_leaf, interfaces=pc)
+            try:
+                vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
+            except Exception:
+                pass
+            # Disable continuous streams so they are not left enabled
+            if tg_handle and fc_stream_ids:
+                try:
+                    tg_handle.tg_traffic_config(mode='disable', stream_id=fc_stream_ids)
+                except Exception:
+                    pass
+            st.wait(15, 'Wait for PortChannel and DF election recovery')
+
+        # Step 7: Check for core files and crashes
+        st.banner('Step 7: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after DF failover test\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:84  –  Simultaneous reboot of both BGWs
+    # Uses continuous cross-DC traffic (dci_flap_continuous); drop on the
+    # continuous stream is NOT measured – burst verification after recovery.
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_simultaneous_bgw_reboot(self):
+        """
+        L3VNI_dci:84 - Simultaneous reboot of both BGWs in DC1.
+
+        Description:
+            Start continuous L2+L3 cross-DC traffic, simultaneously reboot
+            both BGW spines of DC1, verify docker recovery and VTEPs, stop
+            the continuous stream (drop not measured), then burst-verify
+            L2+L3 traffic across and within DC.
+
+        Steps:
+            1. Verify base setup before reboot
+            2. Save FRR configuration on both BGWs of DC1
+            3. Start continuous L2 and L3 traffic across DC
+            4. Simultaneously reboot both BGWs of DC1
+            5. Verify docker recovery of both BGWs
+            6. Verify all remote VTEPs are present with retries;
+               stop continuous traffic (not measuring drop)
+            7. Verify traffic flows l2_v4, l2_v6, l3_v4, l3_v6
+               across and within DC
+            8. Check for core files/crashes
+        """
+        tc_id = 'test_base_dci_l3vni_simultaneous_bgw_reboot'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:84: Simultaneous reboot of both BGWs ({})'.format(tc_id))
+        result = True
+        summ = ''
+        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
+        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
+        fc_streams = tgen_handles.get('dci_flap_continuous')
+        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+
+        # Get DC1 BGW nodes
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                         if 'bgw' in n and 'dc1' in n]
+        if len(dc1_bgws) < 2:
+            pytest.skip('DC1 does not have 2 BGW nodes for simultaneous reboot test')
+            return
+
+        dc1_bgws = sorted(dc1_bgws)[:2]
+        st.log('DC1 BGW nodes for simultaneous reboot: {}'.format(dc1_bgws))
+
+        # Step 1: Verify base setup before trigger
+        st.banner('Step 1: Verify base setup before simultaneous BGW reboot')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before simultaneous BGW reboot\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Save FRR config on both BGWs
+        st.banner('Step 2: Save FRR configuration on both BGWs')
+        docker_counts = {}
+        for bgw in dc1_bgws:
+            st.log('Saving BGP config on {}'.format(bgw))
+            vxlan_obj.config_dut(bgw, 'bgp', 'do write')
+            docker_counts[bgw] = basic_obj.get_and_match_docker_count(bgw)
+            st.log('Docker count on {} before reboot: {}'.format(bgw, docker_counts[bgw]))
+
+        # Step 3: Start continuous L2+L3 traffic across DC
+        st.banner('Step 3: Start continuous L2+L3 traffic across DC (dci_flap_continuous)')
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
+        if fc_available:
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _fc_stream_ids.append(_v['stream_id'])
+                    if not _fc_tg_handle:
+                        _fc_tg_handle = _v.get('tg_handle')
+            # Configure rate_percent to 0.01 on continuous streams
+            if _fc_tg_handle and _fc_stream_ids:
+                for sid in _fc_stream_ids:
+                    _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+                st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
+            try:
+                vxlan_obj.check_traffic(
+                    fc_streams,
+                    regenerate_traffic_items=True,
+                    action='start',
+                    stop_proto_wait=stop_pw,
+                    start_proto_wait=start_pw,
+                )
+            except Exception as err:
+                st.error('Continuous traffic start failed: {}'.format(err))
+                summ += 'Continuous traffic start failed: {}\n'.format(err)
+                result = False
+        else:
+            st.log('dci_flap_continuous streams not available; will use burst verification only')
+
+        # Step 4: Simultaneously reboot both BGWs
+        try:
+            st.banner('Step 4: Simultaneously rebooting both BGWs: {}'.format(dc1_bgws))
+            reboot_threads = []
+            for bgw in dc1_bgws:
+                t = threading.Thread(target=reboot_obj.dut_reboot, args=(bgw,))
+                t.start()
+                reboot_threads.append(t)
+            for t in reboot_threads:
+                t.join()
+            st.log('Both BGWs have been rebooted')
+
+            # Restore helper files
+            for bgw in dc1_bgws:
+                try:
+                    restore_helper_file(bgw)
+                except Exception:
+                    st.log('restore_helper_file not available or not needed for {}'.format(bgw))
+
+            # Step 5: Verify docker recovery on both BGWs
+            st.banner('Step 5: Verifying docker recovery on both BGWs')
+            for bgw in dc1_bgws:
+                st.log('Checking docker status on {}'.format(bgw))
+                if not poll_wait(basic_obj.verify_docker_status, 180, bgw, 'Exited'):
+                    summ += 'Dockers not auto recovered on {} after reboot\n'.format(bgw)
+                    report_result(False, tc_id, summ)
+                    return
+                if not poll_wait(basic_obj.get_and_match_docker_count, 180, bgw, docker_counts[bgw]):
+                    summ += 'All dockers not up on {} after reboot\n'.format(bgw)
+                    report_result(False, tc_id, summ)
+                    return
+            st.log('Docker recovery verified on both BGWs')
+
+            # Step 6: Verify VTEPs with retries
+            st.banner('Step 6: Verifying remote VTEPs are present with retries')
+            if not verify_base_setup_bgw(setup_nodes, retry=10):
+                summ += 'Base setup verification failed after simultaneous BGW reboot\n'
+                result = False
+
+            vtep_nodes = test_cfg['nodes'].get('l2l3vni', [])
+            if vtep_nodes:
+                if not vxlan_obj.verify_vtep(vtep_nodes, dci_enabled=True):
+                    summ += 'Remote VTEPs not fully recovered after simultaneous BGW reboot\n'
+                    result = False
+                else:
+                    st.log('All remote VTEPs are present')
+
+        finally:
+            # Stop continuous traffic (not measuring drop on continuous stream)
+            if fc_available and fc_streams:
+                st.banner('Stopping continuous traffic (drop not measured on continuous stream)')
+                try:
+                    vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
+                except Exception:
+                    pass
+                # Disable continuous streams so they are not left enabled
+                if _fc_tg_handle and _fc_stream_ids:
+                    try:
+                        _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                    except Exception:
+                        pass
+
+        # Step 7: Verify burst traffic l2_v4, l2_v6, l3_v4, l3_v6 across and within DC
+        st.banner('Step 7: Verifying burst traffic across and within DC after simultaneous BGW reboot')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
+            summ += 'Traffic verification failed after simultaneous BGW reboot\n'
+            result = False
+        else:
+            st.log('L2+L3 traffic verified across and within DC after simultaneous BGW reboot')
+
+        # Step 8: Check for core files
+        st.banner('Step 8: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after simultaneous BGW reboot\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:85  –  Rolling reboot of DC fabric
+    # Uses continuous cross-DC traffic (dci_flap_continuous); drop on the
+    # continuous stream is NOT measured – burst verification after recovery.
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_rolling_reboot(self):
+        """
+        L3VNI_dci:85 - Rolling reboot of DC1 fabric with L3VNI.
+
+        Description:
+            Start continuous L2+L3 cross-DC traffic, sequentially reboot DC1
+            nodes (Leaf1 -> Leaf2 -> Spine0 -> spine1_bgw1), verify docker
+            recovery of all rebooted nodes, stop continuous stream (drop not
+            measured), then burst-verify L2+L3 traffic across and within DC.
+
+        Steps:
+            1. Verify base setup before reboot
+            2. Save FRR configuration on leaf1, leaf2, spine0, spine1_bgw1 of DC1
+            3. Start continuous L2 and L3 traffic across and within DC
+            4. Perform rolling reboot: Leaf1 -> Leaf2 -> Spine0 -> spine1_bgw1
+            5. Verify docker recovery of all rebooted nodes
+            6. Verify all remote VTEPs are present with retries;
+               stop continuous traffic (not measuring drop)
+            7. Verify traffic flows l2_v4, l2_v6, l3_v4, l3_v6
+               across and within DC
+            8. Check for core files/crashes
+        """
+        tc_id = 'test_base_dci_l3vni_rolling_reboot'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:85: Rolling reboot of DC1 fabric with L3VNI ({})'.format(tc_id))
+        result = True
+        summ = ''
+        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
+        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
+        fc_streams = tgen_handles.get('dci_flap_continuous')
+        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+
+        # Build ordered list of DC1 nodes for rolling reboot
+        # Order: leaf1_dc1 -> leaf2_dc1 -> spine0_dc1 -> spine1_bgw (first DC1 BGW)
+        all_nodes = test_cfg['nodes'].get('l2l3vni_bgw', []) + test_cfg['nodes'].get('spine', [])
+        dc1_leafs = sorted([n for n in all_nodes if 'leaf' in n and 'dc1' in n])
+        dc1_spines = sorted([n for n in all_nodes if 'spine' in n and 'dc1' in n and 'bgw' not in n])
+        dc1_bgws = sorted([n for n in all_nodes if 'bgw' in n and 'dc1' in n])
+
+        rolling_nodes = []
+        if len(dc1_leafs) >= 2:
+            rolling_nodes.extend(dc1_leafs[1:3])  # leaf1_dc1, leaf2_dc1 (skip leaf0)
+        elif dc1_leafs:
+            rolling_nodes.extend(dc1_leafs[:1])
+        if dc1_spines:
+            rolling_nodes.append(dc1_spines[0])
+        if dc1_bgws:
+            rolling_nodes.append(dc1_bgws[0])
+
+        if not rolling_nodes:
+            pytest.skip('No DC1 nodes found for rolling reboot test')
+            return
+
+        st.log('Rolling reboot order: {}'.format(rolling_nodes))
+
+        # Step 1: Verify base setup before trigger
+        st.banner('Step 1: Verify base setup before rolling reboot')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before rolling reboot\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Save FRR config on all target nodes
+        st.banner('Step 2: Save FRR configuration on all rolling reboot nodes')
+        docker_counts = {}
+        for node in rolling_nodes:
+            st.log('Saving BGP config on {}'.format(node))
+            vxlan_obj.config_dut(node, 'bgp', 'do write')
+            docker_counts[node] = basic_obj.get_and_match_docker_count(node)
+
+        # Step 3: Start continuous L2+L3 traffic across and within DC
+        st.banner('Step 3: Start continuous L2+L3 traffic across and within DC (dci_flap_continuous)')
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
+        if fc_available:
+            for _k, _v in fc_streams.items():
+                if isinstance(_v, dict) and _v.get('stream_id'):
+                    _fc_stream_ids.append(_v['stream_id'])
+                    if not _fc_tg_handle:
+                        _fc_tg_handle = _v.get('tg_handle')
+            # Configure rate_percent to 0.01 on continuous streams
+            if _fc_tg_handle and _fc_stream_ids:
+                for sid in _fc_stream_ids:
+                    _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+                st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
+            try:
+                vxlan_obj.check_traffic(
+                    fc_streams,
+                    regenerate_traffic_items=True,
+                    action='start',
+                    stop_proto_wait=stop_pw,
+                    start_proto_wait=start_pw,
+                )
+            except Exception as err:
+                st.error('Continuous traffic start failed: {}'.format(err))
+                summ += 'Continuous traffic start failed: {}\n'.format(err)
+                result = False
+        else:
+            st.log('dci_flap_continuous streams not available; will use burst verification only')
+
+        # Step 4: Rolling reboot - sequential reboot with recovery wait
+        try:
+            st.banner('Step 4: Performing rolling reboot')
+            for idx, node in enumerate(rolling_nodes):
+                step_num = idx + 1
+                st.banner('Step 4.{}: Rebooting {} ({}/{})'.format(
+                    step_num, node, step_num, len(rolling_nodes)))
+                reboot_obj.dut_reboot(node)
+
+                try:
+                    restore_helper_file(node)
+                except Exception:
+                    st.log('restore_helper_file not available or not needed for {}'.format(node))
+
+                # Step 5 (per node): Verify docker recovery
+                st.log('Waiting for docker recovery on {}'.format(node))
+                if not poll_wait(basic_obj.verify_docker_status, 180, node, 'Exited'):
+                    summ += 'Dockers not recovered on {} during rolling reboot\n'.format(node)
+                    result = False
+                    continue
+                if not poll_wait(basic_obj.get_and_match_docker_count, 180, node, docker_counts[node]):
+                    summ += 'All dockers not up on {} during rolling reboot\n'.format(node)
+                    result = False
+                    continue
+                st.log('{} recovered successfully'.format(node))
+
+                # Brief wait for BGP convergence before next reboot
+                st.wait(10, 'Wait for convergence after {} reboot'.format(node))
+
+            # Step 6: Verify VTEPs with retries
+            st.banner('Step 6: Verifying base setup and VTEPs after rolling reboot')
+            if not verify_base_setup_bgw(setup_nodes, retry=10):
+                summ += 'Base setup verification failed after rolling reboot\n'
+                result = False
+
+            vtep_nodes = test_cfg['nodes'].get('l2l3vni', [])
+            if vtep_nodes:
+                if not vxlan_obj.verify_vtep(vtep_nodes, dci_enabled=True):
+                    summ += 'Remote VTEPs not fully recovered after rolling reboot\n'
+                    result = False
+                else:
+                    st.log('All remote VTEPs are present')
+
+        finally:
+            # Stop continuous traffic (not measuring drop on continuous stream)
+            if fc_available and fc_streams:
+                st.banner('Stopping continuous traffic (drop not measured on continuous stream)')
+                try:
+                    vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
+                except Exception:
+                    pass
+                # Disable continuous streams so they are not left enabled
+                if _fc_tg_handle and _fc_stream_ids:
+                    try:
+                        _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                    except Exception:
+                        pass
+
+        # Step 7: Verify burst traffic l2_v4, l2_v6, l3_v4, l3_v6 across and within DC
+        st.banner('Step 7: Verifying burst traffic across and within DC after rolling reboot')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
+            summ += 'Traffic verification failed after rolling reboot\n'
+            result = False
+        else:
+            st.log('L2+L3 traffic verified across and within DC after rolling reboot')
+
+        # Step 8: Check for core files
+        st.banner('Step 8: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after rolling reboot\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:96  –  Remove/Add Import Export RT
+    # Uses continuous traffic; verifies traffic recovers within threshold.
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_remove_add_import_export_rt(self):
+        """
+        L3VNI_dci:96 - Remove/Add Import Export RT on all BGWs of DC1.
+
+        Description:
+            Start continuous L2+L3 traffic, remove and then re-add the
+            route-target import/export configuration on all BGW spines
+            of DC1, then verify the continuous traffic recovers with
+            drop within threshold.
+
+        Steps:
+            1. Verify base setup
+            2. Start continuous traffic L2 and L3 (dci_flap_continuous)
+            3. Remove/Add Import Export RT on all BGWs of 1 DC
+            4. Verify continuous traffic recovers and drop is within threshold
+            5. Stop continuous traffic
+            6. Check for core files/crashes
+        """
+        tc_id = 'test_base_dci_l3vni_remove_add_import_export_rt'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:96: Remove/Add Import Export RT ({})'.format(tc_id))
+        result = True
+        summ = ''
+        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
+        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
+        fc_streams = tgen_handles.get('dci_flap_continuous')
+        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+
+        # Get DC1 BGW nodes
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                         if 'bgw' in n and 'dc1' in n]
+        if not dc1_bgws:
+            pytest.skip('No DC1 BGW nodes found for import/export RT test')
+            return
+
+        st.log('DC1 BGW nodes: {}'.format(dc1_bgws))
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before RT removal')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before RT removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Start continuous traffic — all L2 + L3 (v4+v6) streams
+        st.banner('Step 2: Start continuous L2 + L3 traffic (all dci_flap_continuous streams)')
+        if not fc_available:
+            summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Use ALL fc_streams (L2 and L3, v4+v6) — no VRF filtering
+        st.log('TC96: using all {} dci_flap_continuous streams (L2 + L3 v4/v6)'.format(len(fc_streams)))
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict):
+                st.log('TC96 stream {}: name={}'.format(_k, _v.get('name', '')))
+
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict) and _v.get('stream_id'):
+                _fc_stream_ids.append(_v['stream_id'])
+                if not _fc_tg_handle:
+                    _fc_tg_handle = _v.get('tg_handle')
+        # Configure rate_percent to 0.01 on all continuous streams
+        if _fc_tg_handle and _fc_stream_ids:
+            for sid in _fc_stream_ids:
+                _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
+
+        try:
+            vxlan_obj.check_traffic(
+                fc_streams,
+                regenerate_traffic_items=True,
+                action='start',
+                stop_proto_wait=stop_pw,
+                start_proto_wait=start_pw,
+            )
+        except Exception as err:
+            st.error('Continuous traffic start failed: {}'.format(err))
+            summ += 'Continuous traffic start failed: {}\n'.format(err)
+            report_result(False, tc_id, summ)
+            return
+
+        # Get config data for RT manipulation
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        try:
+            # Step 3: Remove/Add Import Export RT on all DC1 BGWs
+            st.banner('Step 3: Remove import/export RT on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Removing import/export RT on {}'.format(bgw))
+                remove_cfg = vxlan_obj.remove_bgw_import_export_rt(bgw, config_dict, bgp_info)
+                if remove_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', remove_cfg)
+                else:
+                    st.log('No RT config generated for {}, skipping'.format(bgw))
+
+            st.wait(10, 'Wait for RT removal to take effect')
+
+            st.banner('Step 3b: Re-add import/export RT on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Re-adding import/export RT on {}'.format(bgw))
+                add_cfg = vxlan_obj.add_bgw_import_export_rt(bgw, config_dict, bgp_info)
+                if add_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                else:
+                    st.log('No RT config generated for {}, skipping'.format(bgw))
+
+            # Step 4: Verify continuous traffic recovers within threshold
+            st.banner('Step 4: Verify continuous traffic recovers and drop is within threshold')
+            st.wait(15, 'Wait for BGP convergence after RT re-add')
+            if not vxlan_obj.check_traffic(
+                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
+                summ += 'Continuous traffic did not recover after import/export RT remove/add\n'
+                result = False
+            else:
+                st.log('Continuous traffic recovered after import/export RT remove/add: PASS')
+
+        except Exception as e:
+            st.error('Exception during RT manipulation: {}'.format(e))
+            # Attempt RT recovery
+            for bgw in dc1_bgws:
+                try:
+                    add_cfg = vxlan_obj.add_bgw_import_export_rt(bgw, config_dict, bgp_info)
+                    if add_cfg:
+                        vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                except Exception:
+                    pass
+            summ += 'Exception during RT manipulation: {}\n'.format(e)
+            result = False
+
+        finally:
+            # Step 5: Stop continuous traffic
+            st.banner('Step 5: Stopping continuous traffic')
+            try:
+                vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
+            except Exception:
+                pass
+            # Disable continuous streams so they are not left enabled
+            if _fc_tg_handle and _fc_stream_ids:
+                try:
+                    _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                except Exception:
+                    pass
+
+        # Step 6: Check for core files
+        st.banner('Step 6: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after import/export RT remove/add\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    # ------------------------------------------------------------------
+    # L3VNI_dci:97  –  Remove/Add RT_REWRITE configs
+    # Uses continuous traffic; verifies traffic recovers within threshold.
+    # ------------------------------------------------------------------
+    def test_base_dci_l3vni_remove_add_rt_rewrite_configs(self):
+        """
+        L3VNI_dci:97 - Remove/Add RT_REWRITE configs on all BGWs of DC1.
+
+        Description:
+            Start continuous L2+L3 traffic, remove and then re-add the
+            RT-REWRITE route-maps (RT-REWRITE-WAN, RT-REWRITE-DC) and
+            associated extcommunity-lists on all BGW spines of DC1,
+            then verify the continuous traffic recovers with drop
+            within threshold.
+
+        Steps:
+            1. Verify base setup
+            2. Start continuous traffic L2 and L3 (dci_flap_continuous)
+            3. Remove/Add RT-REWRITE configs on all BGWs of 1 DC
+            4. Verify continuous traffic recovers and drop is within threshold
+            5. Stop continuous traffic
+            6. Check for core files/crashes
+        """
+        tc_id = 'test_base_dci_l3vni_remove_add_rt_rewrite_configs'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:97: Remove/Add RT_REWRITE configs ({})'.format(tc_id))
+        result = True
+        summ = ''
+        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
+        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
+        fc_streams = tgen_handles.get('dci_flap_continuous')
+        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
+
+        # Get DC1 BGW nodes
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                         if 'bgw' in n and 'dc1' in n]
+        if not dc1_bgws:
+            pytest.skip('No DC1 BGW nodes found for RT-REWRITE test')
+            return
+
+        st.log('DC1 BGW nodes: {}'.format(dc1_bgws))
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before RT-REWRITE removal')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', test_cfg['nodes'].get('l2l3vni', []))
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before RT-REWRITE removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Start continuous traffic — all L2 + L3 (v4+v6) streams
+        st.banner('Step 2: Start continuous L2 + L3 traffic (all dci_flap_continuous streams)')
+        if not fc_available:
+            summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Use ALL fc_streams (L2 and L3, v4+v6) — no VRF filtering
+        st.log('TC97: using all {} dci_flap_continuous streams (L2 + L3 v4/v6)'.format(len(fc_streams)))
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict):
+                st.log('TC97 stream {}: name={}'.format(_k, _v.get('name', '')))
+
+        # Collect stream IDs and tg_handle for rate config and later disable
+        _fc_tg_handle = None
+        _fc_stream_ids = []
+        for _k, _v in fc_streams.items():
+            if isinstance(_v, dict) and _v.get('stream_id'):
+                _fc_stream_ids.append(_v['stream_id'])
+                if not _fc_tg_handle:
+                    _fc_tg_handle = _v.get('tg_handle')
+        # Configure rate_percent to 0.01 on all continuous streams
+        if _fc_tg_handle and _fc_stream_ids:
+            for sid in _fc_stream_ids:
+                _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
+            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
+
+        try:
+            vxlan_obj.check_traffic(
+                fc_streams,
+                regenerate_traffic_items=True,
+                action='start',
+                stop_proto_wait=stop_pw,
+                start_proto_wait=start_pw,
+            )
+        except Exception as err:
+            st.error('Continuous traffic start failed: {}'.format(err))
+            summ += 'Continuous traffic start failed: {}\n'.format(err)
+            report_result(False, tc_id, summ)
+            return
+
+        # Get config data for RT-REWRITE manipulation
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+        dci_vip_maps = vxlan_obj.generate_dci_vip_maps()
+
+        try:
+            # Step 3: Remove/Add RT-REWRITE configs on all DC1 BGWs
+            st.banner('Step 3: Remove RT-REWRITE configs on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Removing RT-REWRITE configs on {}'.format(bgw))
+                remove_cfg = vxlan_obj.remove_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info)
+                if remove_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', remove_cfg)
+                else:
+                    st.log('No RT-REWRITE config generated for {}, skipping'.format(bgw))
+
+            st.wait(10, 'Wait for RT-REWRITE removal to take effect')
+
+            st.banner('Step 3b: Re-add RT-REWRITE configs on DC1 BGWs')
+            for bgw in dc1_bgws:
+                st.log('Re-adding RT-REWRITE configs on {}'.format(bgw))
+                add_cfg = vxlan_obj.add_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info, dci_vip_maps)
+                if add_cfg:
+                    vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                else:
+                    st.log('No RT-REWRITE config generated for {}, skipping'.format(bgw))
+
+            # Step 4: Verify continuous traffic recovers within threshold
+            st.banner('Step 4: Verify continuous traffic recovers and drop is within threshold')
+            st.wait(15, 'Wait for BGP convergence after RT-REWRITE re-add')
+            if not vxlan_obj.check_traffic(
+                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
+                summ += 'Continuous traffic did not recover after RT-REWRITE remove/add\n'
+                result = False
+            else:
+                st.log('Continuous traffic recovered after RT-REWRITE remove/add: PASS')
+
+        except Exception as e:
+            st.error('Exception during RT-REWRITE manipulation: {}'.format(e))
+            # Attempt recovery
+            for bgw in dc1_bgws:
+                try:
+                    add_cfg = vxlan_obj.add_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info, dci_vip_maps)
+                    if add_cfg:
+                        vxlan_obj.config_dut(bgw, 'bgp', add_cfg)
+                except Exception:
+                    pass
+            summ += 'Exception during RT-REWRITE manipulation: {}\n'.format(e)
+            result = False
+
+        finally:
+            # Step 5: Stop continuous traffic
+            st.banner('Step 5: Stopping continuous traffic')
+            try:
+                vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
+            except Exception:
+                pass
+            # Disable continuous streams so they are not left enabled
+            if _fc_tg_handle and _fc_stream_ids:
+                try:
+                    _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
+                except Exception:
+                    pass
+
+        # Step 6: Check for core files
+        st.banner('Step 6: Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after RT-REWRITE remove/add\n'
+            result = False
+
         report_result(result, tc_id, summ)
 
 

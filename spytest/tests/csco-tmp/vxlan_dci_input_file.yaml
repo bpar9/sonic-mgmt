@@ -845,7 +845,7 @@ global:
         within_dc_vlan: 12
         gateway_v4: "80.12.0.1"
         gateway_v6: "8000:12::1"
-        # host_ipv4 / host_ipv6: used for IPv4 prefix and IPv6 /64 base; actual moving-host IPs are chosen per move_dir+host_type (see test_vxlan_dci._dci_mm_host_last_octets)
+        # host_ipv4 / host_ipv6: used for IPv4 prefix and IPv6 /64 base; actual moving-host IPs are chosen per move_dir+host_type (see TestVxlanDciMacMoveTriggers._dci_mm_host_last_octets in test_vxlan_dci.py)
         host_ipv4: "80.12.0.21"
         host_ipv4_dest2: "80.12.0.22"
         src_ipv4: "80.12.0.99"
@@ -865,9 +865,16 @@ global:
         rate_percent_sim: 0.01
         pkts_per_burst_hw: 1000
         rate_percent_hw: 10
+        # L3VNI (vlan13 / Vrf101): same traffic source, different VLAN for MAC-move L2+L3 phases
+        l3_vlan: 13
+        l3_gateway_v4: "80.13.0.1"
+        l3_gateway_v6: "8000:13::1"
+        l3_src_ipv4: "80.13.0.99"
+        l3_src_ipv6: "8000:13::99"
+        l3_rmac: "00:11:22:33:44:55"
     l2l3:
         pkts_per_burst: 100
-        rate_percent: 0.1
+        rate_percent: 0.01
     bum:
         pkts_per_burst: 10
-        rate_percent: 0.1
+        rate_percent: 0.01

@@ -1279,6 +1279,237 @@ def delete_l3vni_bgw_frr_config(node_name, config_dict, bgp_info):
     return output
 
 
+
+def remove_bgw_import_export_rt(node_name, config_dict, bgp_info):
+    """
+    Remove route-target import/export from BGP VRF config on a BGW node.
+
+    Generates FRR commands to remove all route-target export and import
+    statements from each VRF on the BGW, leaving the rest of the L3VNI
+    config (route-maps, extcommunity-lists, VRF-VNI bindings) intact.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+
+    Returns:
+        FRR config string with 'no route-target ...' commands
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    remote_bgw_asns = params['remote_bgw_asns']
+    leaf_asns = params['leaf_asns']
+    output = ''
+
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+        output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+        output += 'address-family l2vpn evpn\n'
+        # Remove export
+        output += 'no route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+        # Remove imports from remote BGWs
+        for remote_asn in remote_bgw_asns:
+            output += 'no route-target import {}:{}\n'.format(remote_asn, cross_dc_vni)
+        # Remove imports from local leaves
+        for leaf_asn in leaf_asns:
+            output += 'no route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        output += 'exit-address-family\n'
+        output += 'exit\n'
+
+    if output:
+        output += 'end\n'
+        output += 'exit\n'
+    return output
+
+
+def add_bgw_import_export_rt(node_name, config_dict, bgp_info):
+    """
+    Re-add route-target import/export to BGP VRF config on a BGW node.
+
+    Generates FRR commands to restore all route-target export and import
+    statements for each VRF on the BGW. This is the reverse of
+    remove_bgw_import_export_rt.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+
+    Returns:
+        FRR config string with 'route-target ...' commands
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    remote_bgw_asns = params['remote_bgw_asns']
+    leaf_asns = params['leaf_asns']
+    output = ''
+
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+        output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+        output += 'address-family l2vpn evpn\n'
+        # Re-add export
+        output += 'route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+        # Re-add imports from remote BGWs
+        for remote_asn in remote_bgw_asns:
+            output += 'route-target import {}:{}\n'.format(remote_asn, cross_dc_vni)
+        # Re-add imports from local leaves
+        for leaf_asn in leaf_asns:
+            output += 'route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+        output += 'exit-address-family\n'
+        output += 'exit\n'
+
+    if output:
+        output += 'end\n'
+        output += 'exit\n'
+    return output
+
+
+def remove_bgw_rt_rewrite_maps(node_name, config_dict, bgp_info):
+    """
+    Remove RT-REWRITE route-maps and extcommunity-lists from a BGW node.
+
+    Generates FRR commands to remove:
+      - RT-REWRITE-WAN and RT-REWRITE-DC route-maps
+      - The 'neighbor ... route-map' application on OVERLAY and OVERLAY_WAN
+      - RT-WAN-* and RT-DC-* extcommunity-lists
+
+    The BGP VRF route-target import/export and VRF-VNI bindings are left intact.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+
+    Returns:
+        FRR config string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    output = ''
+
+    # Remove route-map application from BGP neighbors
+    output += 'router bgp {}\n'.format(as_num)
+    output += 'address-family l2vpn evpn\n'
+    output += 'no neighbor OVERLAY route-map RT-REWRITE-DC out\n'
+    output += 'no neighbor OVERLAY_WAN route-map RT-REWRITE-WAN out\n'
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+
+    # Remove route-maps
+    output += 'no route-map RT-REWRITE-WAN\n'
+    output += 'no route-map RT-REWRITE-DC\n'
+
+    # Remove extcommunity-lists
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'no bgp extcommunity-list standard RT-WAN-{}\n'.format(cross_dc_vni)
+        output += 'no bgp extcommunity-list standard RT-DC-{}\n'.format(cross_dc_vni)
+
+    output += 'end\n'
+    output += 'exit\n'
+    return output
+
+
+def add_bgw_rt_rewrite_maps(node_name, config_dict, bgp_info, dci_vip_maps):
+    """
+    Re-add RT-REWRITE route-maps and extcommunity-lists on a BGW node.
+
+    Generates FRR commands to restore:
+      - RT-WAN-* and RT-DC-* extcommunity-lists
+      - RT-REWRITE-WAN route-map (WAN-side: IPv4 next-hop)
+      - RT-REWRITE-DC route-map (DC-side: IPv6 next-hop)
+      - Apply route-maps to OVERLAY and OVERLAY_WAN neighbors
+
+    This is the reverse of remove_bgw_rt_rewrite_maps.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        dci_vip_maps: Tuple from generate_dci_vip_maps():
+            (loopback_ipv6_dc_vip, loopback_ipv4_wan_vip, ...)
+
+    Returns:
+        FRR config string
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    loopback_ipv6_dc_vip, loopback_ipv4_wan_vip = dci_vip_maps[0], dci_vip_maps[1]
+    as_num = params['as_num']
+    dc_vip_ipv6 = loopback_ipv6_dc_vip.get(node_name, '')
+    wan_vip_ipv4 = loopback_ipv4_wan_vip.get(node_name, '')
+    leaf_asns = params['leaf_asns']
+    remote_bgw_asns = params['remote_bgw_asns']
+
+    output = ''
+
+    # 1) Extcommunity-lists
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+        seq = 5
+        for leaf_asn in leaf_asns:
+            output += 'bgp extcommunity-list standard RT-WAN-{} seq {} permit rt {}:{}\n'.format(
+                cross_dc_vni, seq, leaf_asn, leaf_vni)
+            seq += 5
+        seq = 5
+        for remote_asn in remote_bgw_asns:
+            output += 'bgp extcommunity-list standard RT-DC-{} seq {} permit rt {}:{}\n'.format(
+                cross_dc_vni, seq, remote_asn, cross_dc_vni)
+            seq += 5
+
+    # 2) RT-REWRITE-WAN route-map
+    permit_seq = 10
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'route-map RT-REWRITE-WAN permit {}\n'.format(permit_seq)
+        output += '  match extcommunity RT-WAN-{}\n'.format(cross_dc_vni)
+        output += '  match evpn route-type prefix\n'
+        output += '  set evpn vni {}\n'.format(cross_dc_vni)
+        output += '  set evpn rmac local\n'
+        output += '  set extcommunity rt {}:{}\n'.format(as_num, cross_dc_vni)
+        output += '  set ip next-hop {}\n'.format(wan_vip_ipv4)
+        output += 'exit\n'
+        permit_seq += 5
+    output += 'route-map RT-REWRITE-WAN permit {}\n'.format(permit_seq)
+    output += 'exit\n'
+
+    # 3) RT-REWRITE-DC route-map
+    permit_seq = 10
+    for vrf_id, cross_dc_vni in params['vrf_l3vni_pairs']:
+        output += 'route-map RT-REWRITE-DC permit {}\n'.format(permit_seq)
+        output += '  match extcommunity RT-DC-{}\n'.format(cross_dc_vni)
+        output += '  match evpn route-type prefix\n'
+        output += '  set evpn vni {}\n'.format(cross_dc_vni)
+        output += '  set evpn rmac local\n'
+        output += '  set extcommunity rt {}:{}\n'.format(as_num, cross_dc_vni)
+        output += '  set ipv6 next-hop global {}\n'.format(dc_vip_ipv6)
+        output += 'exit\n'
+        permit_seq += 5
+    output += 'route-map RT-REWRITE-DC permit {}\n'.format(permit_seq)
+    output += 'exit\n'
+
+    # 4) Apply route-maps to OVERLAY and OVERLAY_WAN neighbors
+    output += 'router bgp {}\n'.format(as_num)
+    output += 'address-family l2vpn evpn\n'
+    output += 'neighbor OVERLAY route-map RT-REWRITE-DC out\n'
+    output += 'neighbor OVERLAY_WAN route-map RT-REWRITE-WAN out\n'
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+
+    return output
+
+
 def generate_l3vni_leaf_rt_config(node_name, config_dict, bgp_info):
     """
     Generate leaf VRF route-target export/import for intra-DC EVPN and
@@ -5246,7 +5477,7 @@ def verify_evpn_type4_routes(dut, exp_type4_routes, **kwargs):
     return act_type4_routes
 
 
-def _log_evpn_type2_route_table(node, item, host_type):
+def _log_evpn_type2_route_table(node, item, host_type, route_type='local'):
     """Log a single EVPN type-2 route as a table (for dci_enabled)."""
     mac = item.get('mac', '')
     ip = item.get('ip', '') or '-'
@@ -5266,7 +5497,7 @@ def _log_evpn_type2_route_table(node, item, host_type):
     if host_type == 'mac_only':
         rows = [r for r in rows if r[0] != 'IP']
     col_w = max(len(r[0]) for r in rows) + 1
-    st.log("EVPN type-2 route (local):")
+    st.log("EVPN type-2 route ({}):".format(route_type))
     for label, value in rows:
         st.log("  {} {}".format((label + ":").ljust(col_w), value))
 
@@ -5395,6 +5626,8 @@ def verify_mac_seq(host_info, mac_move_seq="", ip="", host_local_node=[], host_t
     learn_type = ""
     found_on_node = None
     found_seq = None
+    mac_found = False
+    ip_found = False
     if host_type == 'mac_only':
         mac_addr = host_info
         ip_addr = ''

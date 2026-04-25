@@ -1372,6 +1372,173 @@ def add_bgw_import_export_rt(node_name, config_dict, bgp_info):
     return output
 
 
+def remove_vrf_config_bgw(node_name, config_dict, bgp_info, vrf_id=101):
+    """
+    Remove VRF configuration from a BGW node (L3VNI_dci:51 helper).
+
+    Generates SONiC CLI and FRR commands to remove a VRF and its associated
+    L3VNI configuration from a BGW node, simulating a missing VRF scenario.
+
+    Removes: VRF-VNI map, VXLAN maps (vxlan-dc, vxlan-wan), VRF binding on
+    L3VNI VLAN, VRF itself, and the BGP VRF config.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101 -> Vrf101)
+
+    Returns:
+        dict with 'sonic' and 'frr' config strings
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return None
+
+    cross_dc_vni = 10000 + vrf_id
+    as_num = params['as_num']
+
+    sonic_cmds = ''
+    sonic_cmds += 'sudo config vrf del_vrf_vni_map Vrf{}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config vxlan map del vxlan-dc {} {}\n'.format(vrf_id, cross_dc_vni)
+    sonic_cmds += 'sudo config vxlan map del vxlan-wan {} {}\n'.format(vrf_id, cross_dc_vni)
+    sonic_cmds += 'sudo config interface vrf unbind Vlan{}\n'.format(vrf_id)
+
+    frr_cmds = ''
+    frr_cmds += 'no router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    frr_cmds += 'no vrf Vrf{}\n'.format(vrf_id)
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'sonic': sonic_cmds, 'frr': frr_cmds}
+
+
+def restore_vrf_config_bgw(node_name, config_dict, bgp_info, dci_vip_maps, vrf_id=101):
+    """
+    Restore VRF configuration on a BGW node (L3VNI_dci:51 helper).
+
+    Re-adds the VRF and its full L3VNI configuration that was removed by
+    remove_vrf_config_bgw. Uses generate_l3vni_bgw_sonic_config and
+    generate_l3vni_bgw_frr_config to regenerate the complete config,
+    then filters to only the target VRF.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        dci_vip_maps: Tuple from generate_dci_vip_maps()
+        vrf_id: VRF numeric ID (default 101)
+
+    Returns:
+        dict with 'sonic' and 'frr' config strings
+    """
+    sonic_cfg = generate_l3vni_bgw_sonic_config(node_name, config_dict, bgp_info, mode='add')
+    frr_cfg = generate_l3vni_bgw_frr_config(node_name, config_dict, bgp_info, dci_vip_maps)
+
+    return {'sonic': sonic_cfg, 'frr': frr_cfg}
+
+
+def modify_rt_export_bgw(node_name, config_dict, bgp_info, vrf_id=101, wrong_rt_suffix=99999):
+    """
+    Modify the route-target export to an incorrect value on a BGW node (L3VNI_dci:52 helper).
+
+    Removes the correct RT export and adds an incorrect one, causing RT mismatch
+    on the remote DC side so Type-5 routes are no longer imported.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101)
+        wrong_rt_suffix: Incorrect VNI suffix for wrong RT (default 99999)
+
+    Returns:
+        FRR config string, or '' if params cannot be derived
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    cross_dc_vni = 10000 + vrf_id
+
+    output = ''
+    output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    output += 'address-family l2vpn evpn\n'
+    output += 'no route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+    output += 'route-target export {}:{}\n'.format(as_num, wrong_rt_suffix)
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+    output += 'end\n'
+    output += 'exit\n'
+    return output
+
+
+def restore_rt_export_bgw(node_name, config_dict, bgp_info, vrf_id=101, wrong_rt_suffix=99999):
+    """
+    Restore correct route-target export on a BGW node (L3VNI_dci:52 helper).
+
+    Removes the wrong RT export and re-adds the correct one.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101)
+        wrong_rt_suffix: The incorrect VNI that was set (default 99999)
+
+    Returns:
+        FRR config string, or '' if params cannot be derived
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    cross_dc_vni = 10000 + vrf_id
+
+    output = ''
+    output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    output += 'address-family l2vpn evpn\n'
+    output += 'no route-target export {}:{}\n'.format(as_num, wrong_rt_suffix)
+    output += 'route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+    output += 'end\n'
+    output += 'exit\n'
+    return output
+
+
+def generate_bulk_mac_move_hosts_dci(count=10, base_mac="02:00:00:61:00", base_ipv4_prefix="80.11.0",
+                                     base_ipv6_prefix="8000:11::", ipv4_start=50, ipv6_start=50):
+    """
+    Generate bulk host info for DCI MAC move tests (L3VNI_dci:61 helper).
+
+    Creates a list of host dicts, each with unique MAC, IPv4, and IPv6 addresses.
+    MAC format: base_mac:<counter> (e.g. 02:00:00:61:00:01 through 02:00:00:61:00:0a)
+
+    Args:
+        count: Number of hosts to generate (default 10)
+        base_mac: First 5 octets of MAC (default "02:00:00:61:00")
+        base_ipv4_prefix: First 3 octets of IPv4 (default "80.11.0")
+        base_ipv6_prefix: IPv6 /64 prefix (default "8000:11::")
+        ipv4_start: Starting last octet for IPv4 (default 50)
+        ipv6_start: Starting last 16-bit for IPv6 (default 50)
+
+    Returns:
+        list of dicts, each with keys: mac, ipv4, ipv6, index
+    """
+    hosts = []
+    for i in range(count):
+        hosts.append({
+            'mac': '{}:{:02x}'.format(base_mac, i + 1),
+            'ipv4': '{}.{}'.format(base_ipv4_prefix, ipv4_start + i),
+            'ipv6': '{}{}'.format(base_ipv6_prefix, ipv6_start + i),
+            'index': i,
+        })
+    return hosts
+
+
 def remove_bgw_rt_rewrite_maps(node_name, config_dict, bgp_info):
     """
     Remove RT-REWRITE route-maps and extcommunity-lists from a BGW node.

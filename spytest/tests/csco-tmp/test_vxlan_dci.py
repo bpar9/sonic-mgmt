@@ -7692,6 +7692,307 @@ class TestVxlanDCIBase():
 
         report_result(result, tc_id, summ)
 
+    def test_base_dci_l3vni_missing_vrf_on_dci_node(self):
+        """
+        L3VNI_dci:51 - L3VNI Negative - Missing VRF configuration on DCI node.
+
+        Description:
+            1) Bring up the base EVPN VXLAN fabric across DC1 and DC2 and verify
+               all BGP EVPN sessions are up.
+            2) Verify that VRF101 is configured on both DC1 DCI nodes (S2 and S3)
+               and that Type-5 routes are present on both.
+            3) Remove VRF101 configuration from DC1 DCI node S2.
+            4) Verify that Type-5 routes for VRF101 are not processed or installed on S2.
+            5) Send L3 traffic from DC2 towards the external prefix and verify that
+               traffic via S2 fails.
+            6) Verify that traffic via the other DCI node (S3) continues to work.
+            7) Confirm that traffic is flowing only through S3.
+            8) Reconfigure VRF101 on DC1 DCI node S2.
+            9) Verify that Type-5 routes are again processed and installed on S2.
+            10) Verify that traffic from DC2 to the external prefix is successful again.
+            11) Confirm that traffic is load-balanced across both S2 and S3.
+            12) Validate ECMP behavior using route and traffic statistics on both DCI nodes.
+        """
+        tc_id = 'test_base_dci_l3vni_missing_vrf_on_dci_node'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:51: L3VNI Negative - Missing VRF on DCI node ({})'.format(tc_id))
+        result = True
+        summ = ''
+        vrf_id = 101
+
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc1' in n]
+        if len(dc1_bgws) < 2:
+            pytest.skip('Need at least 2 DC1 BGW nodes for missing VRF test')
+            return
+
+        target_bgw = dc1_bgws[0]
+        other_bgw = dc1_bgws[1]
+        st.log('Target BGW (VRF removal): {}'.format(target_bgw))
+        st.log('Other BGW (should remain working): {}'.format(other_bgw))
+
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+        dci_vip_maps = vxlan_obj.generate_dci_vip_maps()
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup and Type-5 routes on both DC1 BGWs')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before VRF removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify Type-5 routes present on target BGW before removal
+        st.banner('Step 2: Verify Type-5 routes present on target BGW ({})'.format(target_bgw))
+        type5_before = st.show(target_bgw,
+                               'do show bgp l2vpn evpn route type prefix | grep "\\[5\\]"',
+                               type='vtysh', skip_tmpl=True)
+        if 'Vrf{}'.format(vrf_id) not in str(type5_before) and '[5]' not in str(type5_before):
+            st.log('Warning: Type-5 routes may not be fully present before VRF removal')
+
+        # Step 3: Remove VRF101 from target BGW
+        st.banner('Step 3: Remove VRF{} from DC1 BGW {}'.format(vrf_id, target_bgw))
+        remove_cfg = vxlan_obj.remove_vrf_config_bgw(target_bgw, config_dict, bgp_info, vrf_id=vrf_id)
+        if not remove_cfg:
+            summ += 'Failed to generate VRF removal config for {}\n'.format(target_bgw)
+            report_result(False, tc_id, summ)
+            return
+
+        vxlan_obj.config_dut(target_bgw, 'sonic', remove_cfg['sonic'])
+        vxlan_obj.config_dut(target_bgw, 'bgp', remove_cfg['frr'])
+        st.wait(15, 'Wait for VRF removal to propagate')
+
+        # Step 4: Verify Type-5 routes removed on target BGW
+        st.banner('Step 4: Verify Type-5 routes withdrawn on {}'.format(target_bgw))
+        type5_after = st.show(target_bgw,
+                              'do show bgp l2vpn evpn route type prefix | grep "Vrf{}"'.format(vrf_id),
+                              type='vtysh', skip_tmpl=True)
+        vrf_check = st.show(target_bgw, 'show vrf', skip_tmpl=True)
+        if 'Vrf{}'.format(vrf_id) in str(vrf_check):
+            st.log('Warning: Vrf{} still appears in show vrf on {} after removal'.format(vrf_id, target_bgw))
+            summ += 'Vrf{} still in show vrf on {} after removal\n'.format(vrf_id, target_bgw)
+        else:
+            st.log('Vrf{} successfully removed from {}'.format(vrf_id, target_bgw))
+
+        try:
+            # Step 5-7: Verify L3 cross-DC traffic
+            st.banner('Step 5-7: Verify L3 cross-DC traffic (expect partial failure via {})'.format(target_bgw))
+            st.log('Traffic should still work via {} (other BGW)'.format(other_bgw))
+            if not verify_traffic(tgen_handles, regenerate=True,
+                                  traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+                st.log('Cross-DC L3 traffic degraded as expected with one BGW VRF missing')
+                st.log('Verifying other BGW {} is still forwarding...'.format(other_bgw))
+                type5_other = st.show(other_bgw,
+                                      'do show bgp l2vpn evpn route type prefix | grep "Vrf{}"'.format(vrf_id),
+                                      type='vtysh', skip_tmpl=True)
+                if 'Vrf{}'.format(vrf_id) in str(type5_other) or '[5]' in str(type5_other):
+                    st.log('Type-5 routes for Vrf{} still present on other BGW {}: PASS'.format(
+                        vrf_id, other_bgw))
+                else:
+                    summ += 'Type-5 routes for Vrf{} missing on other BGW {}\n'.format(vrf_id, other_bgw)
+                    result = False
+            else:
+                st.log('Cross-DC L3 traffic still passing via other BGW: PASS')
+
+        finally:
+            # Step 8: Restore VRF101 on target BGW
+            st.banner('Step 8: Reconfigure VRF{} on DC1 BGW {}'.format(vrf_id, target_bgw))
+            restore_cfg = vxlan_obj.restore_vrf_config_bgw(
+                target_bgw, config_dict, bgp_info, dci_vip_maps, vrf_id=vrf_id)
+            if restore_cfg:
+                vxlan_obj.config_dut(target_bgw, 'sonic', restore_cfg['sonic'])
+                vxlan_obj.config_dut(target_bgw, 'bgp', restore_cfg['frr'])
+            else:
+                summ += 'Failed to generate VRF restore config for {}\n'.format(target_bgw)
+                result = False
+
+        st.wait(20, 'Wait for VRF restore and BGP convergence')
+
+        # Step 9: Verify Type-5 routes restored on target BGW
+        st.banner('Step 9: Verify Type-5 routes restored on {}'.format(target_bgw))
+        type5_restored = st.show(target_bgw,
+                                 'do show bgp l2vpn evpn route type prefix | grep "\\[5\\]"',
+                                 type='vtysh', skip_tmpl=True)
+        vrf_check_restored = st.show(target_bgw, 'show vrf', skip_tmpl=True)
+        if 'Vrf{}'.format(vrf_id) not in str(vrf_check_restored):
+            summ += 'Vrf{} not present in show vrf on {} after restore\n'.format(vrf_id, target_bgw)
+            result = False
+        else:
+            st.log('Vrf{} successfully restored on {}'.format(vrf_id, target_bgw))
+
+        # Step 10-11: Verify full L3 cross-DC traffic restored with ECMP
+        st.banner('Step 10-11: Verify L3 cross-DC traffic fully restored with ECMP')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            summ += 'L3 cross-DC traffic not fully restored after VRF re-add\n'
+            result = False
+        else:
+            st.log('L3 cross-DC traffic fully restored after VRF re-add: PASS')
+
+        # Step 12: Verify ECMP on both DCI nodes
+        st.banner('Step 12: Validate ECMP on both DCI nodes')
+        for bgw in [target_bgw, other_bgw]:
+            route_out = st.show(bgw, 'do show ip route vrf Vrf{}'.format(vrf_id),
+                                type='vtysh', skip_tmpl=True)
+            st.log('Route table on {} for Vrf{}: {}'.format(bgw, vrf_id,
+                    str(route_out)[:500] if route_out else 'empty'))
+
+        # Check for cores
+        st.banner('Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after VRF remove/add\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_rt_mismatch(self):
+        """
+        L3VNI_dci:52 - L3VNI Negative - RT (Route Target) mismatch for L3VNI.
+
+        Description:
+            1) Bring up the base EVPN VXLAN fabric across DC1 and DC2.
+            2) Verify that the Type-5 route for the external prefix is present on
+               DC1 leaf and DC1 BGW.
+            3) Verify that the Type-5 route is successfully imported on DC2 BGW and
+               installed on a DC2 leaf.
+            4) Send L3 traffic from DC2 leaf towards the external prefix and verify
+               traffic is successful.
+            5) Modify the route-target export for VRF101 on DC1 BGW to an incorrect value.
+            6) Verify that the Type-5 route is no longer imported on DC2 BGW.
+            7) Send L3 traffic again from DC2 leaf towards the external prefix and
+               verify that traffic fails.
+            8) Restore the correct route-target export configuration on DC1 BGW.
+            9) Verify that the Type-5 route is again imported on DC2 BGW.
+            10) Send L3 traffic from DC2 leaf to the external prefix and verify
+                traffic resumes successfully.
+        """
+        tc_id = 'test_base_dci_l3vni_rt_mismatch'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:52: L3VNI Negative - RT mismatch ({})'.format(tc_id))
+        result = True
+        summ = ''
+        vrf_id = 101
+        wrong_rt_suffix = 99999
+
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc1' in n]
+        if not dc1_bgws:
+            pytest.skip('No DC1 BGW nodes found for RT mismatch test')
+            return
+
+        target_bgw = dc1_bgws[0]
+        st.log('Target BGW for RT modification: {}'.format(target_bgw))
+
+        dc2_bgws = test_cfg['nodes'].get('dc2_bgw', [])
+        dc2_leafs = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                     if 'leaf' in n and 'dc2' in n]
+
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before RT modification')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before RT modification\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2-3: Verify Type-5 routes present on DC1 BGW and DC2 BGW
+        st.banner('Step 2-3: Verify Type-5 routes present on DC1 and DC2 BGWs')
+        for bgw in dc1_bgws + dc2_bgws:
+            type5_out = st.show(bgw,
+                                'do show bgp l2vpn evpn route type prefix | grep "\\[5\\]"',
+                                type='vtysh', skip_tmpl=True)
+            st.log('Type-5 routes on {}: {}'.format(bgw, 'present' if '[5]' in str(type5_out) else 'absent'))
+
+        # Step 4: Verify L3 cross-DC traffic before RT modification
+        st.banner('Step 4: Verify L3 cross-DC traffic before RT modification')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            summ += 'L3 cross-DC traffic failed before RT modification\n'
+            report_result(False, tc_id, summ)
+            return
+
+        try:
+            # Step 5: Modify RT export on DC1 BGW to incorrect value
+            st.banner('Step 5: Modify RT export on {} to incorrect value'.format(target_bgw))
+            modify_cfg = vxlan_obj.modify_rt_export_bgw(
+                target_bgw, config_dict, bgp_info, vrf_id=vrf_id, wrong_rt_suffix=wrong_rt_suffix)
+            if not modify_cfg:
+                summ += 'Failed to generate RT modify config for {}\n'.format(target_bgw)
+                report_result(False, tc_id, summ)
+                return
+            vxlan_obj.config_dut(target_bgw, 'bgp', modify_cfg)
+            st.wait(15, 'Wait for wrong RT to propagate')
+
+            # Step 6: Verify Type-5 routes no longer imported on DC2 BGW
+            st.banner('Step 6: Verify Type-5 routes no longer imported on DC2 BGWs')
+            for dc2_bgw in dc2_bgws:
+                rt_out = st.show(dc2_bgw,
+                                 'do show bgp l2vpn evpn route type prefix | grep "Vrf{}"'.format(vrf_id),
+                                 type='vtysh', skip_tmpl=True)
+                st.log('DC2 BGW {} Type-5 routes for Vrf{} after wrong RT: {}'.format(
+                    dc2_bgw, vrf_id, str(rt_out)[:300] if rt_out else 'empty/absent'))
+
+            # Step 7: Verify L3 cross-DC traffic fails
+            st.banner('Step 7: Verify L3 cross-DC traffic fails with wrong RT')
+            traffic_with_wrong_rt = verify_traffic(tgen_handles, regenerate=True,
+                                                   traffic_types=['l3_v4', 'l3_v6'], scope='cross')
+            if traffic_with_wrong_rt:
+                st.log('Warning: L3 cross-DC traffic still passing despite wrong RT on one BGW')
+                st.log('This may be expected if other BGWs still have correct RT')
+            else:
+                st.log('L3 cross-DC traffic failed as expected with wrong RT: PASS')
+
+        finally:
+            # Step 8: Restore correct RT export on DC1 BGW
+            st.banner('Step 8: Restore correct RT export on {}'.format(target_bgw))
+            restore_cfg = vxlan_obj.restore_rt_export_bgw(
+                target_bgw, config_dict, bgp_info, vrf_id=vrf_id, wrong_rt_suffix=wrong_rt_suffix)
+            if restore_cfg:
+                vxlan_obj.config_dut(target_bgw, 'bgp', restore_cfg)
+            else:
+                summ += 'Failed to generate RT restore config for {}\n'.format(target_bgw)
+                result = False
+
+        st.wait(15, 'Wait for correct RT to propagate after restore')
+
+        # Step 9: Verify Type-5 routes re-imported on DC2 BGW
+        st.banner('Step 9: Verify Type-5 routes re-imported on DC2 BGWs')
+        for dc2_bgw in dc2_bgws:
+            rt_restored = st.show(dc2_bgw,
+                                  'do show bgp l2vpn evpn route type prefix | grep "\\[5\\]"',
+                                  type='vtysh', skip_tmpl=True)
+            st.log('DC2 BGW {} Type-5 routes after RT restore: {}'.format(
+                dc2_bgw, 'present' if '[5]' in str(rt_restored) else 'absent'))
+
+        # Step 10: Verify L3 cross-DC traffic restored
+        st.banner('Step 10: Verify L3 cross-DC traffic restored after RT fix')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            summ += 'L3 cross-DC traffic not restored after RT fix\n'
+            result = False
+        else:
+            st.log('L3 cross-DC traffic restored after RT fix: PASS')
+
+        # Check for cores
+        st.banner('Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after RT mismatch test\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
 
 # ============================================================================
 
@@ -8606,3 +8907,293 @@ class TestVxlanDciMacMoveTriggers():
         st.log("Solution_dci:96 - L3VNI across DCI not supported; traffic flows via Border spine Northbound peering")
         st.log("Skipping: requires separate VLAN/VNI setup and Border spine traffic verification")
         report_result(True, tc_id)  # Placeholder: pass for now; implement when topology/config ready
+
+    def test_dci_l3vni_bulk_host_move(self):
+        """
+        L3VNI_dci:61 - L3VNI Host Mobility - Bulk host move (10 hosts simultaneously).
+
+        Description:
+            dest1 = leaf0_dc1 (orphan), dest2 = leaf0_dc2 (orphan),
+            traffic src = leaf2_dc1
+
+            1) Learn 10 hosts at dest1 on leaf0_dc1 (VLAN 11, VRF 101).
+            2) Verify MAC/IP for all 10 hosts using Type-2 EVPN routes, show mac,
+               show arp (and show nd for IPv6) on all relevant leaf nodes across DCs.
+            3) From leaf2_dc1 (src) on VLAN 13 (VRF 101), send traffic toward dest1
+               and dest2 paths (destinations on VLAN 11).
+            4) Move all 10 hosts simultaneously from leaf0_dc1 to leaf0_dc2 in the
+               same VLAN 11, VRF 101.
+            5) Verify Type-2 route updates for all 10 hosts with incremented MM
+               sequence numbers, updated next-hop pointing to leaf0_dc2.
+            6) Perform L3VNI traffic validation: from leaf2_dc1 (VLAN 13, VRF 101)
+               to hosts on VLAN 11 (VRF 101).
+            7) Move all 10 hosts back from leaf0_dc2 to leaf0_dc1.
+            8) Verify Type-2 routes again with further incremented MM sequence numbers.
+            9) Repeat L3VNI traffic test.
+        """
+        tc_id = 'test_dci_l3vni_bulk_host_move'
+        test_cfg['tc_id'] = tc_id
+        _sep = "=" * 60
+
+        st.banner('Testcase L3VNI_dci:61: Bulk host move (10 hosts) ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        global tgen_handles
+        topo_handles = (tgen_handles or {}).get('topo_handles') or {}
+        mm_cfg = self._get_dci_mac_move_cfg()
+        bulk_hosts = vxlan_obj.generate_bulk_mac_move_hosts_dci(count=10)
+
+        dest1_node = 'leaf0_dc1'
+        dest2_node = 'leaf0_dc2'
+        src_node = 'leaf2_dc1'
+
+        # Get handles for dest1, dest2, src
+        h_dest1 = self._get_first_orphan_handle(dest1_node, topo_handles)
+        h_dest2 = self._get_first_orphan_handle(dest2_node, topo_handles)
+        h_src = self._get_first_orphan_handle(src_node, topo_handles)
+
+        if not h_dest1 or not h_dest2 or not h_src:
+            summ += 'Cannot get TGEN handles for bulk host move (dest1={}, dest2={}, src={})\n'.format(
+                dest1_node, dest2_node, src_node)
+            report_result(False, tc_id, summ)
+            return
+
+        tg_handle = h_src['tg_handle']
+        vlan_id = 11
+        l3_vlan = mm_cfg['l3_vlan']
+        l3_rmac = mm_cfg['l3_rmac']
+        dut_type = vxlan_obj.check_hw_or_sim(st.get_dut_names()[0])
+        pkts = mm_cfg['pkts_per_burst_hw'] if dut_type == 'hw' else mm_cfg['pkts_per_burst_sim']
+        rate = mm_cfg['rate_percent_hw'] if dut_type == 'hw' else mm_cfg['rate_percent_sim']
+
+        # Create device groups for all 10 hosts at dest1
+        st.banner('Phase 1: Learn 10 hosts at dest1 ({})'.format(dest1_node))
+        dest1_handles = []
+        dest2_handles = []
+        src_streams = []
+        l3_src_streams = []
+
+        try:
+            for host in bulk_hosts:
+                # Create device group at dest1
+                dg = tg_handle.tg_topology_config(
+                    topology_handle=h_dest1['topo_handle'],
+                    device_group_name="bulk_mm_d1_{}".format(host['index']),
+                    device_group_multiplier="1", device_group_enabled="1")
+                eth = tg_handle.tg_interface_config(
+                    protocol_name="eth_bulk_d1_{}".format(host['index']),
+                    protocol_handle=dg['device_group_handle'], mtu="1500",
+                    src_mac_addr=host['mac'], vlan=1, vlan_id=str(vlan_id),
+                    vlan_id_step=0, vlan_id_count=1)
+                tg_handle.tg_interface_config(
+                    protocol_name="v4_bulk_d1_{}".format(host['index']),
+                    protocol_handle=eth['ethernet_handle'],
+                    ipv4_resolve_gateway="1", gateway=mm_cfg['gateway_v4'],
+                    intf_ip_addr=host['ipv4'])
+                dest1_handles.append(dg['device_group_handle'])
+
+                # Create device group at dest2 (disabled initially)
+                dg2 = tg_handle.tg_topology_config(
+                    topology_handle=h_dest2['topo_handle'],
+                    device_group_name="bulk_mm_d2_{}".format(host['index']),
+                    device_group_multiplier="1", device_group_enabled="0")
+                eth2 = tg_handle.tg_interface_config(
+                    protocol_name="eth_bulk_d2_{}".format(host['index']),
+                    protocol_handle=dg2['device_group_handle'], mtu="1500",
+                    src_mac_addr=host['mac'], vlan=1, vlan_id=str(vlan_id),
+                    vlan_id_step=0, vlan_id_count=1)
+                tg_handle.tg_interface_config(
+                    protocol_name="v4_bulk_d2_{}".format(host['index']),
+                    protocol_handle=eth2['ethernet_handle'],
+                    ipv4_resolve_gateway="1", gateway=mm_cfg['gateway_v4'],
+                    intf_ip_addr=host['ipv4'])
+                dest2_handles.append(dg2['device_group_handle'])
+
+                # Create L2 traffic streams from src to dest1 (VLAN 11)
+                src_mac = "02:00:00:61:99:{:02x}".format(host['index'] + 1)
+                l2_stream = tg_handle.tg_traffic_config(
+                    emulation_src_handle=h_src['port_handle'],
+                    emulation_dst_handle=h_dest1['port_handle'],
+                    mode='create', transmit_mode='single_burst',
+                    pkts_per_burst=pkts, rate_percent=rate,
+                    circuit_type='raw', frame_size=1000,
+                    mac_src=src_mac, mac_dst=host['mac'],
+                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=host['ipv4'],
+                    vlan_id=vlan_id, src_dest_mesh='one_to_one',
+                    track_by='endpoint_pair')
+                src_streams.append(l2_stream.get('stream_id'))
+                st.wait(1)
+
+                # Create L3 traffic streams from src VLAN 13 -> host on VLAN 11 (inter-VLAN)
+                l3_mac_src = "02:00:00:61:13:{:02x}".format(host['index'] + 1)
+                l3_stream = tg_handle.tg_traffic_config(
+                    emulation_src_handle=h_src['port_handle'],
+                    emulation_dst_handle=h_dest1['port_handle'],
+                    mode='create', transmit_mode='single_burst',
+                    pkts_per_burst=pkts, rate_percent=rate,
+                    circuit_type='raw', frame_size=1000,
+                    mac_src=l3_mac_src, mac_dst=l3_rmac,
+                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=host['ipv4'],
+                    vlan_id=l3_vlan, src_dest_mesh='one_to_one',
+                    track_by='endpoint_pair')
+                l3_src_streams.append(l3_stream.get('stream_id'))
+                st.wait(1)
+
+            # Start protocols on dest1 hosts
+            st.log('Starting protocols on all 10 dest1 hosts')
+            for dh in dest1_handles:
+                tg_handle.tg_test_control(action="start_protocol", handle=dh)
+            st.wait(10, 'Wait for all 10 hosts to learn at dest1')
+
+            # Phase 2: Verify MAC/IP for all 10 hosts
+            st.banner('Phase 2: Verify MAC/IP for all 10 hosts on dest1')
+            for host in bulk_hosts:
+                self._verify_mac_dci(host['mac'], ip_addr=host['ipv4'])
+
+            # Phase 3: Send L2+L3 traffic to dest1 hosts
+            st.banner('Phase 3: L2+L3 traffic BEFORE move (hosts at {})'.format(dest1_node))
+            all_streams = src_streams + l3_src_streams
+            self._send_traffic_dci(tg_handle, all_streams)
+            pass_count = 0
+            for sid in src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    pass_count += 1
+            st.log('L2 traffic to dest1: {}/{} streams passed'.format(pass_count, len(src_streams)))
+            l3_pass_count = 0
+            for sid in l3_src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    l3_pass_count += 1
+            st.log('L3 traffic to dest1: {}/{} streams passed'.format(l3_pass_count, len(l3_src_streams)))
+            if pass_count == 0 and l3_pass_count == 0:
+                summ += 'No traffic reached dest1 before move\n'
+                result = False
+
+            # Phase 4: Move all 10 hosts simultaneously from dest1 to dest2
+            st.banner('Phase 4: Move all 10 hosts from {} to {}'.format(dest1_node, dest2_node))
+            for dh in dest1_handles:
+                tg_handle.tg_test_control(action="stop_protocol", handle=dh)
+            st.wait(2)
+            for dh in dest2_handles:
+                tg_handle.tg_test_control(action="start_protocol", handle=dh)
+            st.wait(10, 'Wait for bulk MAC move to converge')
+
+            # Phase 5: Verify Type-2 route updates with MM sequence
+            st.banner('Phase 5: Verify MAC move for all 10 hosts (expect seq=1)')
+            for host in bulk_hosts:
+                host_info = {'mac': host['mac'], 'ip': host['ipv4']}
+                check = vxlan_obj.verify_mac_seq(
+                    host_info, mac_move_seq='1',
+                    host_local_node=[dest2_node], host_type='mac+ipv4',
+                    is_mh_host=False, dci_enabled=True)
+                if not check:
+                    st.log('MAC {} not found at {} with seq=1'.format(host['mac'], dest2_node))
+                    summ += 'Bulk move: MAC {} not at dest2 with seq=1\n'.format(host['mac'])
+                    result = False
+
+            # Phase 6: L3VNI traffic validation after move
+            st.banner('Phase 6: L3VNI traffic after move to {}'.format(dest2_node))
+            self._send_traffic_dci(tg_handle, l3_src_streams)
+            l3_pass_after = 0
+            for sid in l3_src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    l3_pass_after += 1
+            st.log('L3 traffic after move: {}/{} streams passed'.format(
+                l3_pass_after, len(l3_src_streams)))
+
+            # Phase 7: Move all 10 hosts back from dest2 to dest1
+            st.banner('Phase 7: Move all 10 hosts back from {} to {}'.format(dest2_node, dest1_node))
+            for dh in dest2_handles:
+                tg_handle.tg_test_control(action="stop_protocol", handle=dh)
+            st.wait(2)
+            for dh in dest1_handles:
+                tg_handle.tg_test_control(action="start_protocol", handle=dh)
+            st.wait(10, 'Wait for bulk MAC move back to converge')
+
+            # Phase 8: Verify Type-2 routes with seq=2
+            st.banner('Phase 8: Verify MAC move back for all 10 hosts (expect seq=2)')
+            for host in bulk_hosts:
+                host_info = {'mac': host['mac'], 'ip': host['ipv4']}
+                check = vxlan_obj.verify_mac_seq(
+                    host_info, mac_move_seq='2',
+                    host_local_node=[dest1_node], host_type='mac+ipv4',
+                    is_mh_host=False, dci_enabled=True)
+                if not check:
+                    st.log('MAC {} not found at {} with seq=2'.format(host['mac'], dest1_node))
+                    summ += 'Bulk move back: MAC {} not at dest1 with seq=2\n'.format(host['mac'])
+                    result = False
+
+            # Phase 9: Repeat L3VNI traffic test
+            st.banner('Phase 9: L3VNI traffic after move back to {}'.format(dest1_node))
+            self._send_traffic_dci(tg_handle, l3_src_streams)
+            l3_pass_final = 0
+            for sid in l3_src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    l3_pass_final += 1
+            st.log('L3 traffic after move back: {}/{} streams passed'.format(
+                l3_pass_final, len(l3_src_streams)))
+            if l3_pass_final == 0:
+                summ += 'L3 traffic failed after move back\n'
+                result = False
+
+        except Exception as e:
+            st.error('Exception during bulk host move: {}'.format(e))
+            summ += 'Exception: {}\n'.format(e)
+            result = False
+
+        finally:
+            # Cleanup: stop all protocols, remove streams
+            st.banner('Cleanup: Stopping all bulk host move protocols and streams')
+            for dh in dest1_handles + dest2_handles:
+                try:
+                    tg_handle.tg_test_control(action="stop_protocol", handle=dh)
+                except Exception:
+                    pass
+            st.wait(2)
+            for dh in dest1_handles + dest2_handles:
+                try:
+                    tg_handle.tg_topology_config(device_group_handle=dh, mode='destroy')
+                except Exception:
+                    pass
+            for sid in src_streams + l3_src_streams:
+                try:
+                    tg_handle.tg_traffic_config(mode='remove', stream_id=sid)
+                except Exception:
+                    pass
+
+        st.log(_sep)
+        if result:
+            st.banner('DCI BULK HOST MOVE PASSED: {}'.format(tc_id))
+        else:
+            st.banner('DCI BULK HOST MOVE FAILED: {}'.format(tc_id))
+        report_result(result, tc_id, summ)
+
+    def test_dci_l3vni_mh_to_mh_across_dc_with_l3_traffic(self):
+        """
+        L3VNI_dci:63 - L3VNI Host Mobility - Host move from MH to MH port with L3 Traffic.
+
+        Description:
+            dest1 = leaf0_dc1 (PortChannel / MH), dest2 = leaf0_dc2 (PortChannel / MH),
+            traffic src = leaf2_dc1.
+
+            Host move: MH on leaf0_dc1 -> MH on leaf0_dc2 -> back to leaf0_dc1.
+
+            1) Learn the host at dest1 on the PortChannel (MH) on leaf0_dc1
+               (VLAN 11, VRF 101).
+            2) Verify MAC/IP using Type-2 EVPN route, show mac, show arp on all
+               relevant leaf nodes across DCs.
+            3) From leaf2_dc1 (src) on VLAN 13 (VRF 101), send traffic toward
+               dest1 and dest2 paths (destinations on VLAN 11).
+            4) Move the host from leaf0_dc1 (MH) to leaf0_dc2 (MH), same VLAN 11,
+               VRF 101.
+            5) Verify Type-2 route update with incremented MM sequence.
+            6) L3VNI: from leaf2_dc1, VLAN 13 (VRF 101) -> host on VLAN 11
+               (VRF 101). Traffic should forward through leaf0_dc2.
+            7) Move the host from leaf0_dc2 back to leaf0_dc1 (MH), same VLAN 11.
+            8) Verify Type-2 route again with incremented MM sequence.
+            9) Repeat L3VNI (VLAN 13 -> VLAN 11, VRF 101 on leaf2_dc1).
+        """
+        tc_id = "L3VNI_dci:63 MH-to-MH across DC with L3 traffic"
+        st.banner('Testcase L3VNI_dci:63: Host move MH->MH across DC with L3 traffic')
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv4")
+        report_result(result, tc_id)

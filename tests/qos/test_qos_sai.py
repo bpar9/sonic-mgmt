@@ -190,19 +190,6 @@ class TestQosSai(QosSaiBase):
         are verified.
     """
 
-    SUPPORTED_HEADROOM_SKUS = [
-        'Arista-7060CX-32S-C32',
-        'Celestica-DX010-C32',
-        'Arista-7260CX3-D108C8',
-        'Arista-7260CX3-D108C10',
-        'Force10-S6100',
-        'Arista-7260CX3-Q64',
-        'Arista-7050CX3-32S-C32',
-        'Arista-7050CX3-32S-C28S4',
-        'Arista-7050CX3-32S-D48C8',
-        'dbmvtx9180_64osfp_128x400G_lab'
-    ]
-
     @pytest.fixture(scope="class", autouse=True)
     def setup(self, disable_voq_watchdog_class_scope):
         return
@@ -1969,7 +1956,8 @@ class TestQosSai(QosSaiBase):
             skip_test_on_no_lossless_pg(portSpeedCableLength)
 
         if queueProfile == "wm_q_shared_lossless":
-            if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000':
+            if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000' and \
+                  not get_src_dst_asic_and_duts['single_asic_test']:
                 dstPortSpeedCableLength = get_portspeed_cablelen(
                     get_src_dst_asic_and_duts['dst_asic'])
                 if dstPortSpeedCableLength != portSpeedCableLength:

@@ -14,6 +14,7 @@ import collections
 
 from tests.common.fixtures.ptfhost_utils import ptf_portmap_file  # noqa: F401
 from tests.common.helpers.assertions import pytest_assert, pytest_require
+from tests.common.helpers.counterpoll_helper import ConterpollHelper
 from tests.common.helpers.multi_thread_utils import SafeThreadPoolExecutor
 from tests.common.mellanox_data import is_mellanox_device as isMellanoxDevice
 from tests.common.cisco_data import is_cisco_device, copy_dshell_script_cisco_8000, run_dshell_command
@@ -59,7 +60,7 @@ class QosBase:
                           "t1-isolated-d56u1-lag", "t1-isolated-v6-d56u1-lag", "t1-isolated-d128", "t1-isolated-d32",
                           "t1-isolated-d448u15-lag", "t1-isolated-v6-d448u15-lag"]
     SUPPORTED_PTF_TOPOS = ['ptf32', 'ptf64']
-    SUPPORTED_ASIC_LIST = ["pac", "gr", "gr2", "gb", "td2", "th", "th2", "spc1", "spc2", "spc3", "spc4", "spc5",
+    SUPPORTED_ASIC_LIST = ["pac", "gr", "gr2", "gb", "p200", "td2", "th", "th2", "spc1", "spc2", "spc3", "spc4", "spc5",
                            "td3", "th3", "j2c+", "jr2", "th5", "q3d"]
 
     BREAKOUT_SKUS = ['Arista-7050-QX-32S']
@@ -3433,36 +3434,19 @@ def clear_pg_watermark(interface):
         By default WRED_ECN_QUEUE and WRED_ECN_PORT are disabled for polling.
         Enable flexcounter groups WRED_ECN_QUEUE and WRED_ECN_PORT using counterpoll CLI
         """
-        duthost = duthosts.frontend_nodes[0]
-        if duthost.sonichost.is_multi_asic:
-            for duthost in get_src_dst_asic_and_duts['all_duts']:
-                for asic in duthost.asics:
-                    namespace_arg = '-n asic{}'.format(asic.asic_index)
-                    try:
-                        duthost.command("sudo counterpoll wredqueue {} enable".format(namespace_arg))
-                        duthost.command("sudo counterpoll wredport {} enable".format(namespace_arg))
-                    except Exception:
-                        pass  # VS/KVM counterpoll may not support -n namespace
-                duthost.command("sudo config save -y")
-        else:
-            for dut_asic in get_src_dst_asic_and_duts["all_asics"]:
-                dut_asic.command("counterpoll wredqueue enable")
-                dut_asic.command("counterpoll wredport enable")
+        for duthost in get_src_dst_asic_and_duts['all_duts']:
+            for dut_asic in duthost.asics:
+                try:
+                    ConterpollHelper.enable_counterpoll(dut_asic, ['wredqueue', 'wredport'])
+                except Exception as e:  # VS/KVM counterpoll may not support -n namespace
+                    logging.error(f"Failed to enable counterpoll for {dut_asic.hostname} with error: {e}")
             duthost.command("sudo config save -y")
 
         yield
-        if duthost.sonichost.is_multi_asic:
-            for duthost in get_src_dst_asic_and_duts['all_duts']:
-                for asic in duthost.asics:
-                    namespace_arg = '-n asic{}'.format(asic.asic_index)
-                    try:
-                        duthost.command("sudo counterpoll wredqueue {} disable".format(namespace_arg))
-                        duthost.command("sudo counterpoll wredport {} disable".format(namespace_arg))
-                    except Exception:
-                        pass  # VS/KVM counterpoll may not support -n namespace
-                duthost.command("sudo config save -y")
-        else:
-            for dut_asic in get_src_dst_asic_and_duts["all_asics"]:
-                dut_asic.command("counterpoll wredqueue disable")
-                dut_asic.command("counterpoll wredport disable")
+        for duthost in get_src_dst_asic_and_duts['all_duts']:
+            for dut_asic in duthost.asics:
+                try:
+                    ConterpollHelper.disable_counterpoll(dut_asic, ['wredqueue', 'wredport'])
+                except Exception as e:  # VS/KVM counterpoll may not support -n namespace
+                    logging.error(f"Failed to disable counterpoll for {dut_asic.hostname} with error: {e}")
             duthost.command("sudo config save -y")

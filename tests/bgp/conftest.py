@@ -447,8 +447,12 @@ def setup_interfaces(duthosts, enum_rand_one_per_hwsku_frontend_hostname, ptfhos
             interfaces = []
             used_subnets = set()
             asic_idx = 0
-            if mg_facts["minigraph_interfaces"]:
-                for intf in mg_facts["minigraph_interfaces"]:
+            mg_interfaces = mg_facts["minigraph_interfaces"]
+            if mg_interfaces:
+                if tbinfo["topo"]["name"] == "t2_single_node_min":
+                    mg_interfaces = sorted(mg_facts["minigraph_interfaces"],
+                                           key=lambda x: int(x['attachto'].replace("Ethernet", "")))
+                for intf in mg_interfaces:
                     if (is_matching_ip_version(intf["addr"])):
                         intf_asic_idx = duthost.get_port_asic_instance(intf["attachto"]).asic_index
                         if not interfaces:
@@ -783,6 +787,18 @@ def pytest_addoption(parser):
         default=None,
         help="Max flap neighbor number, default is None"
     )
+    parser.addoption(
+        "--vnet_count",
+        action="store",
+        default="100",
+        help="Number of VNETs/VLANs to create"
+    )
+    parser.addoption(
+        "--subif_per_vnet",
+        action="store",
+        default="16",
+        help="Number of Subinterfaces to create per vnet"
+    )
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -868,6 +884,16 @@ def traffic_shift_community(duthost):
 @pytest.fixture(scope='module')
 def get_function_completeness_level(pytestconfig):
     return pytestconfig.getoption("--completeness_level")
+
+
+@pytest.fixture(scope="module")
+def vnet_count(request):
+    return int(request.config.getoption("--vnet_count"))
+
+
+@pytest.fixture(scope="module")
+def subif_per_vnet(request):
+    return int(request.config.getoption("--subif_per_vnet"))
 
 
 @pytest.fixture(scope='module')

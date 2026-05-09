@@ -10349,3 +10349,173 @@ def get_tc_params(tc_id):
         test_cfg['testcases'][tc_id] = dict()
 
     return test_cfg['testcases'][tc_id]
+
+
+# ============================================================================
+# L3VNI DCI Performance / External Connectivity Helpers
+# ============================================================================
+
+def snapshot_interface_counters(dut, interfaces):
+    """
+    Capture interface error/discard counters on a DUT for a list of interfaces.
+
+    Args:
+        dut: DUT name
+        interfaces: List of interface names
+
+    Returns:
+        dict: {intf: {'rx_err': int, 'tx_err': int, 'rx_drp': int, 'tx_drp': int}}
+    """
+    counters = {}
+    for intf in interfaces:
+        out = st.show(dut, 'show interfaces counters -i {}'.format(intf), skip_tmpl=True)
+        rx_err = 0
+        tx_err = 0
+        rx_drp = 0
+        tx_drp = 0
+        for line in out.splitlines():
+            if intf in line:
+                parts = line.split()
+                # SONiC 'show interfaces counters' columns vary; parse errors/drops
+                # Typical: IFACE STATE RX_OK RX_BPS RX_PPS RX_ERR TX_OK TX_BPS TX_PPS TX_ERR TX_DRP RX_DRP
+                try:
+                    for i, p in enumerate(parts):
+                        if 'RX_ERR' in str(p).upper():
+                            rx_err = int(parts[i]) if parts[i].isdigit() else 0
+                        elif 'TX_ERR' in str(p).upper():
+                            tx_err = int(parts[i]) if parts[i].isdigit() else 0
+                        elif 'RX_DRP' in str(p).upper():
+                            rx_drp = int(parts[i]) if parts[i].isdigit() else 0
+                        elif 'TX_DRP' in str(p).upper():
+                            tx_drp = int(parts[i]) if parts[i].isdigit() else 0
+                except (IndexError, ValueError):
+                    pass
+        counters[intf] = {'rx_err': rx_err, 'tx_err': tx_err,
+                          'rx_drp': rx_drp, 'tx_drp': tx_drp}
+    return counters
+
+
+def compare_interface_counters(baseline, current):
+    """
+    Compare two counter snapshots and return delta errors/drops.
+
+    Args:
+        baseline: Counter dict from snapshot_interface_counters (before)
+        current:  Counter dict from snapshot_interface_counters (after)
+
+    Returns:
+        tuple: (has_errors: bool, details: str)
+    """
+    has_errors = False
+    details = ''
+    for intf in baseline:
+        if intf not in current:
+            continue
+        for key in ('rx_err', 'tx_err', 'rx_drp', 'tx_drp'):
+            delta = current[intf].get(key, 0) - baseline[intf].get(key, 0)
+            if delta > 0:
+                has_errors = True
+                details += '{}:{} delta={}\n'.format(intf, key, delta)
+    return has_errors, details
+
+
+def compute_convergence_ms(tg_handle, stream_id, measured_tx_pps=None):
+    """
+    Compute convergence time in milliseconds from Ixia traffic stats.
+
+    Prefers loss_duration_us if available from Ixia; falls back to
+    frames_lost / measured_tx_pps * 1000.
+
+    Args:
+        tg_handle: IXIA traffic generator handle
+        stream_id: Stream ID to query stats for
+        measured_tx_pps: Measured Tx PPS for fallback computation
+
+    Returns:
+        tuple: (convergence_ms: float, frames_lost: int)
+    """
+    traffic_stat = tg_handle.tg_traffic_stats(mode='traffic_item', streams=stream_id)
+    frames_lost = 0
+    convergence_ms = 0.0
+
+    for key, values in traffic_stat.get('traffic_item', {}).items():
+        if key == stream_id:
+            tx_pkts = int(values['tx'].get('total_pkts', 0))
+            rx_pkts = int(values['rx'].get('total_pkts', 0))
+            frames_lost = max(0, tx_pkts - rx_pkts)
+
+            # Try Ixia loss_duration_us (available with latency tracking)
+            loss_duration_us = values.get('rx', {}).get('loss_duration_us', None)
+            if loss_duration_us and float(loss_duration_us) > 0:
+                convergence_ms = float(loss_duration_us) / 1000.0
+            elif measured_tx_pps and measured_tx_pps > 0 and frames_lost > 0:
+                convergence_ms = (frames_lost / float(measured_tx_pps)) * 1000.0
+            break
+
+    st.log('compute_convergence_ms: stream={} frames_lost={} convergence_ms={:.2f}'.format(
+        stream_id, frames_lost, convergence_ms))
+    return convergence_ms, frames_lost
+
+
+def get_traffic_item_stats(tg_handle, stream_id):
+    """
+    Get detailed traffic stats for a single stream.
+
+    Args:
+        tg_handle: IXIA traffic generator handle
+        stream_id: Stream ID to query
+
+    Returns:
+        dict: {'tx_pkts': int, 'rx_pkts': int, 'tx_pps': float, 'rx_pps': float,
+               'loss_percent': float, 'avg_latency_us': float, 'max_latency_us': float,
+               'p99_latency_us': float}
+    """
+    traffic_stat = tg_handle.tg_traffic_stats(mode='traffic_item', streams=stream_id)
+    result = {'tx_pkts': 0, 'rx_pkts': 0, 'tx_pps': 0.0, 'rx_pps': 0.0,
+              'loss_percent': 0.0, 'avg_latency_us': 0.0, 'max_latency_us': 0.0,
+              'p99_latency_us': 0.0}
+
+    for key, values in traffic_stat.get('traffic_item', {}).items():
+        if key == stream_id:
+            result['tx_pkts'] = int(values['tx'].get('total_pkts', 0))
+            result['rx_pkts'] = int(values['rx'].get('total_pkts', 0))
+            result['tx_pps'] = float(values['tx'].get('total_pkt_rate', 0))
+            result['rx_pps'] = float(values['rx'].get('total_pkt_rate', 0))
+            if result['tx_pkts'] > 0:
+                lost = max(0, result['tx_pkts'] - result['rx_pkts'])
+                result['loss_percent'] = (lost / float(result['tx_pkts'])) * 100.0
+            # Latency fields (Ixia-specific, may vary by IxNetwork version)
+            rx_data = values.get('rx', {})
+            result['avg_latency_us'] = float(rx_data.get('avg_delay', 0)) / 1000.0
+            result['max_latency_us'] = float(rx_data.get('max_delay', 0)) / 1000.0
+            result['p99_latency_us'] = float(rx_data.get('large_seq_no_err', 0)) / 1000.0
+            break
+
+    return result
+
+
+def pick_cross_dc_l3_stream(tgen_handles, ip_version='v4'):
+    """
+    Pick the first available cross-DC L3 stream from tgen_handles.
+
+    Args:
+        tgen_handles: Global tgen handles dict
+        ip_version: 'v4' or 'v6'
+
+    Returns:
+        tuple: (stream_id, tg_handle, port_handle) or (None, None, None) if not found
+    """
+    traffic_key = 'l3_{}'.format(ip_version)
+    streams = tgen_handles.get(traffic_key, {})
+    for idx, stream_info in streams.items():
+        stream_id = stream_info.get('stream_id')
+        tg_handle = stream_info.get('tg_handle')
+        port_handle = stream_info.get('port_handle')
+        # Cross-DC streams typically have 'cross' in name or connect different DCs
+        scope_tag = stream_info.get('scope', '')
+        if scope_tag == 'cross' or 'cross' in str(stream_info.get('name', '')):
+            return stream_id, tg_handle, port_handle
+        # Fallback: return first stream in the traffic key
+        if stream_id and tg_handle:
+            return stream_id, tg_handle, port_handle
+    return None, None, None

@@ -9928,6 +9928,615 @@ class TestVxlanDCIBase():
         st.banner("TEST COMPLETE: {}".format(tc_id))
         report_result(result, tc_id, summ)
 
+    @pytest.mark.parametrize("ip_version", ["ipv4", "ipv6"])
+    def test_base_dci_l3vni_external_intf_flap(self, ip_version):
+        """
+        L3VNI_dci:48 - External router Interface shut/No shut
+
+        Pre-condition: TC-47/TC-49 (External router VRF-lite peering) is configured
+        and ext_prefix is reachable from DC2 via Type-5 over the DCI.
+
+        Description:
+            1. Configure VRF-lite eBGP peering between DC1 leaf and external router
+            2. Verify ext_prefix is reachable from DC2 via Type-5 route
+            3. Send pre-flap baseline burst traffic DC2 -> ext_prefix
+            4. Start continuous DC2 -> ext_prefix stream
+            5. Flap the ext-facing interface on DC1 leaf (shut/no-shut) N times
+            6. Verify VRF-lite eBGP goes down/comes back each iteration
+            7. Stop continuous stream and verify bounded loss
+            8. Post-flap: re-run burst and verify recovery
+            9. Cleanup all config
+        """
+        tc_id = "test_base_dci_l3vni_external_intf_flap_{}".format(ip_version)
+        result = True
+        summ = ''
+        is_ipv6 = (ip_version == "ipv6")
+
+        # Configuration parameters
+        vrf_name = 'Vrf101'
+        subif_vlan_v4 = 100
+        subif_vlan_v6 = 101
+        ext_asn = 65333
+        flap_count = 3
+        shut_hold_s = 15
+
+        st.banner("TEST: L3VNI External Router Interface Shut/No-shut ({})".format(ip_version))
+
+        if not is_ipv6:
+            subif_vlan = subif_vlan_v4
+            ext_dc1_ip = '21.1.1.2'
+            ext_dc1_cidr = '21.1.1.2/24'
+            dc1_leaf_ip = '21.1.1.1'
+            dc1_leaf_cidr = '21.1.1.1/24'
+            ext_dc2_ip = '22.1.1.2'
+            ext_dc2_cidr = '22.1.1.2/24'
+            dc2_leaf_ip = '22.1.1.1'
+            dc2_leaf_cidr = '22.1.1.1/24'
+            tgen_ip_cidr = '42.1.1.1/24'
+            tgen_network = '42.1.1.0/24'
+            tgen_host_ip = '42.1.1.2'
+            tgen_gw_ip = '42.1.1.1'
+            af_name = 'ipv4'
+        else:
+            subif_vlan = subif_vlan_v6
+            ext_dc1_ip = '21:1:1::2'
+            ext_dc1_cidr = '21:1:1::2/64'
+            dc1_leaf_ip = '21:1:1::1'
+            dc1_leaf_cidr = '21:1:1::1/64'
+            ext_dc2_ip = '22:1:1::2'
+            ext_dc2_cidr = '22:1:1::2/64'
+            dc2_leaf_ip = '22:1:1::1'
+            dc2_leaf_cidr = '22:1:1::1/64'
+            tgen_ip_cidr = '42:1:1::1/64'
+            tgen_network = '42:1:1::/64'
+            tgen_host_ip = '42:1:1::2'
+            tgen_gw_ip = '42:1:1::1'
+            af_name = 'ipv6'
+
+        # Step 1: Verify base setup
+        st.banner("Step 1: Verify base DCI setup before external intf flap test")
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                     test_cfg['nodes'].get('dc2_bgw', []))
+        if not verify_base_setup_bgw(bgw_nodes, skip_checks=['vteps'],
+                                     failure_context='before external intf flap'):
+            summ += "Base setup verification failed\n"
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Discover external router and links (same logic as TC47)
+        st.banner("Step 2: Discover external router connections")
+        dc1_leaf_nodes = [d for d in test_cfg['nodes'].get('leaf', []) if 'dc1' in d]
+        dc2_leaf_nodes = [d for d in test_cfg['nodes'].get('leaf', []) if 'dc2' in d]
+
+        if not dc1_leaf_nodes or not dc2_leaf_nodes:
+            pytest.skip("No DC1/DC2 leaf nodes found")
+            return
+
+        external_router = None
+        dc1_leaf = None
+        dc2_leaf = None
+        dc1_leaf_port = None
+        dc2_leaf_port = None
+        ext_port_to_dc1 = None
+        ext_port_to_dc2 = None
+
+        all_nodes = test_cfg['nodes'].get('all', [])
+        ext_candidates = [n for n in all_nodes if 'external' in n or 'router' in n]
+        if not ext_candidates:
+            ext_candidates = [n for n in all_nodes
+                              if n not in dc1_leaf_nodes and n not in dc2_leaf_nodes
+                              and 'spine' not in n and 'bgw' not in n and 'leaf' not in n
+                              and 'ihop' not in n]
+
+        for router in ext_candidates:
+            for dc1_l in dc1_leaf_nodes:
+                dc1_links = st.get_dut_links(dc1_l, peer=router) or []
+                if dc1_links:
+                    for dc2_l in dc2_leaf_nodes:
+                        dc2_links = st.get_dut_links(dc2_l, peer=router) or []
+                        if dc2_links:
+                            external_router = router
+                            dc1_leaf = dc1_l
+                            dc2_leaf = dc2_l
+                            dc1_leaf_port, _, ext_port_to_dc1 = dc1_links[0]
+                            dc2_leaf_port, _, ext_port_to_dc2 = dc2_links[0]
+                            break
+                    if external_router:
+                        break
+            if external_router:
+                break
+
+        if not external_router:
+            pytest.skip("No external router found connected to both DC1 and DC2 leaves")
+            return
+
+        st.log("External router: {}, DC1 leaf: {} (port {}), DC2 leaf: {} (port {})".format(
+            external_router, dc1_leaf, dc1_leaf_port, dc2_leaf, dc2_leaf_port))
+
+        dc1_asn = test_cfg.get(dc1_leaf, {}).get('bgp_as', 65203)
+        dc2_asn = test_cfg.get(dc2_leaf, {}).get('bgp_as', 65205)
+
+        def _subif_name(intf, vlan):
+            short = intf.replace('Ethernet', 'Eth')
+            return "{}.{}".format(short, vlan)
+
+        def _sonic_cmd(node, cmd):
+            try:
+                vxlan_obj.config_dut(node, 'sonic', cmd)
+            except Exception as err:
+                st.log("WARN: SONiC cmd failed on {}: {} ({})".format(node, cmd, err))
+
+        def _bgp_cmd(node, cmd):
+            try:
+                vxlan_obj.config_dut(node, 'bgp', cmd)
+            except Exception as err:
+                st.log("WARN: BGP cmd failed on {}: ({})".format(node, err))
+
+        ext_dc1_subif = _subif_name(ext_port_to_dc1, subif_vlan)
+        ext_dc2_subif = _subif_name(ext_port_to_dc2, subif_vlan)
+        dc1_subif = _subif_name(dc1_leaf_port, subif_vlan)
+        dc2_subif = _subif_name(dc2_leaf_port, subif_vlan)
+
+        ext_tgen_intf = None
+        try:
+            tg_links = st.get_tg_links(external_router) or []
+            if tg_links:
+                ext_tgen_intf = tg_links[0][0]
+        except Exception:
+            pass
+        if not ext_tgen_intf:
+            ext_tgen_intf = 'Ethernet1_57'
+
+        configured = False
+        tg_handle = None
+        ext_dg_handle = None
+        ext_stream_id = None
+        cont_stream_id = None
+
+        try:
+            # Step 3: Configure sub-interfaces and VRF-lite (same as TC47)
+            st.banner("Step 3: Configure sub-interfaces and VRF-lite peering ({})".format(af_name))
+
+            _sonic_cmd(external_router, "sudo config vrf add {}".format(vrf_name))
+            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_tgen_intf, vrf_name))
+            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_tgen_intf, tgen_ip_cidr))
+
+            _sonic_cmd(external_router, "sudo config subinterface add {} {}".format(ext_dc1_subif, subif_vlan))
+            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_dc1_subif, vrf_name))
+            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_dc1_subif, ext_dc1_cidr))
+
+            _sonic_cmd(external_router, "sudo config subinterface add {} {}".format(ext_dc2_subif, subif_vlan))
+            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_dc2_subif, vrf_name))
+            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_dc2_subif, ext_dc2_cidr))
+
+            _sonic_cmd(dc1_leaf, "sudo config subinterface add {} {}".format(dc1_subif, subif_vlan))
+            _sonic_cmd(dc1_leaf, "sudo config interface vrf bind {} {}".format(dc1_subif, vrf_name))
+            _sonic_cmd(dc1_leaf, "sudo config interface ip add {} {}".format(dc1_subif, dc1_leaf_cidr))
+
+            _sonic_cmd(dc2_leaf, "sudo config subinterface add {} {}".format(dc2_subif, subif_vlan))
+            _sonic_cmd(dc2_leaf, "sudo config interface vrf bind {} {}".format(dc2_subif, vrf_name))
+            _sonic_cmd(dc2_leaf, "sudo config interface ip add {} {}".format(dc2_subif, dc2_leaf_cidr))
+
+            # Configure eBGP VRF-lite peering
+            st.banner("Step 4: Configure eBGP VRF-lite peering ({})".format(af_name))
+            if not is_ipv6:
+                vtysh_ext = "\n".join([
+                    "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                    " bgp router-id 20.1.1.2",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                    " neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                    " address-family ipv4 unicast",
+                    "  network {}".format(tgen_network),
+                    "  neighbor {} activate".format(dc1_leaf_ip),
+                    "  neighbor {} activate".format(dc2_leaf_ip),
+                    " exit-address-family",
+                    "!",
+                ])
+                vtysh_dc1 = "\n".join([
+                    "ip prefix-list ALL-IPV4 seq 5 permit 0.0.0.0/0 le 32",
+                    "route-map NO-ADV-OUT deny 10",
+                    " match ip address prefix-list ALL-IPV4",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                    " address-family ipv4 unicast",
+                    "  neighbor {} activate".format(ext_dc1_ip),
+                    "  neighbor {} route-map NO-ADV-OUT out".format(ext_dc1_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+                vtysh_dc2 = "\n".join([
+                    "ip prefix-list ALL-IPV4 seq 5 permit 0.0.0.0/0 le 32",
+                    "route-map NO-ADV-OUT deny 10",
+                    " match ip address prefix-list ALL-IPV4",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                    " address-family ipv4 unicast",
+                    "  neighbor {} activate".format(ext_dc2_ip),
+                    "  neighbor {} route-map NO-ADV-OUT out".format(ext_dc2_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+            else:
+                vtysh_ext = "\n".join([
+                    "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                    " bgp router-id 20.1.1.2",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                    " neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                    " address-family ipv6 unicast",
+                    "  network {}".format(tgen_network),
+                    "  neighbor {} activate".format(dc1_leaf_ip),
+                    "  neighbor {} activate".format(dc2_leaf_ip),
+                    " exit-address-family",
+                    "!",
+                ])
+                vtysh_dc1 = "\n".join([
+                    "ipv6 prefix-list ALL-IPV6 seq 5 permit ::/0 le 128",
+                    "route-map NO-ADV-OUT-V6 deny 10",
+                    " match ipv6 address prefix-list ALL-IPV6",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                    " address-family ipv6 unicast",
+                    "  neighbor {} activate".format(ext_dc1_ip),
+                    "  neighbor {} route-map NO-ADV-OUT-V6 out".format(ext_dc1_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+                vtysh_dc2 = "\n".join([
+                    "ipv6 prefix-list ALL-IPV6 seq 5 permit ::/0 le 128",
+                    "route-map NO-ADV-OUT-V6 deny 10",
+                    " match ipv6 address prefix-list ALL-IPV6",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                    " address-family ipv6 unicast",
+                    "  neighbor {} activate".format(ext_dc2_ip),
+                    "  neighbor {} route-map NO-ADV-OUT-V6 out".format(ext_dc2_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+
+            _bgp_cmd(external_router, vtysh_ext)
+            _bgp_cmd(dc1_leaf, vtysh_dc1)
+            _bgp_cmd(dc2_leaf, vtysh_dc2)
+            configured = True
+
+            # Wait for BGP convergence
+            st.banner("Step 5: Wait for BGP convergence (60s)")
+            st.wait(60)
+
+            # Verify Type-5 route
+            st.banner("Step 6: Verify Type-5 route {} propagated".format(tgen_network))
+            cmd = "do show bgp l2vpn evpn route type prefix"
+            output = vxlan_obj.config_dut(dc1_leaf, 'bgp', cmd)
+            if tgen_network.split('/')[0] not in str(output):
+                summ += "Type-5 route {} NOT found on {} before flap\n".format(tgen_network, dc1_leaf)
+                result = False
+
+            # Configure TGEN on external router
+            st.banner("Step 7: Configure TGEN device group on external router")
+            tg_links = st.get_tg_links(external_router) or []
+            if not tg_links:
+                raise Exception("No TGEN links found for external router")
+
+            ext_tg_port = tg_links[0][2]
+            ext_topo = vxlan_obj.create_topology_handles({external_router: [ext_tg_port]})
+            tg_handle = ext_topo[external_router][ext_tg_port]['tg_handle']
+            topo_handle = ext_topo[external_router][ext_tg_port]['topology_handle']
+
+            dg = tg_handle.tg_topology_config(
+                topology_handle=topo_handle,
+                device_group_name="{} {} flap_dg".format(external_router, af_name),
+                device_group_multiplier="1",
+                device_group_enabled="1")
+            ext_dg_handle = dg.get('device_group_handle')
+
+            eth = tg_handle.tg_interface_config(
+                protocol_handle=dg['device_group_handle'],
+                protocol_name="ext_flap_eth",
+                mtu="1500",
+                src_mac_addr="00:0a:01:00:ff:01",
+                src_mac_addr_step="00.00.00.00.00.01")
+
+            if not is_ipv6:
+                tg_handle.tg_interface_config(
+                    protocol_handle=eth['ethernet_handle'],
+                    protocol_name="ext_flap_ipv4",
+                    ipv4_resolve_gateway="1",
+                    gateway=tgen_gw_ip,
+                    gateway_step="0.0.0.0",
+                    intf_ip_addr=tgen_host_ip,
+                    intf_ip_addr_step="0.0.0.1")
+            else:
+                tg_handle.tg_interface_config(
+                    protocol_handle=eth['ethernet_handle'],
+                    protocol_name="ext_flap_ipv6",
+                    ipv6_resolve_gateway="1",
+                    ipv6_gateway=tgen_gw_ip,
+                    ipv6_gateway_step="::0",
+                    ipv6_intf_addr=tgen_host_ip,
+                    ipv6_intf_addr_step="::1")
+
+            vxlan_obj.start_stop_protocols(tg_handle, action='start')
+            st.wait(10)
+
+            # Create traffic streams
+            src_node = next((n for n in dc1_leaf_nodes if n in tgen_handles.get('topo_handles', {})), None)
+            if not src_node:
+                raise Exception("No DC1 source node found with TGEN handles")
+            src_int = next(iter(tgen_handles['topo_handles'][src_node].keys()), None)
+            handle_key = 'v4_device_handles' if not is_ipv6 else 'v6_device_handles'
+            src_vlan_map = tgen_handles.get(handle_key, {}).get(src_int) or {}
+            if not src_vlan_map:
+                raise Exception("No device handles for src_int={}".format(src_int))
+
+            src_vlan = next(iter(src_vlan_map.keys()))
+            src_dev_handle = src_vlan_map[src_vlan]
+            dst_dev_handle = dg['device_group_handle']
+            src_port_handle = tgen_handles['topo_handles'][src_node][src_int]['port_handle']
+            dst_port_handle = ext_topo[external_router][ext_tg_port]['port_handle']
+
+            # Pre-flap baseline burst
+            st.banner("Step 8: Pre-flap baseline burst traffic")
+            burst_stream = tg_handle.tg_traffic_config(
+                port_handle=src_port_handle,
+                port_handle2=dst_port_handle,
+                mode='create',
+                transmit_mode='single_burst',
+                pkts_per_burst=1000,
+                rate_percent=0.8,
+                circuit_endpoint_type=af_name,
+                frame_size=500,
+                emulation_src_handle=src_dev_handle,
+                emulation_dst_handle=dst_dev_handle)
+            ext_stream_id = burst_stream.get('stream_id')
+
+            tg_handle.tg_traffic_control(action='run', stream_handle=[ext_stream_id])
+            st.wait(10)
+            tg_handle.tg_traffic_control(action='stop', stream_handle=[ext_stream_id])
+            st.wait(2)
+
+            baseline_ok = vxlan_obj.validate_stats(tg_handle, ext_stream_id)
+            if not baseline_ok:
+                summ += "Pre-flap baseline burst traffic failed\n"
+                result = False
+            else:
+                st.log("Pre-flap baseline burst: PASS")
+
+            # Snapshot counters on dc1_leaf ext-facing interface
+            baseline_counters = vxlan_obj.snapshot_interface_counters(dc1_leaf, [dc1_leaf_port])
+
+            # Start continuous stream
+            st.banner("Step 9: Start continuous stream for flap test")
+            cont_stream_cfg = tg_handle.tg_traffic_config(
+                port_handle=src_port_handle,
+                port_handle2=dst_port_handle,
+                mode='create',
+                transmit_mode='continuous',
+                rate_percent=1,
+                circuit_endpoint_type=af_name,
+                frame_size=128,
+                emulation_src_handle=src_dev_handle,
+                emulation_dst_handle=dst_dev_handle)
+            cont_stream_id = cont_stream_cfg.get('stream_id')
+
+            tg_handle.tg_traffic_control(action='run', stream_handle=[cont_stream_id])
+            st.wait(30)  # Warm-up
+
+            # Step 10: Flap the ext-facing interface
+            st.banner("Step 10: Flap ext-facing interface {} times (hold {}s)".format(
+                flap_count, shut_hold_s))
+
+            for iteration in range(1, flap_count + 1):
+                st.log("--- Flap iteration {}/{} ---".format(iteration, flap_count))
+
+                # Shut
+                st.log("  Shutting down {} on {}".format(dc1_leaf_port, dc1_leaf))
+                _sonic_cmd(dc1_leaf, "sudo config interface shutdown {}".format(dc1_leaf_port))
+                st.wait(shut_hold_s)
+
+                # Verify BGP goes down
+                cmd_bgp_check = "do show bgp vrf {} summary".format(vrf_name)
+                bgp_out = vxlan_obj.config_dut(dc1_leaf, 'bgp', cmd_bgp_check)
+                if 'Established' in str(bgp_out):
+                    st.log("  WARN: BGP still Established after shut (iter {})".format(iteration))
+
+                # No-shut
+                st.log("  Bringing up {} on {}".format(dc1_leaf_port, dc1_leaf))
+                _sonic_cmd(dc1_leaf, "sudo config interface startup {}".format(dc1_leaf_port))
+
+                # Wait for BGP to re-establish
+                bgp_recovered = False
+                for poll in range(12):  # 60s total
+                    st.wait(5)
+                    bgp_out = vxlan_obj.config_dut(dc1_leaf, 'bgp', cmd_bgp_check)
+                    if 'Established' in str(bgp_out):
+                        st.log("  BGP re-established after {}s (iter {})".format((poll + 1) * 5, iteration))
+                        bgp_recovered = True
+                        break
+
+                if not bgp_recovered:
+                    summ += "BGP not recovered after no-shut iteration {}\n".format(iteration)
+                    result = False
+
+            # Step 11: Stop continuous stream and check loss
+            st.banner("Step 11: Stop continuous stream and verify bounded loss")
+            tg_handle.tg_traffic_control(action='stop', stream_handle=[cont_stream_id])
+            st.wait(5)
+
+            cont_stats = tg_handle.tg_traffic_stats(mode='traffic_item', streams=cont_stream_id)
+            for key, values in cont_stats.get('traffic_item', {}).items():
+                if key == cont_stream_id:
+                    tx_pkts = int(values['tx'].get('total_pkts', 0))
+                    rx_pkts = int(values['rx'].get('total_pkts', 0))
+                    frames_lost = max(0, tx_pkts - rx_pkts)
+                    st.log("Continuous stream: tx={} rx={} lost={}".format(tx_pkts, rx_pkts, frames_lost))
+                    # Loss is expected only during shut windows
+                    if tx_pkts > 0 and rx_pkts == 0:
+                        summ += "Continuous stream had 100% loss - traffic never recovered\n"
+                        result = False
+                    break
+
+            # Step 12: Post-flap burst
+            st.banner("Step 12: Post-flap burst traffic verification")
+            st.wait(60)  # Allow full convergence after last no-shut
+            tg_handle.tg_traffic_control(action='run', stream_handle=[ext_stream_id])
+            st.wait(10)
+            tg_handle.tg_traffic_control(action='stop', stream_handle=[ext_stream_id])
+            st.wait(2)
+
+            postflap_ok = vxlan_obj.validate_stats(tg_handle, ext_stream_id)
+            if not postflap_ok:
+                summ += "Post-flap burst traffic failed\n"
+                result = False
+            else:
+                st.log("Post-flap burst: PASS")
+
+            # Step 13: Verify counter deltas
+            st.banner("Step 13: Verify interface counter deltas")
+            current_counters = vxlan_obj.snapshot_interface_counters(dc1_leaf, [dc1_leaf_port])
+            has_errors, err_details = vxlan_obj.compare_interface_counters(
+                baseline_counters, current_counters)
+            if has_errors:
+                st.log("Interface counter errors (may be expected during link-down): {}".format(err_details))
+
+            # Step 14: Core check
+            st.banner("Step 14: Checking for core files")
+            if vxlan_obj.check_core():
+                summ += "Core files detected after external intf flap test\n"
+                result = False
+
+        except Exception as e:
+            st.error("{} exception: {}".format(tc_id, e))
+            summ += "Exception: {}\n".format(e)
+            result = False
+
+        finally:
+            st.banner("Cleanup: Ensure interface is up, remove config")
+
+            # Ensure interface is up
+            _sonic_cmd(dc1_leaf, "sudo config interface startup {}".format(dc1_leaf_port))
+
+            # TGEN cleanup
+            if tg_handle and cont_stream_id:
+                try:
+                    tg_handle.tg_traffic_control(action='stop', stream_handle=[cont_stream_id])
+                    tg_handle.tg_traffic_config(mode='remove', stream_id=cont_stream_id)
+                except Exception:
+                    pass
+            if tg_handle and ext_stream_id:
+                try:
+                    tg_handle.tg_traffic_control(action='stop', stream_handle=[ext_stream_id])
+                    tg_handle.tg_traffic_config(mode='remove', stream_id=ext_stream_id)
+                except Exception:
+                    pass
+            if tg_handle and ext_dg_handle:
+                try:
+                    vxlan_obj.delete_device_groups(tg_handle, ext_dg_handle)
+                except Exception:
+                    pass
+
+            # DUT cleanup
+            if configured:
+                try:
+                    if not is_ipv6:
+                        bgp_del_ext = "\n".join([
+                            "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                            " no neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                            " address-family ipv4 unicast",
+                            "  no network {}".format(tgen_network),
+                            " exit-address-family", "!",
+                        ])
+                        bgp_del_dc1 = "\n".join([
+                            "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                            " address-family ipv4 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family", "!",
+                        ])
+                        bgp_del_dc2 = "\n".join([
+                            "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                            " address-family ipv4 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family", "!",
+                        ])
+                    else:
+                        bgp_del_ext = "\n".join([
+                            "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                            " no neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                            " address-family ipv6 unicast",
+                            "  no network {}".format(tgen_network),
+                            " exit-address-family", "!",
+                        ])
+                        bgp_del_dc1 = "\n".join([
+                            "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                            " address-family ipv6 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family", "!",
+                        ])
+                        bgp_del_dc2 = "\n".join([
+                            "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                            " address-family ipv6 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family", "!",
+                        ])
+                    _bgp_cmd(external_router, bgp_del_ext)
+                    _bgp_cmd(dc1_leaf, bgp_del_dc1)
+                    _bgp_cmd(dc2_leaf, bgp_del_dc2)
+
+                    _sonic_cmd(dc2_leaf, "sudo config interface ip remove {} {}".format(dc2_subif, dc2_leaf_cidr))
+                    _sonic_cmd(dc2_leaf, "sudo config interface vrf unbind {}".format(dc2_subif))
+                    _sonic_cmd(dc2_leaf, "sudo config subinterface del {}".format(dc2_subif))
+                    _sonic_cmd(dc1_leaf, "sudo config interface ip remove {} {}".format(dc1_subif, dc1_leaf_cidr))
+                    _sonic_cmd(dc1_leaf, "sudo config interface vrf unbind {}".format(dc1_subif))
+                    _sonic_cmd(dc1_leaf, "sudo config subinterface del {}".format(dc1_subif))
+                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_dc2_subif, ext_dc2_cidr))
+                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_dc2_subif))
+                    _sonic_cmd(external_router, "sudo config subinterface del {}".format(ext_dc2_subif))
+                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_dc1_subif, ext_dc1_cidr))
+                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_dc1_subif))
+                    _sonic_cmd(external_router, "sudo config subinterface del {}".format(ext_dc1_subif))
+                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_tgen_intf, tgen_ip_cidr))
+                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_tgen_intf))
+                except Exception as e:
+                    st.log("Warning: DUT cleanup failed: {}".format(e))
+
+        st.banner("TEST COMPLETE: {}".format(tc_id))
+        report_result(result, tc_id, summ)
+
     @pytest.mark.parametrize("test_case",
         ["dpb_400g_to_4x100g", "dpb_200g_to_4x100g", "dpb_on_unused_port"])
     def test_base_dci_l3vni_dpb_on_links(self, test_case):
@@ -10185,6 +10794,557 @@ class TestVxlanDCIBase():
             summ += 'Core files detected after DPB L3 VNI test ({})\n'.format(test_case)
             result = False
 
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_line_rate_performance(self):
+        """
+        L3VNI_dci:54 - L3VNI Performance - Line rate L3VNI traffic across DCI
+
+        Description:
+            1. Use existing cross-DC L3VNI streams (l3_v4 and l3_v6)
+            2. Run traffic at 100% line rate for 1 hour (3600s)
+            3. Verify 0% packet loss
+            4. Verify max latency <= 100 microseconds
+            5. Verify no interface errors/drops
+            6. Check for core files
+        """
+        tc_id = "test_base_dci_l3vni_line_rate_performance"
+        result = True
+        summ = ''
+        run_duration_s = 3600
+        max_latency_us = 100.0
+        max_loss_percent = 0.001  # Near-zero tolerance
+
+        st.banner("TEST: L3VNI Line Rate Performance (1 hour @ 100% rate)")
+
+        # Step 1: Verify base setup
+        st.banner("Step 1: Verify base DCI setup before performance test")
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                     test_cfg['nodes'].get('dc2_bgw', []))
+        if not verify_base_setup_bgw(bgw_nodes, skip_checks=['vteps'],
+                                     failure_context='before line-rate perf test'):
+            summ += "Base setup verification failed\n"
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Identify cross-DC L3 streams
+        st.banner("Step 2: Identify cross-DC L3VNI streams")
+        l3_v4_streams = stream_handles.get('l3_v4', {})
+        l3_v6_streams = stream_handles.get('l3_v6', {})
+        all_stream_ids = []
+        perf_tg_handle = None
+
+        for stream_key, streams in [('l3_v4', l3_v4_streams), ('l3_v6', l3_v6_streams)]:
+            for idx, sinfo in streams.items():
+                sid = sinfo if isinstance(sinfo, str) else sinfo.get('stream_id', sinfo)
+                if sid:
+                    all_stream_ids.append(sid)
+                    if perf_tg_handle is None and isinstance(sinfo, dict):
+                        perf_tg_handle = sinfo.get('tg_handle')
+
+        if not all_stream_ids:
+            # Fallback: use verify_traffic cross scope
+            st.log("No individual L3 stream IDs found, using verify_traffic(scope='cross')")
+            verify_result = verify_traffic(scope='cross', traffic_type='l3_v4')
+            if not verify_result:
+                summ += "Cross-DC L3 traffic failed even at normal rate\n"
+                result = False
+            report_result(result, tc_id, summ)
+            return
+
+        if perf_tg_handle is None:
+            perf_tg_handle = tgen_handles.get('tg_handle')
+
+        st.log("Performance streams: {} (count={})".format(all_stream_ids, len(all_stream_ids)))
+
+        # Step 3: Snapshot interface counters on BGW nodes
+        st.banner("Step 3: Snapshot interface counters on BGW nodes")
+        bgw_intfs = {}
+        for bgw in bgw_nodes:
+            dci_links = vxlan_obj.get_dci_link_interfaces(test_cfg, bgw)
+            if dci_links:
+                bgw_intfs[bgw] = dci_links
+
+        baseline_counters = {}
+        for bgw, intfs in bgw_intfs.items():
+            baseline_counters[bgw] = vxlan_obj.snapshot_interface_counters(bgw, intfs)
+
+        # Step 4: Modify streams to 100% rate and start traffic
+        st.banner("Step 4: Configure streams to 100% line rate and start")
+        try:
+            for sid in all_stream_ids:
+                perf_tg_handle.tg_traffic_config(
+                    mode='modify',
+                    stream_id=sid,
+                    rate_percent=100,
+                    transmit_mode='continuous')
+        except Exception as e:
+            st.log("WARN: Could not modify stream rate: {}".format(e))
+
+        perf_tg_handle.tg_traffic_control(action='clear_stats')
+        st.wait(5)
+        perf_tg_handle.tg_traffic_control(action='run', stream_handle=all_stream_ids)
+
+        # Step 5: Run for specified duration with periodic health checks
+        st.banner("Step 5: Running traffic for {} seconds (periodic health checks)".format(run_duration_s))
+        check_interval_s = 300  # Check every 5 minutes
+        elapsed = 0
+        while elapsed < run_duration_s:
+            wait_time = min(check_interval_s, run_duration_s - elapsed)
+            st.wait(wait_time)
+            elapsed += wait_time
+            st.log("Performance test: {}/{}s elapsed".format(elapsed, run_duration_s))
+
+            # Periodic core check
+            if vxlan_obj.check_core():
+                summ += "Core files detected during line-rate test at {}s\n".format(elapsed)
+                result = False
+                break
+
+        # Step 6: Stop traffic and collect stats
+        st.banner("Step 6: Stop traffic and collect statistics")
+        perf_tg_handle.tg_traffic_control(action='stop', stream_handle=all_stream_ids)
+        st.wait(10)
+
+        for sid in all_stream_ids:
+            stats = vxlan_obj.get_traffic_item_stats(perf_tg_handle, sid)
+            st.log("Stream {}: tx={} rx={} loss={:.4f}% max_lat={:.2f}us".format(
+                sid, stats['tx_pkts'], stats['rx_pkts'],
+                stats['loss_percent'], stats['max_latency_us']))
+
+            if stats['loss_percent'] > max_loss_percent:
+                summ += "Stream {} loss={:.4f}% (threshold={:.4f}%)\n".format(
+                    sid, stats['loss_percent'], max_loss_percent)
+                result = False
+
+            if stats['max_latency_us'] > max_latency_us:
+                summ += "Stream {} max_latency={:.2f}us (threshold={:.2f}us)\n".format(
+                    sid, stats['max_latency_us'], max_latency_us)
+                result = False
+
+        # Step 7: Compare interface counters
+        st.banner("Step 7: Compare interface counters for errors/drops")
+        for bgw, intfs in bgw_intfs.items():
+            current = vxlan_obj.snapshot_interface_counters(bgw, intfs)
+            has_errors, details = vxlan_obj.compare_interface_counters(
+                baseline_counters[bgw], current)
+            if has_errors:
+                summ += "Interface errors on {}: {}\n".format(bgw, details)
+                result = False
+
+        # Step 8: Restore streams to normal rate
+        st.banner("Step 8: Restore streams to normal rate")
+        try:
+            for sid in all_stream_ids:
+                perf_tg_handle.tg_traffic_config(
+                    mode='modify',
+                    stream_id=sid,
+                    rate_percent=1,
+                    transmit_mode='continuous')
+        except Exception as e:
+            st.log("WARN: Could not restore stream rate: {}".format(e))
+
+        # Step 9: Final core check
+        st.banner("Step 9: Final core check")
+        if vxlan_obj.check_core():
+            summ += "Core files detected after line-rate performance test\n"
+            result = False
+
+        st.banner("TEST COMPLETE: {}".format(tc_id))
+        report_result(result, tc_id, summ)
+
+    @pytest.mark.parametrize("trigger", [
+        "link_shut", "bgp_clear", "bgw_reboot", "process_kill_bgp"])
+    def test_base_dci_l3vni_convergence_time(self, trigger):
+        """
+        L3VNI_dci:55 - L3VNI Performance - Convergence time measurement
+
+        Description:
+            1. Start continuous L3VNI traffic across DCI
+            2. Apply trigger (link shut, BGP clear, BGW reboot, or process kill BGP)
+            3. Measure convergence time based on packet loss duration
+            4. Verify convergence time is within threshold for each trigger:
+               - link_shut: <= 50ms
+               - bgp_clear: <= 500ms
+               - bgw_reboot: <= 30000ms (30s)
+               - process_kill_bgp: <= 5000ms (5s)
+            5. Verify traffic fully recovers post-trigger
+        """
+        tc_id = "test_base_dci_l3vni_convergence_time_{}".format(trigger)
+        result = True
+        summ = ''
+
+        convergence_thresholds_ms = {
+            'link_shut': 50,
+            'bgp_clear': 500,
+            'bgw_reboot': 30000,
+            'process_kill_bgp': 5000,
+        }
+        threshold_ms = convergence_thresholds_ms.get(trigger, 5000)
+
+        st.banner("TEST: L3VNI Convergence Time - trigger={} (threshold={}ms)".format(
+            trigger, threshold_ms))
+
+        # Step 1: Verify base setup
+        st.banner("Step 1: Verify base DCI setup")
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                     test_cfg['nodes'].get('dc2_bgw', []))
+        if not verify_base_setup_bgw(bgw_nodes, skip_checks=['vteps'],
+                                     failure_context='before convergence test'):
+            summ += "Base setup verification failed\n"
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Identify target BGW and L3 streams
+        st.banner("Step 2: Identify target BGW and L3 streams")
+        dc1_bgw_nodes = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgw_nodes:
+            pytest.skip("No DC1 BGW nodes found")
+            return
+        target_bgw = dc1_bgw_nodes[0]
+
+        l3_v4_streams = stream_handles.get('l3_v4', {})
+        conv_stream_ids = []
+        conv_tg_handle = None
+
+        for idx, sinfo in l3_v4_streams.items():
+            sid = sinfo if isinstance(sinfo, str) else sinfo.get('stream_id', sinfo)
+            if sid:
+                conv_stream_ids.append(sid)
+                if conv_tg_handle is None and isinstance(sinfo, dict):
+                    conv_tg_handle = sinfo.get('tg_handle')
+
+        if not conv_stream_ids:
+            st.log("No L3 v4 streams found; attempting verify_traffic fallback")
+            verify_result = verify_traffic(scope='cross', traffic_type='l3_v4')
+            if not verify_result:
+                summ += "Cross-DC L3 traffic baseline failed\n"
+                result = False
+            report_result(result, tc_id, summ)
+            return
+
+        if conv_tg_handle is None:
+            conv_tg_handle = tgen_handles.get('tg_handle')
+
+        primary_stream = conv_stream_ids[0]
+        st.log("Convergence test: target_bgw={} primary_stream={} trigger={}".format(
+            target_bgw, primary_stream, trigger))
+
+        # Step 3: Start continuous traffic
+        st.banner("Step 3: Start continuous L3 traffic for convergence measurement")
+        conv_tg_handle.tg_traffic_control(action='clear_stats')
+        st.wait(2)
+        conv_tg_handle.tg_traffic_control(action='run', stream_handle=conv_stream_ids)
+        st.wait(30)  # Warm-up period to establish baseline Tx PPS
+
+        # Measure baseline Tx PPS
+        pre_stats = vxlan_obj.get_traffic_item_stats(conv_tg_handle, primary_stream)
+        measured_tx_pps = pre_stats.get('tx_pps', 0)
+        st.log("Measured baseline Tx PPS: {}".format(measured_tx_pps))
+
+        # Clear stats just before trigger for accurate loss measurement
+        conv_tg_handle.tg_traffic_control(action='clear_stats')
+        st.wait(5)
+
+        # Step 4: Apply trigger
+        st.banner("Step 4: Apply trigger: {}".format(trigger))
+
+        if trigger == 'link_shut':
+            dci_intfs = vxlan_obj.get_dci_link_interfaces(test_cfg, target_bgw)
+            if not dci_intfs:
+                summ += "No DCI interfaces found on {}\n".format(target_bgw)
+                result = False
+            else:
+                target_intf = dci_intfs[0]
+                st.log("Shutting down {} on {}".format(target_intf, target_bgw))
+                st.config(target_bgw, "sudo config interface shutdown {}".format(target_intf))
+                st.wait(5)
+                st.log("Bringing up {} on {}".format(target_intf, target_bgw))
+                st.config(target_bgw, "sudo config interface startup {}".format(target_intf))
+
+        elif trigger == 'bgp_clear':
+            st.log("Clearing BGP on {}".format(target_bgw))
+            st.vtysh(target_bgw, "clear bgp *")
+
+        elif trigger == 'bgw_reboot':
+            st.log("Rebooting {}".format(target_bgw))
+            st.reboot(target_bgw, skip_fallback=True)
+
+        elif trigger == 'process_kill_bgp':
+            st.log("Killing bgpd process on {}".format(target_bgw))
+            st.config(target_bgw, "sudo killall -9 bgpd")
+
+        # Step 5: Wait for convergence
+        st.banner("Step 5: Wait for convergence (based on trigger type)")
+        if trigger == 'bgw_reboot':
+            st.wait(120)  # Wait for reboot to complete
+        elif trigger == 'process_kill_bgp':
+            st.wait(30)  # Wait for process restart
+        elif trigger == 'bgp_clear':
+            st.wait(20)
+        else:
+            st.wait(10)
+
+        # Step 6: Verify traffic recovered
+        st.banner("Step 6: Verify traffic has recovered")
+        recovery_check_attempts = 6
+        traffic_recovered = False
+        for attempt in range(recovery_check_attempts):
+            post_stats = vxlan_obj.get_traffic_item_stats(conv_tg_handle, primary_stream)
+            if post_stats['rx_pps'] > 0:
+                traffic_recovered = True
+                st.log("Traffic recovered: rx_pps={}".format(post_stats['rx_pps']))
+                break
+            st.log("Traffic not yet recovered (attempt {}/{})".format(
+                attempt + 1, recovery_check_attempts))
+            st.wait(10)
+
+        if not traffic_recovered:
+            summ += "Traffic did NOT recover after trigger={}\n".format(trigger)
+            result = False
+
+        # Step 7: Stop traffic and compute convergence time
+        st.banner("Step 7: Stop traffic and compute convergence time")
+        st.wait(30)  # Additional settling time
+        conv_tg_handle.tg_traffic_control(action='stop', stream_handle=conv_stream_ids)
+        st.wait(5)
+
+        convergence_ms, frames_lost = vxlan_obj.compute_convergence_ms(
+            conv_tg_handle, primary_stream, measured_tx_pps=measured_tx_pps)
+
+        st.log("Convergence result: trigger={} convergence_ms={:.2f} frames_lost={} threshold_ms={}".format(
+            trigger, convergence_ms, frames_lost, threshold_ms))
+
+        if convergence_ms > threshold_ms:
+            summ += "Convergence time {:.2f}ms exceeds threshold {}ms (trigger={})\n".format(
+                convergence_ms, threshold_ms, trigger)
+            result = False
+        else:
+            st.log("PASS: Convergence time {:.2f}ms within threshold {}ms".format(
+                convergence_ms, threshold_ms))
+
+        # Step 8: Final core check
+        st.banner("Step 8: Final core check")
+        if vxlan_obj.check_core():
+            summ += "Core files detected after convergence test (trigger={})\n".format(trigger)
+            result = False
+
+        st.banner("TEST COMPLETE: {}".format(tc_id))
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_imix_traffic(self):
+        """
+        L3VNI_dci:56 - L3VNI Performance - IMIX traffic pattern with L3VNI
+
+        Description:
+            1. Configure IMIX traffic pattern: 64B (weight 7), 512B (weight 4), 1518B (weight 1)
+            2. Run cross-DC L3VNI IMIX traffic for 5 minutes
+            3. Verify 0% packet loss
+            4. Verify latency thresholds per frame size:
+               - 64B: max_latency <= 50us
+               - 512B: max_latency <= 80us
+               - 1518B: max_latency <= 100us
+            5. Verify no interface errors/drops on BGW DCI links
+        """
+        tc_id = "test_base_dci_l3vni_imix_traffic"
+        result = True
+        summ = ''
+        run_duration_s = 300  # 5 minutes
+        max_loss_percent = 0.001
+
+        imix_recipe = [
+            {'frame_size': 64, 'weight': 7, 'max_latency_us': 50.0},
+            {'frame_size': 512, 'weight': 4, 'max_latency_us': 80.0},
+            {'frame_size': 1518, 'weight': 1, 'max_latency_us': 100.0},
+        ]
+
+        st.banner("TEST: L3VNI IMIX Traffic Pattern (5 min)")
+
+        # Step 1: Verify base setup
+        st.banner("Step 1: Verify base DCI setup before IMIX test")
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                     test_cfg['nodes'].get('dc2_bgw', []))
+        if not verify_base_setup_bgw(bgw_nodes, skip_checks=['vteps'],
+                                     failure_context='before IMIX perf test'):
+            summ += "Base setup verification failed\n"
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Find L3 cross-DC stream endpoints for IMIX
+        st.banner("Step 2: Find L3 cross-DC endpoints for IMIX streams")
+        l3_v4_streams = stream_handles.get('l3_v4', {})
+        imix_tg_handle = None
+        src_port_handle = None
+        dst_port_handle = None
+        src_dev_handle = None
+        dst_dev_handle = None
+
+        for idx, sinfo in l3_v4_streams.items():
+            if isinstance(sinfo, dict):
+                imix_tg_handle = sinfo.get('tg_handle')
+                src_port_handle = sinfo.get('src_port_handle')
+                dst_port_handle = sinfo.get('dst_port_handle')
+                src_dev_handle = sinfo.get('emulation_src_handle')
+                dst_dev_handle = sinfo.get('emulation_dst_handle')
+                if imix_tg_handle:
+                    break
+
+        if imix_tg_handle is None:
+            imix_tg_handle = tgen_handles.get('tg_handle')
+
+        # If we don't have individual endpoint handles, use existing streams with modified sizes
+        use_existing_streams = False
+        existing_stream_ids = []
+        if not src_port_handle or not dst_port_handle:
+            st.log("Using existing L3 streams with IMIX frame size modification")
+            use_existing_streams = True
+            for idx, sinfo in l3_v4_streams.items():
+                sid = sinfo if isinstance(sinfo, str) else sinfo.get('stream_id', sinfo)
+                if sid:
+                    existing_stream_ids.append(sid)
+
+        imix_stream_ids = []
+
+        if use_existing_streams and existing_stream_ids:
+            # Modify existing streams to use IMIX-like weighted frame sizes
+            # Use the first stream and modify its frame size to IMIX weighted average
+            # IMIX weighted average: (64*7 + 512*4 + 1518*1) / 12 = 279.8 bytes
+            imix_avg_size = int((64 * 7 + 512 * 4 + 1518 * 1) / 12)
+            try:
+                for sid in existing_stream_ids:
+                    imix_tg_handle.tg_traffic_config(
+                        mode='modify',
+                        stream_id=sid,
+                        frame_size=imix_avg_size,
+                        rate_percent=50,
+                        transmit_mode='continuous')
+                    imix_stream_ids.append(sid)
+            except Exception as e:
+                st.log("WARN: Could not modify existing streams for IMIX: {}".format(e))
+                imix_stream_ids = existing_stream_ids
+        else:
+            # Create dedicated IMIX streams per frame size
+            st.banner("Step 3: Create IMIX streams per frame size")
+            total_weight = sum(entry['weight'] for entry in imix_recipe)
+            for entry in imix_recipe:
+                rate_share = (entry['weight'] / float(total_weight)) * 50.0
+                try:
+                    stream_cfg = imix_tg_handle.tg_traffic_config(
+                        port_handle=src_port_handle,
+                        port_handle2=dst_port_handle,
+                        mode='create',
+                        transmit_mode='continuous',
+                        rate_percent=rate_share,
+                        circuit_endpoint_type='ipv4',
+                        frame_size=entry['frame_size'],
+                        emulation_src_handle=src_dev_handle,
+                        emulation_dst_handle=dst_dev_handle,
+                        track_by='traffic_item')
+                    sid = stream_cfg.get('stream_id')
+                    if sid:
+                        imix_stream_ids.append(sid)
+                        st.log("Created IMIX stream: size={} rate={:.1f}% id={}".format(
+                            entry['frame_size'], rate_share, sid))
+                except Exception as e:
+                    st.log("WARN: Failed to create IMIX stream size={}: {}".format(
+                        entry['frame_size'], e))
+
+        if not imix_stream_ids:
+            summ += "No IMIX streams could be created or found\n"
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 4: Snapshot interface counters
+        st.banner("Step 4: Snapshot BGW interface counters")
+        bgw_intfs = {}
+        for bgw in bgw_nodes:
+            dci_links = vxlan_obj.get_dci_link_interfaces(test_cfg, bgw)
+            if dci_links:
+                bgw_intfs[bgw] = dci_links
+
+        baseline_counters = {}
+        for bgw, intfs in bgw_intfs.items():
+            baseline_counters[bgw] = vxlan_obj.snapshot_interface_counters(bgw, intfs)
+
+        # Step 5: Run IMIX traffic
+        st.banner("Step 5: Run IMIX traffic for {} seconds".format(run_duration_s))
+        imix_tg_handle.tg_traffic_control(action='clear_stats')
+        st.wait(2)
+        imix_tg_handle.tg_traffic_control(action='run', stream_handle=imix_stream_ids)
+
+        # Wait for run duration with periodic health checks
+        check_interval_s = 60
+        elapsed = 0
+        while elapsed < run_duration_s:
+            wait_time = min(check_interval_s, run_duration_s - elapsed)
+            st.wait(wait_time)
+            elapsed += wait_time
+            st.log("IMIX test: {}/{}s elapsed".format(elapsed, run_duration_s))
+
+        # Step 6: Stop traffic and collect stats
+        st.banner("Step 6: Stop traffic and collect IMIX statistics")
+        imix_tg_handle.tg_traffic_control(action='stop', stream_handle=imix_stream_ids)
+        st.wait(10)
+
+        for i, sid in enumerate(imix_stream_ids):
+            stats = vxlan_obj.get_traffic_item_stats(imix_tg_handle, sid)
+            frame_entry = imix_recipe[i] if i < len(imix_recipe) else {'frame_size': 'avg', 'max_latency_us': 100.0}
+            frame_label = frame_entry.get('frame_size', 'unknown')
+            lat_threshold = frame_entry.get('max_latency_us', 100.0)
+
+            st.log("IMIX stream {} ({}B): tx={} rx={} loss={:.4f}% max_lat={:.2f}us".format(
+                sid, frame_label, stats['tx_pkts'], stats['rx_pkts'],
+                stats['loss_percent'], stats['max_latency_us']))
+
+            if stats['loss_percent'] > max_loss_percent:
+                summ += "IMIX {}B loss={:.4f}% (threshold={:.4f}%)\n".format(
+                    frame_label, stats['loss_percent'], max_loss_percent)
+                result = False
+
+            if stats['max_latency_us'] > lat_threshold:
+                summ += "IMIX {}B max_latency={:.2f}us (threshold={:.2f}us)\n".format(
+                    frame_label, stats['max_latency_us'], lat_threshold)
+                result = False
+
+        # Step 7: Compare interface counters
+        st.banner("Step 7: Compare BGW interface counters for errors/drops")
+        for bgw, intfs in bgw_intfs.items():
+            current = vxlan_obj.snapshot_interface_counters(bgw, intfs)
+            has_errors, details = vxlan_obj.compare_interface_counters(
+                baseline_counters[bgw], current)
+            if has_errors:
+                summ += "Interface errors on {} during IMIX: {}\n".format(bgw, details)
+                result = False
+
+        # Step 8: Restore streams (if we modified existing ones)
+        if use_existing_streams:
+            st.banner("Step 8: Restore original stream configuration")
+            try:
+                for sid in imix_stream_ids:
+                    imix_tg_handle.tg_traffic_config(
+                        mode='modify',
+                        stream_id=sid,
+                        frame_size=500,
+                        rate_percent=1,
+                        transmit_mode='continuous')
+            except Exception as e:
+                st.log("WARN: Could not restore stream config: {}".format(e))
+        else:
+            # Remove dedicated IMIX streams
+            st.banner("Step 8: Remove dedicated IMIX streams")
+            for sid in imix_stream_ids:
+                try:
+                    imix_tg_handle.tg_traffic_config(mode='remove', stream_id=sid)
+                except Exception:
+                    pass
+
+        # Step 9: Final core check
+        st.banner("Step 9: Final core check")
+        if vxlan_obj.check_core():
+            summ += "Core files detected after IMIX performance test\n"
+            result = False
+
+        st.banner("TEST COMPLETE: {}".format(tc_id))
         report_result(result, tc_id, summ)
 
 

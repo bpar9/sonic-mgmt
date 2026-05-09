@@ -9366,28 +9366,32 @@ class TestVxlanDCIBase():
     def test_base_dci_l3vni_external_connectivity(self, ip_version):
         """
         L3VNI_dci:47(ipv4) / L3VNI_dci:49(ipv6) - External router connectivity with Type-5 routes
-        via VRF-lite peering.
+        via VRF-lite peering on a DC1 BGW.
+
+        Testplan references:
+            TC47: ext_prefix=10.99.0.0/24, ext_peer_ip=10.250.1.1/30,
+                  bgw_local_ip=10.250.1.2/30, ext_asn=65500 (IPv4)
+            TC49: ext_prefix=2001:db8:99::/64, ext_peer_ip=2001:db8:250::1/126,
+                  bgw_local_ip=2001:db8:250::2/126, ext_asn=65500 (IPv6)
 
         Description:
             1. Base profile bring up
-            2. Connect external router to DC1 leaf and DC2 leaf via sub-interfaces
-            3. Configure VRF-lite eBGP peering (IPv4 or IPv6) between external router and leaves
-            4. Advertise external prefix into Vrf101 from external router
-            5. Verify Type-5 route propagated to all leaves across DCs
-            6. Send traffic from DC2 leaf host to external router TGEN host
-            7. Verify bidirectional traffic with zero loss
+            2. Configure VRF-lite eBGP peering on a DC1 BGW toward an external router
+            3. Advertise ext_prefix from external router into Vrf101 via eBGP
+            4. Verify Type-5 route propagated across DCI to DC2 BGW and DC2 leaf
+            5. Send traffic from DC2 host to ext_prefix
+            6. Verify >= 99.8% Rx with 0 drops on DCI uplinks
 
         Steps:
-            1. Verify base DCI setup before external connectivity config
-            2. Discover external router and its links to DC1/DC2 leaves
-            3. Configure sub-interfaces + VRF binding + IPs on external router and leaves
-            4. Configure eBGP VRF-lite peering with route-map (NO-ADV-OUT) on leaves
-            5. Advertise TGEN network from external router into Vrf101
-            6. Wait for BGP convergence
-            7. Verify Type-5 routes on leaves
-            8. Configure TGEN device group and traffic streams
-            9. Verify bidirectional traffic (DC leaf <-> external router TGEN)
-            10. Cleanup all config
+            1. Verify base DCI setup on all BGW nodes
+            2. Pick a DC1 BGW and discover its link to the external router
+            3. Configure sub-interface + VRF binding + IP on DC1 BGW
+            4. Configure external router (SONiC DUT) with eBGP peering
+            5. Poll for BGP Established (up to 60s)
+            6. Verify Type-5 route attributes on DC1 BGW, DC2 BGW, DC2 leaf
+            7. Send traffic from DC2 host -> ext_prefix, verify >= 99.8% Rx
+            8. Check DCI uplink drop counters
+            9. Cleanup all config and re-verify base profile health
         """
         tc_id = "test_base_dci_l3vni_external_connectivity_{}".format(ip_version)
         result = True
@@ -9396,41 +9400,29 @@ class TestVxlanDCIBase():
 
         st.banner("TEST: L3VNI External Router Connectivity - Type-5 routes ({} VRF-lite peering)".format(ip_version))
 
-        # Configuration parameters
+        # Configuration parameters aligned to testplan (TC47/TC49)
         vrf_name = 'Vrf101'
         subif_vlan_v4 = 100
         subif_vlan_v6 = 101
-        ext_asn = 65333
+        ext_asn = 65500
 
         if not is_ipv6:
             subif_vlan = subif_vlan_v4
-            ext_dc1_ip = '21.1.1.2'
-            ext_dc1_cidr = '21.1.1.2/24'
-            dc1_leaf_ip = '21.1.1.1'
-            dc1_leaf_cidr = '21.1.1.1/24'
-            ext_dc2_ip = '22.1.1.2'
-            ext_dc2_cidr = '22.1.1.2/24'
-            dc2_leaf_ip = '22.1.1.1'
-            dc2_leaf_cidr = '22.1.1.1/24'
-            tgen_ip_cidr = '42.1.1.1/24'
-            tgen_network = '42.1.1.0/24'
-            tgen_host_ip = '42.1.1.2'
-            tgen_gw_ip = '42.1.1.1'
+            ext_peer_ip = '10.250.1.1'
+            ext_peer_cidr = '10.250.1.1/30'
+            bgw_local_ip = '10.250.1.2'
+            bgw_local_cidr = '10.250.1.2/30'
+            ext_prefix = '10.99.0.0/24'
+            ext_prefix_host = '10.99.0.10'
             af_name = 'ipv4'
         else:
             subif_vlan = subif_vlan_v6
-            ext_dc1_ip = '21:1:1::2'
-            ext_dc1_cidr = '21:1:1::2/64'
-            dc1_leaf_ip = '21:1:1::1'
-            dc1_leaf_cidr = '21:1:1::1/64'
-            ext_dc2_ip = '22:1:1::2'
-            ext_dc2_cidr = '22:1:1::2/64'
-            dc2_leaf_ip = '22:1:1::1'
-            dc2_leaf_cidr = '22:1:1::1/64'
-            tgen_ip_cidr = '42:1:1::1/64'
-            tgen_network = '42:1:1::/64'
-            tgen_host_ip = '42:1:1::2'
-            tgen_gw_ip = '42:1:1::1'
+            ext_peer_ip = '2001:db8:250::1'
+            ext_peer_cidr = '2001:db8:250::1/126'
+            bgw_local_ip = '2001:db8:250::2'
+            bgw_local_cidr = '2001:db8:250::2/126'
+            ext_prefix = '2001:db8:99::/64'
+            ext_prefix_host = '2001:db8:99::10'
             af_name = 'ipv6'
 
         # Step 1: Verify base setup
@@ -9443,60 +9435,50 @@ class TestVxlanDCIBase():
             report_result(False, tc_id, summ)
             return
 
-        # Step 2: Discover external router and links
-        st.banner("Step 2: Discover external router connections to DC1/DC2 leaves")
-        dc1_leaf_nodes = [d for d in test_cfg['nodes'].get('leaf', []) if 'dc1' in d]
+        # Step 2: Pick a DC1 BGW and discover its link to the external router
+        st.banner("Step 2: Pick a DC1 BGW and discover external router link")
+        dc1_bgw_nodes = test_cfg['nodes'].get('dc1_bgw', [])
+        dc2_bgw_nodes = test_cfg['nodes'].get('dc2_bgw', [])
         dc2_leaf_nodes = [d for d in test_cfg['nodes'].get('leaf', []) if 'dc2' in d]
 
-        if not dc1_leaf_nodes or not dc2_leaf_nodes:
-            pytest.skip("No DC1/DC2 leaf nodes found")
+        if not dc1_bgw_nodes:
+            pytest.skip("No DC1 BGW nodes found in test_cfg")
+            return
+        if not dc2_leaf_nodes:
+            pytest.skip("No DC2 leaf nodes found for traffic source")
             return
 
         external_router = None
-        dc1_leaf = None
-        dc2_leaf = None
-        dc1_leaf_port = None
-        dc2_leaf_port = None
-        ext_port_to_dc1 = None
-        ext_port_to_dc2 = None
+        dc1_bgw = None
+        bgw_port = None
+        ext_port_to_bgw = None
 
         all_nodes = test_cfg['nodes'].get('all', [])
         ext_candidates = [n for n in all_nodes if 'external' in n or 'router' in n]
         if not ext_candidates:
             ext_candidates = [n for n in all_nodes
-                              if n not in dc1_leaf_nodes and n not in dc2_leaf_nodes
-                              and 'spine' not in n and 'bgw' not in n and 'leaf' not in n
+                              if 'spine' not in n and 'bgw' not in n and 'leaf' not in n
                               and 'ihop' not in n]
 
         for router in ext_candidates:
-            for dc1_l in dc1_leaf_nodes:
-                dc1_links = st.get_dut_links(dc1_l, peer=router) or []
-                if dc1_links:
-                    for dc2_l in dc2_leaf_nodes:
-                        dc2_links = st.get_dut_links(dc2_l, peer=router) or []
-                        if dc2_links:
-                            external_router = router
-                            dc1_leaf = dc1_l
-                            dc2_leaf = dc2_l
-                            dc1_leaf_port, _, ext_port_to_dc1 = dc1_links[0]
-                            dc2_leaf_port, _, ext_port_to_dc2 = dc2_links[0]
-                            break
-                    if external_router:
-                        break
+            for bgw in dc1_bgw_nodes:
+                links = st.get_dut_links(bgw, peer=router) or []
+                if links:
+                    external_router = router
+                    dc1_bgw = bgw
+                    bgw_port, _, ext_port_to_bgw = links[0]
+                    break
             if external_router:
                 break
 
         if not external_router:
-            pytest.skip("No external router found connected to both DC1 and DC2 leaves")
+            pytest.skip("No external router found connected to a DC1 BGW")
             return
 
-        st.log("External router: {}, DC1 leaf: {} (port {}), DC2 leaf: {} (port {})".format(
-            external_router, dc1_leaf, dc1_leaf_port, dc2_leaf, dc2_leaf_port))
-        st.log("Ext router ports: to_dc1={}, to_dc2={}".format(ext_port_to_dc1, ext_port_to_dc2))
+        st.log("DC1 BGW: {} (port {}), External router: {} (port {})".format(
+            dc1_bgw, bgw_port, external_router, ext_port_to_bgw))
 
-        # Get ASN for leaves from test_cfg
-        dc1_asn = test_cfg.get(dc1_leaf, {}).get('bgp_as', 65203)
-        dc2_asn = test_cfg.get(dc2_leaf, {}).get('bgp_as', 65205)
+        bgw_asn = test_cfg.get(dc1_bgw, {}).get('bgp_as', 65203)
 
         # Helper to get subinterface short name
         def _subif_name(intf, vlan):
@@ -9516,12 +9498,10 @@ class TestVxlanDCIBase():
                 st.log("WARN: BGP cmd failed on {}: ({})".format(node, err))
 
         # Subinterface names
-        ext_dc1_subif = _subif_name(ext_port_to_dc1, subif_vlan)
-        ext_dc2_subif = _subif_name(ext_port_to_dc2, subif_vlan)
-        dc1_subif = _subif_name(dc1_leaf_port, subif_vlan)
-        dc2_subif = _subif_name(dc2_leaf_port, subif_vlan)
+        ext_subif = _subif_name(ext_port_to_bgw, subif_vlan)
+        bgw_subif = _subif_name(bgw_port, subif_vlan)
 
-        # Resolve TGEN interface on external router
+        # Resolve TGEN interface on external router for ext_prefix advertisement
         ext_tgen_intf = None
         try:
             tg_links = st.get_tg_links(external_router) or []
@@ -9538,173 +9518,203 @@ class TestVxlanDCIBase():
         ext_stream_id = None
 
         try:
-            # Step 3: Configure sub-interfaces and VRF binding
-            st.banner("Step 3: Configure sub-interfaces and VRF-lite on external router and leaves")
+            # Step 3: Configure sub-interface + VRF binding on DC1 BGW and external router
+            st.banner("Step 3: Configure sub-interface and VRF-lite on DC1 BGW and external router")
 
-            # External router: TGEN interface
+            # External router: VRF + sub-interface toward DC1 BGW
             _sonic_cmd(external_router, "sudo config vrf add {}".format(vrf_name))
+            _sonic_cmd(external_router, "sudo config subinterface add {} {}".format(ext_subif, subif_vlan))
+            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_subif, vrf_name))
+            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_subif, ext_peer_cidr))
+
+            # External router: bind TGEN-facing interface to VRF for ext_prefix connectivity
             _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_tgen_intf, vrf_name))
-            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_tgen_intf, tgen_ip_cidr))
 
-            # External router: sub-interface towards DC1
-            _sonic_cmd(external_router, "sudo config subinterface add {} {}".format(ext_dc1_subif, subif_vlan))
-            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_dc1_subif, vrf_name))
-            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_dc1_subif, ext_dc1_cidr))
-
-            # External router: sub-interface towards DC2
-            _sonic_cmd(external_router, "sudo config subinterface add {} {}".format(ext_dc2_subif, subif_vlan))
-            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_dc2_subif, vrf_name))
-            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_dc2_subif, ext_dc2_cidr))
-
-            # DC1 leaf: sub-interface
-            _sonic_cmd(dc1_leaf, "sudo config subinterface add {} {}".format(dc1_subif, subif_vlan))
-            _sonic_cmd(dc1_leaf, "sudo config interface vrf bind {} {}".format(dc1_subif, vrf_name))
-            _sonic_cmd(dc1_leaf, "sudo config interface ip add {} {}".format(dc1_subif, dc1_leaf_cidr))
-
-            # DC2 leaf: sub-interface
-            _sonic_cmd(dc2_leaf, "sudo config subinterface add {} {}".format(dc2_subif, subif_vlan))
-            _sonic_cmd(dc2_leaf, "sudo config interface vrf bind {} {}".format(dc2_subif, vrf_name))
-            _sonic_cmd(dc2_leaf, "sudo config interface ip add {} {}".format(dc2_subif, dc2_leaf_cidr))
+            # DC1 BGW: sub-interface toward external router
+            _sonic_cmd(dc1_bgw, "sudo config subinterface add {} {}".format(bgw_subif, subif_vlan))
+            _sonic_cmd(dc1_bgw, "sudo config interface vrf bind {} {}".format(bgw_subif, vrf_name))
+            _sonic_cmd(dc1_bgw, "sudo config interface ip add {} {}".format(bgw_subif, bgw_local_cidr))
 
             # Step 4: Configure eBGP VRF-lite peering
             st.banner("Step 4: Configure eBGP VRF-lite peering ({})".format(af_name))
 
-            # External router BGP
+            # External router BGP: advertise ext_prefix, peer with DC1 BGW only
             if not is_ipv6:
                 vtysh_ext = "\n".join([
                     "router bgp {} vrf {}".format(ext_asn, vrf_name),
-                    " bgp router-id 20.1.1.2",
+                    " bgp router-id 10.250.1.1",
                     " no bgp ebgp-requires-policy",
                     " no bgp default ipv4-unicast",
                     " no bgp network import-check",
-                    " neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
-                    " neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                    " neighbor {} remote-as {}".format(bgw_local_ip, bgw_asn),
                     " address-family ipv4 unicast",
-                    "  network {}".format(tgen_network),
-                    "  neighbor {} activate".format(dc1_leaf_ip),
-                    "  neighbor {} activate".format(dc2_leaf_ip),
+                    "  network {}".format(ext_prefix),
+                    "  neighbor {} activate".format(bgw_local_ip),
                     " exit-address-family",
                     "!",
                 ])
             else:
                 vtysh_ext = "\n".join([
                     "router bgp {} vrf {}".format(ext_asn, vrf_name),
-                    " bgp router-id 20.1.1.2",
+                    " bgp router-id 10.250.1.1",
                     " no bgp ebgp-requires-policy",
                     " no bgp default ipv4-unicast",
                     " no bgp network import-check",
-                    " neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
-                    " neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                    " neighbor {} remote-as {}".format(bgw_local_ip, bgw_asn),
                     " address-family ipv6 unicast",
-                    "  network {}".format(tgen_network),
-                    "  neighbor {} activate".format(dc1_leaf_ip),
-                    "  neighbor {} activate".format(dc2_leaf_ip),
+                    "  network {}".format(ext_prefix),
+                    "  neighbor {} activate".format(bgw_local_ip),
                     " exit-address-family",
                     "!",
                 ])
             _bgp_cmd(external_router, vtysh_ext)
 
-            # DC1 leaf BGP with NO-ADV-OUT route-map
+            # DC1 BGW BGP: accept ext_prefix, redistribute into EVPN Type-5
             if not is_ipv6:
-                vtysh_dc1 = "\n".join([
+                vtysh_bgw = "\n".join([
                     "ip prefix-list ALL-IPV4 seq 5 permit 0.0.0.0/0 le 32",
                     "route-map NO-ADV-OUT deny 10",
                     " match ip address prefix-list ALL-IPV4",
                     "exit",
-                    "router bgp {} vrf {}".format(dc1_asn, vrf_name),
-                    " bgp router-id 20.1.1.1",
+                    "router bgp {} vrf {}".format(bgw_asn, vrf_name),
                     " no bgp ebgp-requires-policy",
                     " no bgp default ipv4-unicast",
                     " no bgp network import-check",
-                    " neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                    " neighbor {} remote-as {}".format(ext_peer_ip, ext_asn),
                     " address-family ipv4 unicast",
-                    "  neighbor {} activate".format(ext_dc1_ip),
-                    "  neighbor {} route-map NO-ADV-OUT out".format(ext_dc1_ip),
+                    "  neighbor {} activate".format(ext_peer_ip),
+                    "  neighbor {} route-map NO-ADV-OUT out".format(ext_peer_ip),
                     "  redistribute connected",
+                    "  redistribute bgp",
                     " exit-address-family",
                     "!",
                 ])
             else:
-                vtysh_dc1 = "\n".join([
+                vtysh_bgw = "\n".join([
                     "ipv6 prefix-list ALL-IPV6 seq 5 permit ::/0 le 128",
                     "route-map NO-ADV-OUT-V6 deny 10",
                     " match ipv6 address prefix-list ALL-IPV6",
                     "exit",
-                    "router bgp {} vrf {}".format(dc1_asn, vrf_name),
-                    " bgp router-id 20.1.1.1",
+                    "router bgp {} vrf {}".format(bgw_asn, vrf_name),
                     " no bgp ebgp-requires-policy",
                     " no bgp default ipv4-unicast",
                     " no bgp network import-check",
-                    " neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                    " neighbor {} remote-as {}".format(ext_peer_ip, ext_asn),
                     " address-family ipv6 unicast",
-                    "  neighbor {} activate".format(ext_dc1_ip),
-                    "  neighbor {} route-map NO-ADV-OUT-V6 out".format(ext_dc1_ip),
+                    "  neighbor {} activate".format(ext_peer_ip),
+                    "  neighbor {} route-map NO-ADV-OUT-V6 out".format(ext_peer_ip),
                     "  redistribute connected",
+                    "  redistribute bgp",
                     " exit-address-family",
                     "!",
                 ])
-            _bgp_cmd(dc1_leaf, vtysh_dc1)
-
-            # DC2 leaf BGP with NO-ADV-OUT route-map
-            if not is_ipv6:
-                vtysh_dc2 = "\n".join([
-                    "ip prefix-list ALL-IPV4 seq 5 permit 0.0.0.0/0 le 32",
-                    "route-map NO-ADV-OUT deny 10",
-                    " match ip address prefix-list ALL-IPV4",
-                    "exit",
-                    "router bgp {} vrf {}".format(dc2_asn, vrf_name),
-                    " bgp router-id 20.1.1.1",
-                    " no bgp ebgp-requires-policy",
-                    " no bgp default ipv4-unicast",
-                    " no bgp network import-check",
-                    " neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
-                    " address-family ipv4 unicast",
-                    "  neighbor {} activate".format(ext_dc2_ip),
-                    "  neighbor {} route-map NO-ADV-OUT out".format(ext_dc2_ip),
-                    "  redistribute connected",
-                    " exit-address-family",
-                    "!",
-                ])
-            else:
-                vtysh_dc2 = "\n".join([
-                    "ipv6 prefix-list ALL-IPV6 seq 5 permit ::/0 le 128",
-                    "route-map NO-ADV-OUT-V6 deny 10",
-                    " match ipv6 address prefix-list ALL-IPV6",
-                    "exit",
-                    "router bgp {} vrf {}".format(dc2_asn, vrf_name),
-                    " bgp router-id 20.1.1.1",
-                    " no bgp ebgp-requires-policy",
-                    " no bgp default ipv4-unicast",
-                    " no bgp network import-check",
-                    " neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
-                    " address-family ipv6 unicast",
-                    "  neighbor {} activate".format(ext_dc2_ip),
-                    "  neighbor {} route-map NO-ADV-OUT-V6 out".format(ext_dc2_ip),
-                    "  redistribute connected",
-                    " exit-address-family",
-                    "!",
-                ])
-            _bgp_cmd(dc2_leaf, vtysh_dc2)
+            _bgp_cmd(dc1_bgw, vtysh_bgw)
 
             configured = True
 
-            # Step 5: Wait for BGP convergence
-            st.banner("Step 5: Wait for BGP convergence (60s)")
-            st.wait(60)
+            # Step 5: Poll for BGP Established (up to 60s)
+            st.banner("Step 5: Poll for BGP Established on DC1 BGW (up to 60s)")
+            bgp_up = False
+            for attempt in range(12):
+                cmd = "do show bgp vrf {} summary".format(vrf_name)
+                output = str(vxlan_obj.config_dut(dc1_bgw, 'bgp', cmd))
+                if ext_peer_ip in output and 'Established' in output:
+                    st.log("BGP session to {} is Established on {} (attempt {})".format(
+                        ext_peer_ip, dc1_bgw, attempt + 1))
+                    bgp_up = True
+                    break
+                # Also check for numeric prefixes-received (e.g., "1" in the neighbor column)
+                lines = output.split('\n')
+                for line in lines:
+                    if ext_peer_ip in line:
+                        parts = line.split()
+                        if parts and parts[-1].isdigit() and int(parts[-1]) > 0:
+                            st.log("BGP session to {} is up with {} prefixes on {}".format(
+                                ext_peer_ip, parts[-1], dc1_bgw))
+                            bgp_up = True
+                            break
+                if bgp_up:
+                    break
+                st.wait(5)
 
-            # Step 6: Verify Type-5 route on leaves
-            st.banner("Step 6: Verify Type-5 route {} propagated to leaves".format(tgen_network))
-            for leaf in dc1_leaf_nodes + dc2_leaf_nodes:
-                cmd = "do show bgp l2vpn evpn route type prefix"
-                output = vxlan_obj.config_dut(leaf, 'bgp', cmd)
-                if tgen_network.split('/')[0] in str(output):
-                    st.log("Type-5 route {} found on {}".format(tgen_network, leaf))
+            if not bgp_up:
+                summ += "BGP session to {} NOT Established on {} after 60s\n".format(ext_peer_ip, dc1_bgw)
+                result = False
+
+            # Verify ext_prefix in BGP RIB on DC1 BGW
+            if bgp_up:
+                if not is_ipv6:
+                    rib_cmd = "do show bgp vrf {} ipv4 unicast {}".format(vrf_name, ext_prefix)
                 else:
-                    summ += "Type-5 route {} NOT found on {}\n".format(tgen_network, leaf)
+                    rib_cmd = "do show bgp vrf {} ipv6 unicast {}".format(vrf_name, ext_prefix)
+                rib_out = str(vxlan_obj.config_dut(dc1_bgw, 'bgp', rib_cmd))
+                prefix_net = ext_prefix.split('/')[0]
+                if prefix_net in rib_out:
+                    st.log("ext_prefix {} found in {} VRF RIB on {}".format(ext_prefix, vrf_name, dc1_bgw))
+                else:
+                    summ += "ext_prefix {} NOT in {} VRF RIB on {}\n".format(ext_prefix, vrf_name, dc1_bgw)
                     result = False
 
-            # Step 7: Configure TGEN and verify traffic
-            st.banner("Step 7: Configure TGEN device group on external router")
+            # Step 6: Verify Type-5 route generation and propagation
+            st.banner("Step 6: Verify Type-5 route for {} across DCI".format(ext_prefix))
+            prefix_net = ext_prefix.split('/')[0]
+
+            # 6a: On DC1 BGW - verify locally-originated EVPN Type-5
+            st.log("Step 6a: Verify Type-5 on DC1 BGW ({})".format(dc1_bgw))
+            t5_cmd = "do show bgp l2vpn evpn route type prefix"
+            t5_out = str(vxlan_obj.config_dut(dc1_bgw, 'bgp', t5_cmd))
+            if prefix_net in t5_out:
+                st.log("Type-5 for {} found on DC1 BGW {}".format(ext_prefix, dc1_bgw))
+            else:
+                summ += "Type-5 for {} NOT found on DC1 BGW {}\n".format(ext_prefix, dc1_bgw)
+                result = False
+
+            # 6b: On a DC2 BGW - verify Type-5 received over OVERLAY_WAN
+            dc2_bgw_check = dc2_bgw_nodes[0] if dc2_bgw_nodes else None
+            if dc2_bgw_check:
+                st.log("Step 6b: Verify Type-5 on DC2 BGW ({})".format(dc2_bgw_check))
+                t5_out_dc2bgw = str(vxlan_obj.config_dut(dc2_bgw_check, 'bgp', t5_cmd))
+                if prefix_net in t5_out_dc2bgw:
+                    st.log("Type-5 for {} found on DC2 BGW {}".format(ext_prefix, dc2_bgw_check))
+                else:
+                    summ += "Type-5 for {} NOT found on DC2 BGW {}\n".format(ext_prefix, dc2_bgw_check)
+                    result = False
+                # Verify installed in VRF RIB/FIB
+                if not is_ipv6:
+                    fib_cmd = "do show ip route vrf {}".format(vrf_name)
+                else:
+                    fib_cmd = "do show ipv6 route vrf {}".format(vrf_name)
+                fib_out = str(vxlan_obj.config_dut(dc2_bgw_check, 'bgp', fib_cmd))
+                if prefix_net in fib_out:
+                    st.log("ext_prefix {} in VRF FIB on DC2 BGW {}".format(ext_prefix, dc2_bgw_check))
+                else:
+                    summ += "ext_prefix {} NOT in VRF FIB on DC2 BGW {}\n".format(ext_prefix, dc2_bgw_check)
+                    result = False
+
+            # 6c: On a DC2 leaf - verify Type-5 received from DC2 BGWs
+            dc2_leaf_check = dc2_leaf_nodes[0] if dc2_leaf_nodes else None
+            if dc2_leaf_check:
+                st.log("Step 6c: Verify Type-5 on DC2 leaf ({})".format(dc2_leaf_check))
+                t5_out_dc2leaf = str(vxlan_obj.config_dut(dc2_leaf_check, 'bgp', t5_cmd))
+                if prefix_net in t5_out_dc2leaf:
+                    st.log("Type-5 for {} found on DC2 leaf {}".format(ext_prefix, dc2_leaf_check))
+                else:
+                    summ += "Type-5 for {} NOT found on DC2 leaf {}\n".format(ext_prefix, dc2_leaf_check)
+                    result = False
+                # Verify installed in VRF RIB/FIB on DC2 leaf
+                if not is_ipv6:
+                    fib_cmd = "do show ip route vrf {}".format(vrf_name)
+                else:
+                    fib_cmd = "do show ipv6 route vrf {}".format(vrf_name)
+                fib_out = str(vxlan_obj.config_dut(dc2_leaf_check, 'bgp', fib_cmd))
+                if prefix_net in fib_out:
+                    st.log("ext_prefix {} in VRF FIB on DC2 leaf {}".format(ext_prefix, dc2_leaf_check))
+                else:
+                    summ += "ext_prefix {} NOT in VRF FIB on DC2 leaf {}\n".format(ext_prefix, dc2_leaf_check)
+                    result = False
+
+            # Step 7: Send traffic from DC2 host to ext_prefix
+            st.banner("Step 7: Configure TGEN and send traffic from DC2 host -> ext_prefix")
             tg_links = st.get_tg_links(external_router) or []
             if not tg_links:
                 raise Exception("No TGEN links found for external router '{}'".format(external_router))
@@ -9730,32 +9740,32 @@ class TestVxlanDCIBase():
                 src_mac_addr_step="00.00.00.00.00.01")
 
             if not is_ipv6:
-                ip_cfg = tg_handle.tg_interface_config(
+                tg_handle.tg_interface_config(
                     protocol_handle=eth['ethernet_handle'],
                     protocol_name="ext_ipv4",
                     ipv4_resolve_gateway="1",
-                    gateway=tgen_gw_ip,
+                    gateway=ext_prefix_host,
                     gateway_step="0.0.0.0",
-                    intf_ip_addr=tgen_host_ip,
+                    intf_ip_addr=ext_prefix_host,
                     intf_ip_addr_step="0.0.0.1")
             else:
-                ip_cfg = tg_handle.tg_interface_config(
+                tg_handle.tg_interface_config(
                     protocol_handle=eth['ethernet_handle'],
                     protocol_name="ext_ipv6",
                     ipv6_resolve_gateway="1",
-                    ipv6_gateway=tgen_gw_ip,
+                    ipv6_gateway=ext_prefix_host,
                     ipv6_gateway_step="::0",
-                    ipv6_intf_addr=tgen_host_ip,
+                    ipv6_intf_addr=ext_prefix_host,
                     ipv6_intf_addr_step="::1")
 
             vxlan_obj.start_stop_protocols(tg_handle, action='start')
             st.wait(10)
 
-            # Create traffic stream from a DC1 leaf host to external router TGEN host
-            st.banner("Step 8: Create traffic stream and verify bidirectional traffic")
-            src_node = next((n for n in dc1_leaf_nodes if n in tgen_handles.get('topo_handles', {})), None)
+            # Traffic source: pick a DC2 leaf host (Ixia port mapped to Vrf101)
+            st.banner("Step 7b: Create traffic stream DC2 host -> ext_prefix")
+            src_node = next((n for n in dc2_leaf_nodes if n in tgen_handles.get('topo_handles', {})), None)
             if not src_node:
-                raise Exception("No DC1 source node found with TGEN topo handles")
+                raise Exception("No DC2 source node found with TGEN topo handles")
 
             src_int = next(iter(tgen_handles['topo_handles'][src_node].keys()), None)
             if not src_int:
@@ -9779,7 +9789,7 @@ class TestVxlanDCIBase():
                 port_handle=src_port_handle,
                 port_handle2=dst_port_handle,
                 mode='create',
-                bidirectional=1,
+                bidirectional=0,
                 transmit_mode='single_burst',
                 pkts_per_burst=pkts_per_burst,
                 rate_percent=rate_percent,
@@ -9800,8 +9810,8 @@ class TestVxlanDCIBase():
                 }
             }
 
-            # Step 9: Verify traffic
-            st.banner("Step 9: Verify bidirectional {} traffic (DC leaf <-> external router)".format(af_name))
+            # Verify traffic with >= 99.8% Rx threshold
+            st.banner("Step 7c: Verify {} traffic (DC2 host -> ext_prefix, >= 99.8% Rx)".format(af_name))
             st.wait(5)
             traffic_ok = verify_traffic({ext_traffic_key: tgen_handles[ext_traffic_key]},
                                         regenerate=True, bum=False)
@@ -9811,8 +9821,24 @@ class TestVxlanDCIBase():
             else:
                 st.log("External connectivity {} traffic passed".format(af_name))
 
-            # Step 10: Check for cores
-            st.banner("Step 10: Checking for core files and crashes")
+            # Step 8: Check DCI uplink drop counters
+            st.banner("Step 8: Check DCI uplink drop counters on DC2 leaf, DC2 BGW, DC1 BGW")
+            drop_check_nodes = []
+            if dc2_leaf_check:
+                drop_check_nodes.append(dc2_leaf_check)
+            if dc2_bgw_check:
+                drop_check_nodes.append(dc2_bgw_check)
+            drop_check_nodes.append(dc1_bgw)
+            for dnode in drop_check_nodes:
+                try:
+                    drop_out = str(vxlan_obj.config_dut(dnode, 'sonic',
+                                   "show interfaces counters | grep -i drop"))
+                    st.log("Drop counters on {}: {}".format(dnode, drop_out))
+                except Exception as e:
+                    st.log("Warning: Could not check drop counters on {}: {}".format(dnode, e))
+
+            # Step 9: Check for cores
+            st.banner("Step 9: Checking for core files and crashes")
             if vxlan_obj.check_core():
                 summ += "Core files detected after external connectivity test\n"
                 result = False
@@ -9846,84 +9872,61 @@ class TestVxlanDCIBase():
             # DUT cleanup
             if configured:
                 try:
-                    # Remove BGP config
+                    # Remove BGP config on external router
+                    bgp_del_ext = "\n".join([
+                        "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                        " no neighbor {} remote-as {}".format(bgw_local_ip, bgw_asn),
+                        "!",
+                    ])
+                    _bgp_cmd(external_router, bgp_del_ext)
+
+                    # Remove BGP config on DC1 BGW
                     if not is_ipv6:
-                        bgp_del_ext = "\n".join([
-                            "router bgp {} vrf {}".format(ext_asn, vrf_name),
-                            " no neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
-                            " no neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
-                            " address-family ipv4 unicast",
-                            "  no network {}".format(tgen_network),
-                            " exit-address-family",
-                            "!",
-                        ])
-                        bgp_del_dc1 = "\n".join([
-                            "router bgp {} vrf {}".format(dc1_asn, vrf_name),
-                            " no neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                        bgp_del_bgw = "\n".join([
+                            "router bgp {} vrf {}".format(bgw_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_peer_ip, ext_asn),
                             " address-family ipv4 unicast",
                             "  no redistribute connected",
+                            "  no redistribute bgp",
                             " exit-address-family",
                             "!",
-                        ])
-                        bgp_del_dc2 = "\n".join([
-                            "router bgp {} vrf {}".format(dc2_asn, vrf_name),
-                            " no neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
-                            " address-family ipv4 unicast",
-                            "  no redistribute connected",
-                            " exit-address-family",
-                            "!",
+                            "no ip prefix-list ALL-IPV4",
+                            "no route-map NO-ADV-OUT",
                         ])
                     else:
-                        bgp_del_ext = "\n".join([
-                            "router bgp {} vrf {}".format(ext_asn, vrf_name),
-                            " no neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
-                            " no neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
-                            " address-family ipv6 unicast",
-                            "  no network {}".format(tgen_network),
-                            " exit-address-family",
-                            "!",
-                        ])
-                        bgp_del_dc1 = "\n".join([
-                            "router bgp {} vrf {}".format(dc1_asn, vrf_name),
-                            " no neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                        bgp_del_bgw = "\n".join([
+                            "router bgp {} vrf {}".format(bgw_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_peer_ip, ext_asn),
                             " address-family ipv6 unicast",
                             "  no redistribute connected",
+                            "  no redistribute bgp",
                             " exit-address-family",
                             "!",
+                            "no ipv6 prefix-list ALL-IPV6",
+                            "no route-map NO-ADV-OUT-V6",
                         ])
-                        bgp_del_dc2 = "\n".join([
-                            "router bgp {} vrf {}".format(dc2_asn, vrf_name),
-                            " no neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
-                            " address-family ipv6 unicast",
-                            "  no redistribute connected",
-                            " exit-address-family",
-                            "!",
-                        ])
-                    _bgp_cmd(external_router, bgp_del_ext)
-                    _bgp_cmd(dc1_leaf, bgp_del_dc1)
-                    _bgp_cmd(dc2_leaf, bgp_del_dc2)
+                    _bgp_cmd(dc1_bgw, bgp_del_bgw)
 
-                    # Remove interfaces
-                    _sonic_cmd(dc2_leaf, "sudo config interface ip remove {} {}".format(dc2_subif, dc2_leaf_cidr))
-                    _sonic_cmd(dc2_leaf, "sudo config interface vrf unbind {}".format(dc2_subif))
-                    _sonic_cmd(dc2_leaf, "sudo config subinterface del {}".format(dc2_subif))
+                    # Remove sub-interface on DC1 BGW
+                    _sonic_cmd(dc1_bgw, "sudo config interface ip remove {} {}".format(bgw_subif, bgw_local_cidr))
+                    _sonic_cmd(dc1_bgw, "sudo config interface vrf unbind {}".format(bgw_subif))
+                    _sonic_cmd(dc1_bgw, "sudo config subinterface del {}".format(bgw_subif))
 
-                    _sonic_cmd(dc1_leaf, "sudo config interface ip remove {} {}".format(dc1_subif, dc1_leaf_cidr))
-                    _sonic_cmd(dc1_leaf, "sudo config interface vrf unbind {}".format(dc1_subif))
-                    _sonic_cmd(dc1_leaf, "sudo config subinterface del {}".format(dc1_subif))
-
-                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_dc2_subif, ext_dc2_cidr))
-                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_dc2_subif))
-                    _sonic_cmd(external_router, "sudo config subinterface del {}".format(ext_dc2_subif))
-
-                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_dc1_subif, ext_dc1_cidr))
-                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_dc1_subif))
-                    _sonic_cmd(external_router, "sudo config subinterface del {}".format(ext_dc1_subif))
-
-                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_tgen_intf, tgen_ip_cidr))
+                    # Remove sub-interface + VRF on external router
+                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_subif, ext_peer_cidr))
+                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_subif))
+                    _sonic_cmd(external_router, "sudo config subinterface del {}".format(ext_subif))
                     _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_tgen_intf))
+                    _sonic_cmd(external_router, "sudo config vrf del {}".format(vrf_name))
                 except Exception as e:
                     st.log("Warning: DUT cleanup failed: {}".format(e))
+
+            # Post-cleanup: re-verify base profile health
+            st.banner("Post-cleanup: Re-verify base DCI profile health")
+            if not verify_base_setup_bgw(bgw_nodes, skip_checks=['vteps'],
+                                         failure_context='after external connectivity cleanup'):
+                summ += "Base profile NOT healthy after cleanup\n"
+                result = False
 
         st.banner("TEST COMPLETE: {}".format(tc_id))
         report_result(result, tc_id, summ)

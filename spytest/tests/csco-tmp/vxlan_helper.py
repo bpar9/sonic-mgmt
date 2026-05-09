@@ -1372,6 +1372,648 @@ def add_bgw_import_export_rt(node_name, config_dict, bgp_info):
     return output
 
 
+def remove_vrf_config_bgw(node_name, config_dict, bgp_info, vrf_id=101):
+    """
+    Remove VRF configuration from a BGW node (L3VNI_dci:51 helper).
+
+    Follows the same pattern as delete_vrf() in multihoming tests.
+    Removes VRF-VNI map, VXLAN maps (vxlan-dc, vxlan-wan), unbinds ALL
+    interfaces (L3VNI VLAN + L2 VLAN bindings), deletes the VRF and
+    L3VNI VLAN, and removes BGP VRF config.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101 -> Vrf101)
+
+    Returns:
+        dict with 'sonic' and 'frr' config strings
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return None
+
+    cross_dc_vni = 10000 + vrf_id
+    as_num = params['as_num']
+    bindings = params['vlan_bindings_by_vrf'].get(vrf_id, [])
+
+    sonic_cmds = ''
+    sonic_cmds += 'sudo config vrf del_vrf_vni_map Vrf{}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config vxlan map del vxlan-wan {} {}\n'.format(vrf_id, cross_dc_vni)
+    sonic_cmds += 'sudo config vxlan map del vxlan-dc {} {}\n'.format(vrf_id, cross_dc_vni)
+    for vlan in reversed(bindings):
+        if vlan != vrf_id:
+            sonic_cmds += 'sudo config interface vrf unbind Vlan{}\n'.format(vlan)
+    sonic_cmds += 'sudo config interface vrf unbind Vlan{}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config vrf del Vrf{}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config vlan del {}\n'.format(vrf_id)
+
+    frr_cmds = ''
+    frr_cmds += 'vrf Vrf{}\n'.format(vrf_id)
+    frr_cmds += 'no vni {}\n'.format(cross_dc_vni)
+    frr_cmds += 'exit-vrf\n'
+    frr_cmds += 'no router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'sonic': sonic_cmds, 'frr': frr_cmds}
+
+
+def restore_vrf_config_bgw(node_name, config_dict, bgp_info, dci_vip_maps, vrf_id=101):
+    """
+    Restore VRF configuration on a BGW node (L3VNI_dci:51 helper).
+
+    Follows the same pattern as generate_l3vni_config() + bgp_vrf_config()
+    in multihoming tests. Re-adds the L3VNI VLAN, VRF, rebinds all
+    interfaces (L3VNI VLAN + L2 VLAN bindings), restores VXLAN maps,
+    VRF-VNI map, and BGP VRF config with RT import/export.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        dci_vip_maps: Tuple from generate_dci_vip_maps()
+        vrf_id: VRF numeric ID (default 101)
+
+    Returns:
+        dict with 'sonic' and 'frr' config strings
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return None
+
+    cross_dc_vni = 10000 + vrf_id
+    as_num = params['as_num']
+    bindings = params['vlan_bindings_by_vrf'].get(vrf_id, [])
+
+    sonic_cmds = ''
+    sonic_cmds += 'sudo config vlan add {}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config vrf add Vrf{}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config interface vrf bind Vlan{} Vrf{}\n'.format(vrf_id, vrf_id)
+    for vlan in bindings:
+        if vlan != vrf_id:
+            sonic_cmds += 'sudo config interface vrf bind Vlan{} Vrf{}\n'.format(vlan, vrf_id)
+    sonic_cmds += 'sudo config vxlan map add vxlan-dc {} {}\n'.format(vrf_id, cross_dc_vni)
+    sonic_cmds += 'sudo config vxlan map add vxlan-wan {} {}\n'.format(vrf_id, cross_dc_vni)
+    sonic_cmds += 'sudo config vrf add_vrf_vni_map Vrf{} {}\n'.format(vrf_id, cross_dc_vni)
+
+    remote_bgw_asns = params['remote_bgw_asns']
+    leaf_asns = params['leaf_asns']
+    leaf_vni = params['leaf_l3vnis_by_vrf'].get(vrf_id, 5000 + vrf_id)
+
+    frr_cmds = ''
+    frr_cmds += 'vrf Vrf{}\n'.format(vrf_id)
+    frr_cmds += 'vni {}\n'.format(cross_dc_vni)
+    frr_cmds += 'exit-vrf\n'
+    frr_cmds += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    frr_cmds += 'bgp bestpath as-path multipath-relax\n'
+    frr_cmds += 'address-family l2vpn evpn\n'
+    frr_cmds += 'route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+    for remote_asn in remote_bgw_asns:
+        frr_cmds += 'route-target import {}:{}\n'.format(remote_asn, cross_dc_vni)
+    for leaf_asn in leaf_asns:
+        frr_cmds += 'route-target import {}:{}\n'.format(leaf_asn, leaf_vni)
+    frr_cmds += 'no use-es-l3nhg\n'
+    frr_cmds += 'advertise ipv4 unicast\n'
+    frr_cmds += 'advertise ipv6 unicast\n'
+    frr_cmds += 'exit-address-family\n'
+    frr_cmds += 'exit\n'
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'sonic': sonic_cmds, 'frr': frr_cmds}
+
+
+def modify_rt_export_bgw(node_name, config_dict, bgp_info, vrf_id=101, wrong_rt_suffix=99999):
+    """
+    Modify the route-target export to an incorrect value on a BGW node (L3VNI_dci:52 helper).
+
+    Removes the correct RT export and adds an incorrect one, causing RT mismatch
+    on the remote DC side so Type-5 routes are no longer imported.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101)
+        wrong_rt_suffix: Incorrect VNI suffix for wrong RT (default 99999)
+
+    Returns:
+        FRR config string, or '' if params cannot be derived
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    cross_dc_vni = 10000 + vrf_id
+
+    output = ''
+    output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    output += 'address-family l2vpn evpn\n'
+    output += 'no route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+    output += 'route-target export {}:{}\n'.format(as_num, wrong_rt_suffix)
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+    output += 'end\n'
+    output += 'exit\n'
+    return output
+
+
+def restore_rt_export_bgw(node_name, config_dict, bgp_info, vrf_id=101, wrong_rt_suffix=99999):
+    """
+    Restore correct route-target export on a BGW node (L3VNI_dci:52 helper).
+
+    Removes the wrong RT export and re-adds the correct one.
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101)
+        wrong_rt_suffix: The incorrect VNI that was set (default 99999)
+
+    Returns:
+        FRR config string, or '' if params cannot be derived
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return ''
+
+    as_num = params['as_num']
+    cross_dc_vni = 10000 + vrf_id
+
+    output = ''
+    output += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    output += 'address-family l2vpn evpn\n'
+    output += 'no route-target export {}:{}\n'.format(as_num, wrong_rt_suffix)
+    output += 'route-target export {}:{}\n'.format(as_num, cross_dc_vni)
+    output += 'exit-address-family\n'
+    output += 'exit\n'
+    output += 'end\n'
+    output += 'exit\n'
+    return output
+
+
+def _l3vni_bgw_permit_seq_for_vrf(params, vrf_id):
+    """Return the route-map ``RT-REWRITE-{WAN,DC}`` permit sequence number that
+    ``generate_l3vni_bgw_frr_config`` allocates for ``vrf_id`` on this BGW.
+
+    The original generator iterates ``params['vrf_l3vni_pairs']`` in order and
+    starts ``permit_seq`` at 10, incrementing by 5 per VRF (so VRF101 -> permit
+    10, VRF102 -> permit 15, ...). Mirroring that contract here lets the L3VNI
+    rotation helpers update the right permit clause without re-deriving it.
+    """
+    permit_seq = 10
+    for v_id, _vni in params.get('vrf_l3vni_pairs', []):
+        if v_id == vrf_id:
+            return permit_seq
+        permit_seq += 5
+    return None
+
+
+def _l3vni_bgw_rotate_extcomm_routemap_frr(params, vrf_id, src_vni, dst_vni):
+    """Generate the FRR snippet that rotates the BGW's DCI re-origination
+    plumbing for ``vrf_id`` from ``src_vni`` to ``dst_vni``.
+
+    The BGW's L3VNI rotation isn't atomic with just ``vxlan map`` /
+    ``route-target export|import`` updates: the BGW also has
+    ``bgp extcommunity-list RT-{WAN,DC}-<vni>`` lists and
+    ``route-map RT-REWRITE-{WAN,DC} permit <seq>`` clauses that hard-code
+    the cross-DC VNI in their name, ``match extcommunity``, ``set evpn vni``
+    and ``set extcommunity rt`` actions (see ``generate_l3vni_bgw_frr_config``
+    section "2)" through "4)"). Without rotating these in lockstep, the
+    re-originated EVPN updates fall through to the trailing default-permit
+    clause without ``set evpn vni``, leaving a stale VNI label in the data
+    plane and silently black-holing some forwarding paths (notably ESI
+    multi-homed IPv4 streams - observed on TI22/TI23 in the
+    DCI_L3VNI_May07_normvni_rerun_and_domaincfg run).
+
+    Order is chosen to keep the route-maps continuously valid: add the new
+    extcommunity-lists first, repoint the route-map permit clause to them,
+    then remove the now-unreferenced old lists.
+
+    Args:
+        params: Output of ``_get_l3vni_bgw_params``.
+        vrf_id: Numeric VRF id being rotated (e.g. 101).
+        src_vni: VNI value currently encoded in the lists/route-map (e.g. 10101).
+        dst_vni: New VNI value to encode (e.g. 20101).
+
+    Returns:
+        FRR command string, or '' if the rotation cannot be generated for this
+        VRF (e.g. the VRF is not present in ``vrf_l3vni_pairs``).
+    """
+    permit_seq = _l3vni_bgw_permit_seq_for_vrf(params, vrf_id)
+    if permit_seq is None:
+        return ''
+
+    as_num = params['as_num']
+    leaf_asns = params.get('leaf_asns', [])
+    remote_bgw_asns = params.get('remote_bgw_asns', [])
+    leaf_vni = params.get('leaf_l3vnis_by_vrf', {}).get(vrf_id, 5000 + vrf_id)
+
+    cmds = ''
+    seq = 5
+    for leaf_asn in leaf_asns:
+        cmds += 'bgp extcommunity-list standard RT-WAN-{} seq {} permit rt {}:{}\n'.format(
+            dst_vni, seq, leaf_asn, leaf_vni)
+        seq += 5
+    seq = 5
+    for remote_asn in remote_bgw_asns:
+        cmds += 'bgp extcommunity-list standard RT-DC-{} seq {} permit rt {}:{}\n'.format(
+            dst_vni, seq, remote_asn, dst_vni)
+        seq += 5
+
+    cmds += 'route-map RT-REWRITE-WAN permit {}\n'.format(permit_seq)
+    cmds += ' no match extcommunity RT-WAN-{}\n'.format(src_vni)
+    cmds += ' match extcommunity RT-WAN-{}\n'.format(dst_vni)
+    cmds += ' no set evpn vni {}\n'.format(src_vni)
+    cmds += ' set evpn vni {}\n'.format(dst_vni)
+    cmds += ' no set extcommunity rt {}:{}\n'.format(as_num, src_vni)
+    cmds += ' set extcommunity rt {}:{}\n'.format(as_num, dst_vni)
+    cmds += 'exit\n'
+
+    cmds += 'route-map RT-REWRITE-DC permit {}\n'.format(permit_seq)
+    cmds += ' no match extcommunity RT-DC-{}\n'.format(src_vni)
+    cmds += ' match extcommunity RT-DC-{}\n'.format(dst_vni)
+    cmds += ' no set evpn vni {}\n'.format(src_vni)
+    cmds += ' set evpn vni {}\n'.format(dst_vni)
+    cmds += ' no set extcommunity rt {}:{}\n'.format(as_num, src_vni)
+    cmds += ' set extcommunity rt {}:{}\n'.format(as_num, dst_vni)
+    cmds += 'exit\n'
+
+    cmds += 'no bgp extcommunity-list standard RT-WAN-{}\n'.format(src_vni)
+    cmds += 'no bgp extcommunity-list standard RT-DC-{}\n'.format(src_vni)
+    return cmds
+
+
+def change_l3vni_value_bgw(node_name, config_dict, bgp_info, vrf_id=101, new_vni=20101):
+    """
+    Change the normalized L3VNI value on a BGW node (L3VNI_dci:93 helper).
+
+    Updates VRF-VNI mapping, VXLAN tunnel maps (vxlan-dc, vxlan-wan), BGP VRF
+    RT export/import, and the DCI re-origination plumbing
+    (``RT-{WAN,DC}-<vni>`` extcommunity-lists and the matching
+    ``RT-REWRITE-{WAN,DC} permit <seq>`` clause) to use the new L3VNI value.
+    Does NOT remove the VRF or its VLAN bindings - only rotates the VNI
+    number. The extcommunity-list / route-map rotation is required to keep
+    the BGW's ``set evpn vni`` action consistent with the rotated RTs;
+    skipping it leaves stale VNI labels in re-originated EVPN updates and
+    silently breaks ESI multi-homed IPv4 forwarding.
+
+    Args:
+        node_name: BGW node hostname (e.g. 'spine2_dc1_bgw1')
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101 -> Vrf101)
+        new_vni: New L3VNI value to apply (default 20101)
+
+    Returns:
+        dict with 'sonic' and 'frr' config strings, or None if params cannot be derived
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return None
+
+    old_vni = 10000 + vrf_id
+    as_num = params['as_num']
+    remote_bgw_asns = params['remote_bgw_asns']
+
+    sonic_cmds = ''
+    sonic_cmds += 'sudo config vrf del_vrf_vni_map Vrf{}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config vxlan map del vxlan-wan {} {}\n'.format(vrf_id, old_vni)
+    sonic_cmds += 'sudo config vxlan map del vxlan-dc {} {}\n'.format(vrf_id, old_vni)
+    sonic_cmds += 'sudo config vxlan map add vxlan-dc {} {}\n'.format(vrf_id, new_vni)
+    sonic_cmds += 'sudo config vxlan map add vxlan-wan {} {}\n'.format(vrf_id, new_vni)
+    sonic_cmds += 'sudo config vrf add_vrf_vni_map Vrf{} {}\n'.format(vrf_id, new_vni)
+
+    frr_cmds = ''
+    frr_cmds += 'vrf Vrf{}\n'.format(vrf_id)
+    frr_cmds += 'no vni {}\n'.format(old_vni)
+    frr_cmds += 'vni {}\n'.format(new_vni)
+    frr_cmds += 'exit-vrf\n'
+    frr_cmds += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    frr_cmds += 'address-family l2vpn evpn\n'
+    frr_cmds += 'no route-target export {}:{}\n'.format(as_num, old_vni)
+    frr_cmds += 'route-target export {}:{}\n'.format(as_num, new_vni)
+    for remote_asn in remote_bgw_asns:
+        frr_cmds += 'no route-target import {}:{}\n'.format(remote_asn, old_vni)
+        frr_cmds += 'route-target import {}:{}\n'.format(remote_asn, new_vni)
+    frr_cmds += 'exit-address-family\n'
+    frr_cmds += 'exit\n'
+    frr_cmds += _l3vni_bgw_rotate_extcomm_routemap_frr(
+        params, vrf_id, src_vni=old_vni, dst_vni=new_vni)
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'sonic': sonic_cmds, 'frr': frr_cmds}
+
+
+def revert_l3vni_value_bgw(node_name, config_dict, bgp_info, vrf_id=101, new_vni=20101):
+    """
+    Revert L3VNI value on a BGW node back to original (L3VNI_dci:93 helper).
+
+    Reverses the change made by change_l3vni_value_bgw(): restores the
+    original cross-DC L3VNI (10000 + vrf_id), VXLAN maps, RT config, and
+    the matching DCI re-origination plumbing (``RT-{WAN,DC}-<vni>``
+    extcommunity-lists and the ``RT-REWRITE-{WAN,DC} permit <seq>`` clause).
+
+    Args:
+        node_name: BGW node hostname
+        config_dict: Full config dict from get_cfg_dict()
+        bgp_info: Dict of node -> {router_id, as_num}
+        vrf_id: VRF numeric ID (default 101)
+        new_vni: The modified VNI that was applied and needs to be reverted (default 20101)
+
+    Returns:
+        dict with 'sonic' and 'frr' config strings, or None if params cannot be derived
+    """
+    params = _get_l3vni_bgw_params(node_name, config_dict, bgp_info)
+    if not params:
+        return None
+
+    original_vni = 10000 + vrf_id
+    as_num = params['as_num']
+    remote_bgw_asns = params['remote_bgw_asns']
+
+    sonic_cmds = ''
+    sonic_cmds += 'sudo config vrf del_vrf_vni_map Vrf{}\n'.format(vrf_id)
+    sonic_cmds += 'sudo config vxlan map del vxlan-wan {} {}\n'.format(vrf_id, new_vni)
+    sonic_cmds += 'sudo config vxlan map del vxlan-dc {} {}\n'.format(vrf_id, new_vni)
+    sonic_cmds += 'sudo config vxlan map add vxlan-dc {} {}\n'.format(vrf_id, original_vni)
+    sonic_cmds += 'sudo config vxlan map add vxlan-wan {} {}\n'.format(vrf_id, original_vni)
+    sonic_cmds += 'sudo config vrf add_vrf_vni_map Vrf{} {}\n'.format(vrf_id, original_vni)
+
+    frr_cmds = ''
+    frr_cmds += 'vrf Vrf{}\n'.format(vrf_id)
+    frr_cmds += 'no vni {}\n'.format(new_vni)
+    frr_cmds += 'vni {}\n'.format(original_vni)
+    frr_cmds += 'exit-vrf\n'
+    frr_cmds += 'router bgp {} vrf Vrf{}\n'.format(as_num, vrf_id)
+    frr_cmds += 'address-family l2vpn evpn\n'
+    frr_cmds += 'no route-target export {}:{}\n'.format(as_num, new_vni)
+    frr_cmds += 'route-target export {}:{}\n'.format(as_num, original_vni)
+    for remote_asn in remote_bgw_asns:
+        frr_cmds += 'no route-target import {}:{}\n'.format(remote_asn, new_vni)
+        frr_cmds += 'route-target import {}:{}\n'.format(remote_asn, original_vni)
+    frr_cmds += 'exit-address-family\n'
+    frr_cmds += 'exit\n'
+    frr_cmds += _l3vni_bgw_rotate_extcomm_routemap_frr(
+        params, vrf_id, src_vni=new_vni, dst_vni=original_vni)
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'sonic': sonic_cmds, 'frr': frr_cmds}
+
+
+def _get_l3vni_leaf_import_params(node_name, config_dict, bgp_info):
+    """
+    Compute per-leaf L3VNI import-RT parameters for the leaf-side companion of
+    change_l3vni_value_bgw().
+
+    In the asymmetric DCI L3VNI design, leaves keep their own internal L3VNI
+    (e.g. 5101) but BGP-import the BGW's normalized L3VNI RT (e.g.
+    <bgw_asn>:10101). When change_l3vni_value_bgw() rotates the BGW's L3VNI
+    from old_vni to new_vni, every leaf in the same DC must rotate its
+    matching ``route-target import <bgw_asn>:<vni>`` clauses or its BGP RT
+    filter will reject every Type-5 update from the BGW and the leaf's
+    Vrf<id> RIB will lose all cross-DC prefixes (proven in May07 logs for
+    L3VNI_dci:93).
+
+    Args:
+        node_name: Leaf node hostname (e.g. 'leaf0_dc1').
+        config_dict: Full config dict from get_cfg_dict().
+        bgp_info: Dict of node -> {router_id, as_num} from
+            generate_bgp_underlay_info().
+
+    Returns:
+        dict with keys: as_num, dc, same_dc_bgw_asns, has_vrf
+        or None if data cannot be derived.
+    """
+    dc = _get_dc_from_name(node_name)
+    if not dc:
+        st.warn('Cannot determine DC from leaf node name: {}'.format(node_name))
+        return None
+
+    as_num = bgp_info.get(node_name, {}).get('as_num')
+    if not as_num:
+        st.warn('No ASN found for leaf node: {}'.format(node_name))
+        return None
+
+    all_bgw_nodes = sorted(n for n in config_dict.get('nodes', {}).get('all', []) if 'bgw' in n)
+    same_dc_bgw_asns = sorted(set(
+        bgp_info[n]['as_num'] for n in all_bgw_nodes
+        if dc in n and n in bgp_info
+    ))
+
+    return {
+        'as_num': as_num,
+        'dc': dc,
+        'same_dc_bgw_asns': same_dc_bgw_asns,
+    }
+
+
+def change_l3vni_import_on_leaf(node_name, config_dict, bgp_info, vrf_id=101, new_vni=20101):
+    """
+    Rotate a leaf's BGP import-RT for <vrf_id> from <bgw_asn>:<old_vni> to
+    <bgw_asn>:<new_vni> for every BGW in the same DC.
+
+    This is the *missing half* of change_l3vni_value_bgw(). The leaf's own
+    L3VNI (vni 5xxx) and vxlan-dc map are NOT touched - only the BGP
+    import-RT clauses that match what the same-DC BGWs now export. Without
+    this companion call, BGP RT filtering at the leaf rejects every new
+    BGW advertisement and Vrf<id> goes empty in the leaf's IP route table
+    (root cause of L3VNI_dci:93 traffic failure observed on
+    DCI_L3VNI_May07_protokick run).
+
+    Args:
+        node_name: Leaf node hostname (e.g. 'leaf0_dc1').
+        config_dict: Full config dict from get_cfg_dict().
+        bgp_info: Dict of node -> {router_id, as_num}.
+        vrf_id: VRF numeric ID (default 101 -> Vrf101).
+        new_vni: New BGW L3VNI value the leaf must now import (default 20101).
+
+    Returns:
+        dict with key 'frr' (config string), or None if params cannot be
+        derived. No SONiC CLI commands are emitted because the leaf's vxlan
+        map and VRF binding are unchanged.
+    """
+    params = _get_l3vni_leaf_import_params(node_name, config_dict, bgp_info)
+    if not params:
+        return None
+
+    same_dc_bgw_asns = params['same_dc_bgw_asns']
+    if not same_dc_bgw_asns:
+        st.warn('No same-DC BGW ASNs found for leaf {}; skipping import rotation'.format(node_name))
+        return None
+
+    old_vni = 10000 + vrf_id
+    leaf_as = params['as_num']
+
+    frr_cmds = ''
+    frr_cmds += 'router bgp {} vrf Vrf{}\n'.format(leaf_as, vrf_id)
+    frr_cmds += 'address-family l2vpn evpn\n'
+    for bgw_asn in same_dc_bgw_asns:
+        frr_cmds += 'no route-target import {}:{}\n'.format(bgw_asn, old_vni)
+        frr_cmds += 'route-target import {}:{}\n'.format(bgw_asn, new_vni)
+    frr_cmds += 'exit-address-family\n'
+    frr_cmds += 'exit\n'
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'frr': frr_cmds}
+
+
+def revert_l3vni_import_on_leaf(node_name, config_dict, bgp_info, vrf_id=101, new_vni=20101):
+    """
+    Revert leaf BGP import-RT rotation made by change_l3vni_import_on_leaf().
+
+    Restores ``route-target import <bgw_asn>:<old_vni>`` (where old_vni =
+    10000 + vrf_id) and removes ``<bgw_asn>:<new_vni>`` for every same-DC
+    BGW.
+
+    Args:
+        node_name: Leaf node hostname.
+        config_dict: Full config dict from get_cfg_dict().
+        bgp_info: Dict of node -> {router_id, as_num}.
+        vrf_id: VRF numeric ID (default 101).
+        new_vni: The modified VNI that was applied and now needs reverting
+            (default 20101).
+
+    Returns:
+        dict with key 'frr', or None if params cannot be derived.
+    """
+    params = _get_l3vni_leaf_import_params(node_name, config_dict, bgp_info)
+    if not params:
+        return None
+
+    same_dc_bgw_asns = params['same_dc_bgw_asns']
+    if not same_dc_bgw_asns:
+        st.warn('No same-DC BGW ASNs found for leaf {}; skipping import revert'.format(node_name))
+        return None
+
+    original_vni = 10000 + vrf_id
+    leaf_as = params['as_num']
+
+    frr_cmds = ''
+    frr_cmds += 'router bgp {} vrf Vrf{}\n'.format(leaf_as, vrf_id)
+    frr_cmds += 'address-family l2vpn evpn\n'
+    for bgw_asn in same_dc_bgw_asns:
+        frr_cmds += 'no route-target import {}:{}\n'.format(bgw_asn, new_vni)
+        frr_cmds += 'route-target import {}:{}\n'.format(bgw_asn, original_vni)
+    frr_cmds += 'exit-address-family\n'
+    frr_cmds += 'exit\n'
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'frr': frr_cmds}
+
+
+def remove_overlay_domain_config_bgw(node_name, bgp_info):
+    """
+    Strip ``neighbor OVERLAY domain vxlan-dc`` and
+    ``neighbor OVERLAY reoriginate vxlan-wan`` from a BGW spine's BGP overlay
+    config (L3VNI_dci:95 helper).
+
+    These two lines are what make a BGW spine act as a DCI gateway: they
+    re-originate EVPN routes between the intra-fabric ``vxlan-dc`` domain
+    and the inter-DC ``vxlan-wan`` domain. Removing them stops Type-5 (and
+    Type-2) re-origination across the WAN; SONiC vxlan map / VRF-VNI map
+    state is untouched (those live in CONFIG_DB, not in BGP), so
+    ``show vxlan vrfvnimap`` continues to show the same mapping during the
+    remove window - the trigger is purely a BGP overlay event.
+
+    Pairs with ``restore_overlay_domain_config_bgw()``.
+
+    Args:
+        node_name: BGW spine hostname (e.g. 'spine2_dc1_bgw1').
+        bgp_info: Dict of node -> {router_id, as_num} from
+            generate_bgp_underlay_info().
+
+    Returns:
+        dict with key 'frr' (config string), or None if the node's ASN
+        cannot be derived. No SONiC CLI is emitted because the trigger is
+        BGP-only.
+    """
+    as_num = bgp_info.get(node_name, {}).get('as_num')
+    if not as_num:
+        st.warn('No ASN found for BGW node: {}'.format(node_name))
+        return None
+
+    frr_cmds = ''
+    frr_cmds += 'router bgp {}\n'.format(as_num)
+    frr_cmds += 'no neighbor OVERLAY domain vxlan-dc\n'
+    frr_cmds += 'no neighbor OVERLAY reoriginate vxlan-wan\n'
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'frr': frr_cmds}
+
+
+def restore_overlay_domain_config_bgw(node_name, bgp_info):
+    """
+    Re-add ``neighbor OVERLAY domain vxlan-dc`` and
+    ``neighbor OVERLAY reoriginate vxlan-wan`` on a BGW spine, reversing
+    ``remove_overlay_domain_config_bgw()``.
+
+    Restores DCI gateway behaviour: the BGW resumes re-originating EVPN
+    routes between the ``vxlan-dc`` and ``vxlan-wan`` sides, Type-5 routes
+    re-flow across the WAN, and cross-DC L3 traffic recovers.
+
+    Args:
+        node_name: BGW spine hostname.
+        bgp_info: Dict of node -> {router_id, as_num}.
+
+    Returns:
+        dict with key 'frr', or None if the node's ASN cannot be derived.
+    """
+    as_num = bgp_info.get(node_name, {}).get('as_num')
+    if not as_num:
+        st.warn('No ASN found for BGW node: {}'.format(node_name))
+        return None
+
+    frr_cmds = ''
+    frr_cmds += 'router bgp {}\n'.format(as_num)
+    frr_cmds += 'neighbor OVERLAY domain vxlan-dc\n'
+    frr_cmds += 'neighbor OVERLAY reoriginate vxlan-wan\n'
+    frr_cmds += 'end\n'
+    frr_cmds += 'exit\n'
+
+    return {'frr': frr_cmds}
+
+
+def generate_bulk_mac_move_hosts_dci(count=10, base_mac="02:00:00:61:00", base_ipv4_prefix="80.12.0",
+                                     base_ipv6_prefix="8000:12::", ipv4_start=50, ipv6_start=50):
+    """
+    Generate bulk host info for DCI MAC move tests (L3VNI_dci:61 helper).
+
+    Creates a list of host dicts, each with unique MAC, IPv4, and IPv6 addresses.
+    MAC format: base_mac:<counter> (e.g. 02:00:00:61:00:01 through 02:00:00:61:00:0a)
+    Hosts are on VLAN 12 (within_dc_vlan) to match the working single-host mac move tests.
+
+    Args:
+        count: Number of hosts to generate (default 10)
+        base_mac: First 5 octets of MAC (default "02:00:00:61:00")
+        base_ipv4_prefix: First 3 octets of IPv4 (default "80.12.0")
+        base_ipv6_prefix: IPv6 /64 prefix (default "8000:12::")
+        ipv4_start: Starting last octet for IPv4 (default 50)
+        ipv6_start: Starting last 16-bit for IPv6 (default 50)
+
+    Returns:
+        list of dicts, each with keys: mac, ipv4, ipv6, index
+    """
+    hosts = []
+    for i in range(count):
+        hosts.append({
+            'mac': '{}:{:02x}'.format(base_mac, i + 1),
+            'ipv4': '{}.{}'.format(base_ipv4_prefix, ipv4_start + i),
+            'ipv6': '{}{}'.format(base_ipv6_prefix, ipv6_start + i),
+            'index': i,
+        })
+    return hosts
+
+
 def remove_bgw_rt_rewrite_maps(node_name, config_dict, bgp_info):
     """
     Remove RT-REWRITE route-maps and extcommunity-lists from a BGW node.
@@ -1997,31 +2639,53 @@ def verify_vtep (nodes, dci_enabled=False):
     flag = True
     remote_vtep_dict = get_expected_remote_vteps(dci_enabled=dci_enabled)
     for i in range (len(nodes)):
-        cli_output = st.show(nodes[i], "show vxlan remotevtep", skip_tmpl=True)
+        node = nodes[i]
+        if node not in remote_vtep_dict:
+            st.log('No expected VTEPs configured for {}, skipping'.format(node))
+            continue
+        cli_output = st.show(node, "show vxlan remotevtep", skip_tmpl=True)
         '''
         [{u'tun_src': u'EVPN', u'total_count': u'', u'vlan': u'', u'tun_status': u'oper_up', u'vni': u'', u'remote_mac': u'', u'dst_vtep': u'2000:1::2', u'src_vtep': u'2000:1::1', u'remote_vtep': u''}, 
         {u'tun_src': u'EVPN', u'total_count': u'', u'vlan': u'', u'tun_status': u'oper_up', u'vni': u'', u'remote_mac': u'', u'dst_vtep': u'2000:1::3', u'src_vtep': u'2000:1::1', u'remote_vtep': u''}, 
         {u'tun_src': u'EVPN', u'total_count': u'', u'vlan': u'', u'tun_status': u'oper_up', u'vni': u'', u'remote_mac': u'', u'dst_vtep': u'2000:1::4', u'src_vtep': u'2000:1::1', u'remote_vtep': u''}]
         '''
-        parsed_out = st.parse_show(nodes[i], "show vxlan remotevtep",cli_output, "show_vxlan_remotevtep.tmpl")
+        parsed_out = st.parse_show(node, "show vxlan remotevtep", cli_output, "show_vxlan_remotevtep.tmpl")
         if len(parsed_out) == 0:
             flag = False
-            st.log('No remote VTEP found in', nodes[i])
-            break
-        for src_vtep, values in remote_vtep_dict[nodes[i]].items():
-            for item in parsed_out:
-                if item['src_vtep'] != src_vtep:
-                    st.log('No local vtep {} found in {}'.format(src_vtep,nodes[i]))
+            st.log('No remote VTEP found in {}'.format(node))
+            continue
+        # Group rows by their src_vtep so multi-source nodes (BGWs have vxlan-dc IPv6
+        # + vxlan-wan IPv4) verify correctly. The previous per-row comparison flagged
+        # every row whose src_vtep differed from the current expected src as a failure,
+        # which broke BGW verification.
+        #
+        # Check direction kept aligned with the original implementation: every row
+        # observed on the device must be in the expected destination list for its src.
+        # We do NOT additionally require every expected destination to be present,
+        # because the leaf-side expected list (built from VLAN overlaps) intentionally
+        # over-approximates and includes nodes that are not real VTEP peers (e.g. BGW
+        # Loopback0 IPs and cross-DC leaves). Switching to a strict missing-check would
+        # regress the [leaf] variants that have always passed.
+        for src_vtep, expected_dsts in remote_vtep_dict[node].items():
+            rows_for_src = [r for r in parsed_out if r['src_vtep'] == src_vtep]
+            if not rows_for_src:
+                st.log('No local vtep {} found in {}'.format(src_vtep, node))
+                flag = False
+                continue
+            expected_set = set(expected_dsts)
+            for r in rows_for_src:
+                if r['dst_vtep'] not in expected_set:
+                    st.log('no remote vtep {} found for src {} in {}'.format(
+                        r['dst_vtep'], src_vtep, node))
                     flag = False
-                if item['dst_vtep'] not in values:
-                    st.log(' no remote vtep {} found in {}'.format(item['dst_vtep'],nodes[i]))
+                if r['tun_src'] != 'EVPN':
                     flag = False
-                if item['tun_src'] != 'EVPN':
+                    st.log('Unexpected tunnel creation source {} on src {} in {}'.format(
+                        r['tun_src'], src_vtep, node))
+                if r['tun_status'] != 'oper_up':
                     flag = False
-                    st.log('Unexpected tunnel type {} in {}'.format(item['tun_type'], nodes[i]))
-                if item['tun_status'] != 'oper_up':
-                    st.log('Tunnel is not in up status in {}'.format(nodes[i]))
-                    flag = False
+                    st.log('Tunnel {} -> {} not oper_up in {}'.format(
+                        src_vtep, r['dst_vtep'], node))
     return flag
 
 def get_vtep_info(nodes):
@@ -3209,6 +3873,11 @@ def create_traffic_item(device_handles, endpoints, topo_handles, transmit_mode="
         stream_handles[i]['tg_handle'] = tg_handle
         stream_handles[i]['port_handle'] = port_handle
         stream_handles[i]['dst_ports'] = emulation_dst_port
+        # Stash version (ipv4/ipv6) and per-traffic-item name so callers can
+        # filter/categorize streams later (e.g. dci_flap_continuous selection
+        # by IP version and L2/L3 in test_vxlan_dci DF-failover/RT testcases).
+        stream_handles[i]['version'] = version
+        stream_handles[i]['name'] = name
         i+=1
         st.wait(1) 
     return stream_handles
@@ -4040,12 +4709,49 @@ def get_expected_remote_vteps(dci_enabled=False):
                     temp_list.append(loopback_ip[node2])
         expected_vteps[node1][loopback_ip[node1]] = temp_list
 
-    # DCI only: leaves also have a remote VTEP to the local DC's BGW (DC VIP, e.g. 4000:1::1)
+    # DCI only: BGWs use Loopback10 (vxlan-dc IPv6 anycast) and Loopback11 (vxlan-wan
+    # IPv4 anycast) as their actual VxLAN tunnel sources, NOT Loopback0. The leaf-style
+    # entry built above for BGWs is keyed on Loopback0 (BGP overlay only) and is wrong.
+    # Overwrite BGW entries with the correct two-src layout:
+    #   - vxlan-dc  (DC VIP IPv6) -> all same-DC leaves' Loopback0 IPv6 (intra-DC)
+    #   - vxlan-wan (WAN VIP IPv4) -> peer DCs' BGW WAN VIP IPv4 (inter-DC, deduped)
     if dci_enabled:
         try:
-            (loopback_ipv6_dc_vip, _, _, _) = generate_dci_vip_maps()
+            (loopback_ipv6_dc_vip,
+             loopback_ipv4_wan_vip,
+             _,
+             _) = generate_dci_vip_maps()
+
+            bgw_nodes = [n for n in expected_vteps if 'bgw' in n]
+            for bgw in bgw_nodes:
+                my_dc = _get_dc_from_name(bgw)
+                dc_vip = loopback_ipv6_dc_vip.get(bgw)
+                wan_vip = loopback_ipv4_wan_vip.get(bgw)
+                if not (my_dc and dc_vip and wan_vip):
+                    continue
+                # vxlan-dc remotes: same-DC leaves only (IPv6 family, intra-DC).
+                # Use loopback_ip (Loopback0 IPv6) which doubles as leaf vxlan-dc src.
+                dc_remotes = [
+                    loopback_ip[n] for n in vlan_range
+                    if 'leaf' in n and _get_dc_from_name(n) == my_dc and n in loopback_ip
+                ]
+                # vxlan-wan remotes: other DCs' BGW WAN VIPs (anycast pairs share a VIP,
+                # so use a set to dedupe).
+                wan_remotes = sorted({
+                    loopback_ipv4_wan_vip[other]
+                    for other in loopback_ipv4_wan_vip
+                    if _get_dc_from_name(other) != my_dc and loopback_ipv4_wan_vip[other]
+                })
+                expected_vteps[bgw] = {
+                    dc_vip: dc_remotes,
+                    wan_vip: wan_remotes,
+                }
+
+            # Leaves: also expect a tunnel to the local DC's BGW DC VIP (intra-DC IPv6).
             if loopback_ipv6_dc_vip:
                 for node1 in expected_vteps:
+                    if 'bgw' in node1:
+                        continue
                     dc_match = re.search(r'_(dc\d+)', node1)
                     if dc_match:
                         my_dc = dc_match.group(1)
@@ -5379,7 +6085,7 @@ def check_core():
 
     return flag
 
-def enable_debugs():      
+def enable_debugs():
     output = ''
     output += "debug zebra kernel\n"
     output += "debug zebra kernel msgdump\n"
@@ -5394,16 +6100,21 @@ def enable_debugs():
     output += "debug bgp nht\n"
     output += "debug zebra evpn mh neigh\n"
     output += "debug zebra dplane detailed\n"
+    output += "debug bgp evpn dci\n"
     output += "log stdout\n"
     output += "log syslog\n"
     output += "end\nexit\n"
     cmd1 = "swssloglevel -l INFO -c orchagent"
     cmd2 = "swssloglevel -l INFO -c fdbsyncd"
+    # Apply on every node that runs FRR (leaves, BGWs, transit spines).
+    # Skip pure traffic-generator helpers (external_router, ihop) where vtysh
+    # may not be present.
     for dut in st.get_dut_names():
-        if "leaf" in dut:
-            st.config(dut, output, type='vtysh', skip_error_check=True)
-            st.config(dut, cmd1, skip_error_check=True)
-            st.config(dut, cmd2, skip_error_check=True)
+        if any(skip in dut for skip in ('external_router', 'ihop')):
+            continue
+        st.config(dut, output, type='vtysh', skip_error_check=True)
+        st.config(dut, cmd1, skip_error_check=True)
+        st.config(dut, cmd2, skip_error_check=True)
 
 def get_expected_evpn_type1_routes(dut):
     ret_val = list()
@@ -5826,18 +6537,38 @@ def start_device_group(port):
     st.wait(10)		##give time to start protocol
 
 def enable_uplink_tracking_configs(nodes, add=True, vars=None):
+    # Apply 'evpn mh uplink' (or its 'no' form) to every underlay interface
+    # on each node, batched into a single vtysh session per node.
+    #
+    # Every other vtysh-config helper in this file builds one config block
+    # and pushes it via a single st.config(... type='vtysh', ...).  The
+    # earlier per-interface form here issued one st.config (== one
+    # 'sudo vtysh' == one 'docker exec' into the bgp container) for every
+    # uplink, multiplying container-exec churn unnecessarily.  Under that
+    # pattern we have observed the bgp/container stack on a leaf wedge with
+    # 'OCI runtime exec failed: ... write init-p: broken pipe' on the very
+    # next vtysh invocation, taking the management plane down for several
+    # minutes and turning every test in the module into CmdFail.  A single
+    # batched session keeps the end-state identical and reduces exposure
+    # to that path.
     if vars is None:
         vars = st.get_testbed_vars()
     int_config_dict = get_config_interfaces_list(vars)
+    cmd_line = "evpn mh uplink" if add else "no evpn mh uplink"
     for node in nodes:
-        for interface in int_config_dict[node]['underlay']:
-            config_out = ""
-            config_out += "interface {}\n".format(interface)
-            if add:
-                config_out += "evpn mh uplink\nend\nexit\n"
-            else:
-                config_out += "no evpn mh uplink\nend\nexit\n"
-            st.config(node, config_out, type='vtysh', skip_error_check=True)
+        node_intf = int_config_dict.get(node, {}) or {}
+        underlay_ifs = node_intf.get('underlay') or []
+        if not underlay_ifs:
+            continue
+        lines = []
+        for interface in underlay_ifs:
+            lines.append("interface {}".format(interface))
+            lines.append(cmd_line)
+            lines.append("exit")
+        lines.append("end")
+        lines.append("exit")
+        config_out = "\n".join(lines) + "\n"
+        st.config(node, config_out, type='vtysh', skip_error_check=True)
 
 def validate_stats(tg_handle,traffic_item):
     traffic_stat = tg_handle.tg_traffic_stats(mode='traffic_item', streams=traffic_item)
@@ -8686,6 +9417,66 @@ def get_type5_path_counts_dci(dut, vlan_ids):
         else:
             counts[pfx] = 0
     st.log('Type-5 path counts on {} for VLANs {}: {}'.format(dut, vlan_ids, counts))
+    return counts
+
+
+def get_type5_path_counts_from_nexthop_dci(dut, vlan_ids, nexthop_ips):
+    """
+    Count Type-5 paths whose next-hop matches any IP in `nexthop_ips`.
+
+    In a multi-leaf, multi-spine, multi-DC EVPN fabric the total number of
+    paths for a Type-5 prefix can stay constant after a single advertiser
+    is withdrawn — BGW re-origination and ECMP via alternate spines cause
+    new paths to appear with different AS-paths but identical AS-origin.
+    Thus checking only "total path count decreased" is unreliable.
+
+    This helper instead returns the number of paths whose `next_hop`
+    matches the supplied advertiser VTEP IP(s), allowing callers to
+    verify that a specific source's contributions were truly withdrawn.
+
+    Args:
+        dut: Node hostname to query
+        vlan_ids: list of VLAN IDs (e.g. [11])
+        nexthop_ips: string or iterable of strings (advertiser VTEP IPs to match)
+
+    Returns:
+        dict mapping prefix string to count of paths from those next-hops:
+        {'80.11.0.0/24': 3, '8000:11::/64': 3}
+        Returns 0 for prefixes not present on this node.
+    """
+    if isinstance(nexthop_ips, str):
+        nh_set = {nexthop_ips}
+    else:
+        nh_set = set(nexthop_ips or [])
+
+    target_prefixes = set()
+    for vlan_id in vlan_ids:
+        target_prefixes.add('80.{}.0.0/24'.format(vlan_id))
+        target_prefixes.add('8000:{}::/64'.format(vlan_id))
+
+    try:
+        cli_output = st.show(dut, "do show bgp l2vpn evpn route type prefix",
+                             type='vtysh', skip_tmpl=True)
+    except Exception as err:
+        st.log('Failed to get Type-5 routes on {}: {}'.format(dut, err))
+        return {pfx: 0 for pfx in target_prefixes}
+
+    if not cli_output or not cli_output.strip():
+        return {pfx: 0 for pfx in target_prefixes}
+
+    detailed = _parse_type5_routes_detailed(cli_output)
+    counts = {}
+    for pfx in target_prefixes:
+        if pfx not in detailed:
+            counts[pfx] = 0
+            continue
+        cnt = 0
+        for path in detailed[pfx].get('paths', []) or []:
+            if path.get('next_hop') in nh_set:
+                cnt += 1
+        counts[pfx] = cnt
+    st.log('Type-5 path counts on {} for VLANs {} from nexthops {}: {}'.format(
+        dut, vlan_ids, sorted(nh_set), counts))
     return counts
 
 

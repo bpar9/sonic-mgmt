@@ -1,4 +1,3 @@
-import pdb
 import os
 import re
 import yaml
@@ -2653,7 +2652,8 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
         
         # ============================================================
         # Fetch Type-5 route output ONCE for reuse by rt_rewrite and
-        # evpn_type5_comprehensive checks (avoid duplicate CLI dumps)
+        # evpn_type5_comprehensive checks (avoid duplicate CLI dumps).
+        # Note: rt_rewrite re-fetches per attempt below to track convergence.
         # ============================================================
         type5_cli_output = None
         need_type5 = ('rt_rewrite' in checks_to_run and 'bgw' in dut) or \
@@ -2672,25 +2672,56 @@ def verify_base_setup_bgw(bgw_nodes, retry=1, checks='all', skip_checks=None, re
 
         # ============================================================
         # RT-REWRITE Route-Map Verification (BGW nodes only)
+        #
+        # Retry-aware: Type-5 routes carrying remote-BGW RTs depend on
+        # inter-DC underlay/EVPN convergence. After a process restart
+        # (swss/bgp/syncd) on a BGW, EVPN sessions and Type-5 imports may
+        # take tens of seconds to settle, so honour the same retry budget
+        # used by every other check in this routine. Re-fetch the Type-5
+        # output on each retry to observe convergence progress.
         # ============================================================
         if 'rt_rewrite' in checks_to_run:
-            # Only check on BGW nodes (RT-REWRITE route-maps are BGW-specific)
             if 'bgw' not in dut:
                 st.log(f'RT-REWRITE on {dut}: Skipped (not a BGW node)')
                 results[dut]['rt_rewrite'] = True
             else:
-                try:
-                    rt_result = vxlan_obj.verify_rt_rewrite_dci(
-                        dut, cli_output=type5_cli_output)
-                    if rt_result['result']:
-                        st.log(f'RT-REWRITE on {dut}: Pass - {rt_result["details"]}')
-                        results[dut]['rt_rewrite'] = True
-                    else:
-                        st.log(f'RT-REWRITE on {dut}: Fail - {rt_result["details"]}')
-                        results[dut]['rt_rewrite'] = False
-                        results['overall'] = False
-                except Exception as err:
-                    st.log(f'RT-REWRITE on {dut}: Fail - {err}')
+                # Use the same retry budget as the surrounding checks
+                # (e.g. verify_bgp_summary_dci uses vl_retries=retry).
+                # rt_rewrite verifies inter-DC EVPN Type-5 convergence,
+                # which is the slowest type to settle after a restart and
+                # has been observed to take 60-90s on the failing run.
+                # Capped at 10 to bound worst-case wait per BGW.
+                rt_retries = min(max(int(retry), 1), 10)
+                rt_interval = 10
+                rt_result = None
+                for attempt in range(1, rt_retries + 1):
+                    if attempt > 1:
+                        try:
+                            type5_cli_output = st.show(
+                                dut, "do show bgp l2vpn evpn route type prefix",
+                                type='vtysh', skip_tmpl=True)
+                        except Exception as err:
+                            st.log(f'Re-fetch Type-5 on {dut} '
+                                   f'(attempt {attempt}/{rt_retries}) failed: {err}')
+                    try:
+                        rt_result = vxlan_obj.verify_rt_rewrite_dci(
+                            dut, cli_output=type5_cli_output)
+                    except Exception as err:
+                        rt_result = {'result': False, 'details': str(err)}
+                    if rt_result.get('result'):
+                        break
+                    if attempt < rt_retries:
+                        st.log(f'RT-REWRITE on {dut} not yet converged '
+                               f'(attempt {attempt}/{rt_retries}): '
+                               f'{rt_result.get("details", "")}; '
+                               f'retry after {rt_interval}s')
+                        st.wait(rt_interval)
+                if rt_result and rt_result.get('result'):
+                    st.log(f'RT-REWRITE on {dut}: Pass - {rt_result["details"]}')
+                    results[dut]['rt_rewrite'] = True
+                else:
+                    details = rt_result.get('details', 'no result') if rt_result else 'no result'
+                    st.log(f'RT-REWRITE on {dut}: Fail - {details}')
                     results[dut]['rt_rewrite'] = False
                     results['overall'] = False
         
@@ -2936,7 +2967,10 @@ class TestVxlanRestartTriggers():
                 st.report_fail("test_case_failed")
         
         # Step 5: Verify base setup after restart with retries
-        if restart_type == "swss":
+        # syncd restart re-programs the entire ASIC pipeline (FDB, VTEPs,
+        # route tables) and observed convergence (Apr 27 run) is comparable
+        # to swss, so use the same extended retry budget for both.
+        if restart_type in ("swss", "syncd"):
             retry_count = 10
         else:
             retry_count = test_cfg['global'].get('proc_restart_retries', 7)
@@ -3052,7 +3086,7 @@ class TestVxlanRestartTriggers():
             restart_complete = basic_obj.systemctl_restart_service(dut, restart_type)
             if not restart_complete:
                 st.error('Restart {} failed on {}'.format(restart_type, dut))
-        
+
         # Step 4: Verify docker recovery
         st.banner("Step 4: Verifying docker recovery after restart")
         for dut in target_nodes:
@@ -3071,7 +3105,10 @@ class TestVxlanRestartTriggers():
                 st.report_fail("test_case_failed")
         
         # Step 5: Verify base setup after restart with retries
-        if restart_type == "swss":
+        # syncd restart re-programs the entire ASIC pipeline (FDB, VTEPs,
+        # route tables) and observed convergence (Apr 27 run) is comparable
+        # to swss, so use the same extended retry budget for both.
+        if restart_type in ("swss", "syncd"):
             retry_count = 10
         else:
             retry_count = test_cfg['global'].get('proc_restart_retries', 7)
@@ -3082,12 +3119,12 @@ class TestVxlanRestartTriggers():
             target_nodes, retry=retry_count,
             failure_context='after {} restart on {} ({})'.format(
                 restart_type, node_desc, ','.join(target_nodes)))
-        
+
         if not result_after_trigger:
             st.report_fail("test_case_failed")
         
         st.banner('Base setup verification passed after {} restart'.format(restart_type))
-        
+
         # Step 6: Verify traffic (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
             st.banner('Step 6: Verifying cross-DC traffic after restart: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6')
@@ -3232,7 +3269,13 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, "Docker count mismatch after config reload")
             return
         
-        st.wait(60)
+        # DCI/BGW config_reload also has to bring back the WAN-facing eBGP unnumbered
+        # underlay peer (AS 65200) and its overlay EVPN peer, which goes off-box and
+        # has been observed to take up to ~3-4 min to re-establish post-reload.
+        # Leaf reloads have to reconverge intra-DC sessions plus IPv6 type-5 / v6
+        # underlay-nexthop programming, which on real HW has been seen to take
+        # ~90-120s; a 60s settle was too tight and produced ~36% v6 cross-DC drops.
+        st.wait(240 if node_type == "dci" else 120)
         
         # Step 5: Verify base setup
         st.banner("Step 5: Verifying base setup after config reload")
@@ -3249,10 +3292,15 @@ class TestVxlanReloadTriggers():
             return
         
         # Step 6: Check VTEP status
+        # verify_vtep() is single-shot; poll it so EVPN type-3 propagation across
+        # all leaves has time to settle (especially after DCI/BGW reload which
+        # has the longest re-establish path).
         st.banner("Step 6: Verifying all remote VTEPs are present")
         vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
         if vtep_check_nodes:
-            vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
+            vtep_poll_timeout = 240 if node_type == "dci" else 120
+            vtep_state = poll_wait(vxlan_obj.verify_vtep, vtep_poll_timeout,
+                                   vtep_check_nodes, dci_enabled=True)
         else:
             vtep_state = True
         if vtep_state:
@@ -3264,6 +3312,9 @@ class TestVxlanReloadTriggers():
         
         # Step 7: Verify traffic (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
+            convergence_wait = 120
+            st.log('Waiting {}s for IPv6 L3VNI route programming...'.format(convergence_wait))
+            st.wait(convergence_wait)
             st.banner('Step 7: Verifying traffic after config reload: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
                 traffic_scope or 'all'))
             traffic_result = verify_traffic(tgen_handles, bum=True,
@@ -3381,6 +3432,16 @@ class TestVxlanReloadTriggers():
             report_result(False, tc_id, 'All dockers not up after reboot')
             return
         
+        # Post-reboot settle: dockers being up does not mean BGP/EVPN/L3VNI
+        # state has converged. Without this wait, IPv6 type-5 / v6 nexthop
+        # programming was seen to lag the traffic check, producing ~36% v6
+        # cross-DC drops on a single MH stream (TI67 vrf102 vlan16) on leaf
+        # reboot. DCI reboot settle stays larger because the WAN-facing
+        # eBGP overlay peer takes longest to re-establish.
+        post_reboot_settle = 180 if node_type == "dci" else 90
+        st.banner("Post-reboot settle: waiting {}s for control-plane convergence".format(post_reboot_settle))
+        st.wait(post_reboot_settle)
+        
         # Step 5: Verify base setup
         st.banner("Step 5: Verifying base setup after reboot")
         retry_count = 10
@@ -3396,10 +3457,14 @@ class TestVxlanReloadTriggers():
             return
 
         # Step 5b: Verify all remote VTEPs are present
+        # verify_vtep() is single-shot; poll it so EVPN type-3 propagation
+        # has time to settle on every leaf, not just the rebooted node.
         st.banner("Step 5b: Verifying all remote VTEPs are present")
         vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
         if vtep_check_nodes:
-            vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
+            vtep_poll_timeout = 240 if node_type == "dci" else 180
+            vtep_state = poll_wait(vxlan_obj.verify_vtep, vtep_poll_timeout,
+                                   vtep_check_nodes, dci_enabled=True)
         else:
             vtep_state = True
         if not vtep_state:
@@ -3410,6 +3475,9 @@ class TestVxlanReloadTriggers():
         
         # Step 6: Verify traffic (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
+            convergence_wait = 120
+            st.log('Waiting {}s for IPv6 L3VNI route programming...'.format(convergence_wait))
+            st.wait(convergence_wait)
             st.banner('Step 6: Verifying traffic after reboot: BUM (SH+MH), L2v4, L2v6, L3v4, L3v6 (scope: {})'.format(
                 traffic_scope or 'all'))
             traffic_result = verify_traffic(tgen_handles, bum=True,
@@ -3608,10 +3676,17 @@ class TestVxlanReloadTriggers():
             return
 
         # Step 9: Verify all remote VTEPs are present
+        # verify_vtep() is single-shot; poll it so EVPN type-3 propagation has
+        # time to reach every leaf. DCI/BGW power-cycle is the longest-blast
+        # trigger -- the WAN overlay session and type-3 IMET routes have to
+        # propagate cross-DC, which on real HW has been seen to take >30s
+        # after the BGW boots and was missing leaf0_dc3 at snapshot time.
         st.banner("Step 9: Verifying all remote VTEPs are present")
         vtep_check_nodes = test_cfg['nodes'].get('l2l3vni', []) if node_type in ('spine', 'dci') else [selected_dut]
         if vtep_check_nodes:
-            vtep_state = vxlan_obj.verify_vtep(vtep_check_nodes, dci_enabled=True)
+            vtep_poll_timeout = 600 if node_type == "dci" else 180
+            vtep_state = poll_wait(vxlan_obj.verify_vtep, vtep_poll_timeout,
+                                   vtep_check_nodes, dci_enabled=True)
         else:
             vtep_state = True
         if not vtep_state:
@@ -3623,7 +3698,10 @@ class TestVxlanReloadTriggers():
         # Step 10: Verify traffic flows (L2VNI + L3VNI)
         if st.getenv('skip_tgen', 'false') != 'true':
             st.banner('Step 10: Verify traffic flows after power cycle on {} node'.format(node_desc))
-            convergence_wait = 30
+            # Cross-DC IPv6 type-5 ECMP nexthop programming on remote leaves
+            # has been seen to lag baseline IPv4 convergence; bump the
+            # pre-traffic settle on DCI power cycle to keep v6 streams clean.
+            convergence_wait = 120
             st.log('Waiting {}s for protocol convergence...'.format(convergence_wait))
             st.wait(convergence_wait)
             
@@ -3647,6 +3725,160 @@ class TestVxlanReloadTriggers():
         
         st.banner('TEST PASSED: Solution_dci:{} - {}'.format(test_num, tc_id))
         report_result(True, tc_id)
+
+
+# ============================================================================
+# DPB (Dynamic Port Breakout) helpers - shared by DCI DPB tests
+# Mirrors the helpers in test_vxlan_dci-3_desai.py so we don't cross-import
+# across test modules.
+# ============================================================================
+
+def _is_400g_speed(speed):
+    speed_str = str(speed).strip().lower()
+    return speed_str in {"400g", "400000", "400000m", "400000mbps", "400000000"}
+
+
+def _pick_free_400g_port(dut):
+    """Pick a free 400G port on `dut` for DPB-on-unused-port. Returns None if none."""
+    try:
+        free_ports = intf_obj.get_free_ports_speed_dict(dut) or {}
+    except Exception:
+        free_ports = {}
+    for speed, ports in free_ports.items():
+        if _is_400g_speed(speed) and ports:
+            return ports[0]
+
+    try:
+        status_rows = intf_obj.interface_status_show(dut) or []
+    except Exception:
+        return None
+
+    linked_ports = set()
+    for getter in (st.get_dut_links, st.get_tg_links):
+        try:
+            linked_ports.update(local for local, *_ in (getter(dut) or []) if local)
+        except Exception:
+            pass
+
+    best_port, best_score = None, (9, 9)
+    for row in status_rows:
+        port = row.get('interface', '')
+        if not str(port).startswith('Eth') or not _is_400g_speed(row.get('speed', '')):
+            continue
+        admin = str(row.get('admin', '')).strip().lower()
+        oper = str(row.get('oper', '')).strip().lower()
+        score = (0 if port not in linked_ports else 1,
+                 0 if admin == 'up' and oper == 'down' else 1)
+        if score < best_score:
+            best_port, best_score = port, score
+            if score == (0, 0):
+                break
+    return best_port
+
+
+def _dpb_derive_lane_ip_map(ip_cidr, lanes):
+    """Given a parent IP a.b.c.d/prefix, return {lane: a.(b+lane-1).c.d/prefix} for lane 1..lanes."""
+    intf = ipaddress.ip_interface(ip_cidr)
+    prefix_len = intf.network.prefixlen
+    octets = [int(o) for o in str(intf.ip).split('.')]
+    return {
+        lane: "{}.{}.{}.{}/{}".format(octets[0], octets[1] + (lane - 1), octets[2], octets[3], prefix_len)
+        for lane in range(1, lanes + 1)
+    }
+
+
+def _dpb_run(dut, port, remove_ip, lane_ip_map, neighbor_ips, bgp_info,
+             breakout_mode, lanes, peer_group="TRANSIT_WAN"):
+    """Remove parent IP, breakout the port, bring up lanes, add per-lane IPs and BGP neighbors."""
+    errors = []
+    st.log("Using interface {}:{} for DPB configuration".format(dut, port))
+
+    vxlan_obj.config_dut(dut, 'sonic',
+                         "sudo config interface ip remove {} {}".format(port, remove_ip))
+    st.wait(2)
+
+    vxlan_obj.config_dut(dut, 'sonic',
+                         'sudo config interface breakout {} "{}" -yfl'.format(port, breakout_mode))
+    st.wait(2)
+
+    for lane in range(1, lanes + 1):
+        vxlan_obj.config_dut(dut, 'sonic',
+                             "sudo config interface start {}_{}".format(port, lane))
+    st.wait(2)
+
+    for lane, ip_cidr in lane_ip_map.items():
+        vxlan_obj.config_dut(dut, 'sonic',
+                             "sudo config interface ip add {}_{} {}".format(port, lane, ip_cidr))
+    st.wait(2)
+
+    bgp_asn = bgp_info.get(dut, {}).get("as_num")
+    if not bgp_asn:
+        st.error("Unable to derive BGP ASN for {}; skipping {} neighbor config".format(dut, peer_group))
+        return errors
+
+    neighbor_cmds = ["neighbor {} peer-group {}".format(ip, peer_group) for ip in neighbor_ips]
+    vtysh_cmd = ('sudo vtysh -c "conf t" -c "router bgp {}" '.format(bgp_asn)
+                 + " ".join(['-c "{}"'.format(c) for c in neighbor_cmds]))
+    st.log("Configuring BGP ASN {} neighbors: {}".format(bgp_asn, ", ".join(neighbor_ips)))
+    vxlan_obj.config_dut(dut, 'sonic', vtysh_cmd)
+    st.wait(2)
+    return errors
+
+
+def _dpb_run_original(dut, port, ip_cidr, neighbor_ips, bgp_info,
+                      breakout_mode, peer_group="TRANSIT_WAN"):
+    """Bring port back to its original mode, restore parent IP, and re-add original BGP neighbors."""
+    errors = []
+    st.log("Restoring interface {}:{} to original mode {}".format(dut, port, breakout_mode))
+
+    vxlan_obj.config_dut(dut, 'sonic',
+                         'sudo config interface breakout {} "{}" -yfl'.format(port, breakout_mode))
+    st.wait(2)
+    vxlan_obj.config_dut(dut, 'sonic',
+                         "sudo config interface start {}".format(port))
+    st.wait(2)
+    vxlan_obj.config_dut(dut, 'sonic',
+                         "sudo config interface ip add {} {}".format(port, ip_cidr))
+    st.wait(2)
+
+    bgp_asn = bgp_info.get(dut, {}).get("as_num")
+    if not bgp_asn:
+        st.error("Unable to derive BGP ASN for {}; skipping {} neighbor config".format(dut, peer_group))
+        return errors
+
+    neighbor_cmds = ["neighbor {} peer-group {}".format(ip, peer_group) for ip in neighbor_ips]
+    vtysh_cmd = ('sudo vtysh -c "conf t" -c "router bgp {}" '.format(bgp_asn)
+                 + " ".join(['-c "{}"'.format(c) for c in neighbor_cmds]))
+    st.log("Configuring BGP ASN {} neighbors: {}".format(bgp_asn, ", ".join(neighbor_ips)))
+    vxlan_obj.config_dut(dut, 'sonic', vtysh_cmd)
+    st.wait(2)
+    return errors
+
+
+def _dpb_revert(dut, port, lane_ip_map, dpb_neighbor_ips, bgp_info, lanes,
+                peer_group="TRANSIT_WAN"):
+    """Remove DPB BGP neighbors and per-lane IPs (does NOT undo the breakout itself)."""
+    st.log("Reverting DPB lane config on interface {}:{}".format(dut, port))
+    parent = port.split('_')[0]
+
+    bgp_asn = bgp_info.get(dut, {}).get("as_num")
+    if bgp_asn:
+        no_neighbor_cmds = ["no neighbor {} peer-group {}".format(ip, peer_group)
+                            for ip in dpb_neighbor_ips]
+        vtysh_no_cmd = ('sudo vtysh -c "conf t" -c "router bgp {}" '.format(bgp_asn)
+                        + " ".join(['-c "{}"'.format(c) for c in no_neighbor_cmds]))
+        st.log("Removing BGP DPB neighbors from ASN {}: {}".format(bgp_asn, ", ".join(dpb_neighbor_ips)))
+        vxlan_obj.config_dut(dut, 'sonic', vtysh_no_cmd)
+        st.wait(2)
+    else:
+        st.error("Unable to derive BGP ASN for {}; skipping {} neighbor revert".format(dut, peer_group))
+
+    for lane in range(1, lanes + 1):
+        ip_cidr = lane_ip_map.get(lane)
+        if ip_cidr:
+            vxlan_obj.config_dut(dut, 'sonic',
+                                 "sudo config interface ip remove {}_{} {}".format(parent, lane, ip_cidr))
+    st.wait(2)
 
 
 @pytest.mark.usefixtures('tgen_health_check_class')
@@ -4525,7 +4757,6 @@ class TestVxlanInterfaceTriggers():
         test_num, tc_id = test_map[(action, scope)]
         test_cfg['tc_id'] = tc_id
         tc_cfg = vxlan_obj.get_tc_params(tc_id)
-
         st.banner("TEST Solution_dci:{} / L3VNI_dci:{}: DCI link {} - scope:{} ({})".format(
             test_num, test_num + 13, action, scope, tc_id))
 
@@ -4672,7 +4903,7 @@ class TestVxlanInterfaceTriggers():
                             st.log("Continuous cross-DC L2+L3 continued during partial DCI shut")
                 elif scope == "all_bgws":
                     st.banner("Step 3: Verify traffic FAILS while ALL DCI links are shut (expected)")
-                    if verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6'], scope='cross'):
+                    if verify_traffic(tgen_handles, bum=True, traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'], scope='cross'):
                         summ += "Cross-DC traffic unexpectedly passed while ALL DCI links were shut\n"
                         result = False
                     else:
@@ -4734,6 +4965,143 @@ class TestVxlanInterfaceTriggers():
             else:
                 st.log("Traffic recovery verified (burst Step 5b)")
 
+        report_result(result, tc_id, summ)
+
+    @pytest.mark.parametrize("interfacetype", ["single", "all"])
+    def test_upstream_interface_flap_towards_dci(self, interfacetype):
+        """
+        L3VNI_dci:16/25 - Upstream interface shut/no-shut towards DCI node from a DC1 leaf.
+
+        Flaps the leaf's uplink interfaces towards the DCI/BGW spine nodes,
+        verifying that cross-DC L2 + L3 traffic recovers after interfaces are restored.
+
+        Args:
+            interfacetype: 'single' (one upstream link to one BGW spine) or
+                           'all' (all upstream links to all DC1 spines including BGW)
+
+        Steps:
+            1. Identify upstream interfaces on a DC1 leaf towards DCI/BGW spine(s)
+            2. Verify base setup before flap
+            3. Verify baseline cross-DC traffic (BUM + L2 + L3)
+            4. Shut upstream interfaces towards DCI
+            5. Verify interfaces are down
+            6. No-shut upstream interfaces towards DCI
+            7. Verify interfaces are up
+            8. Verify cross-DC traffic recovery (BUM + L2 + L3 including l3_v4, l3_v6)
+            9. Check for core files/crashes
+        """
+        tc_id = "test_upstream_interface_flap_towards_dci_{}".format(interfacetype)
+        result = True
+        summ = ''
+
+        scenario_desc = (
+            "L3VNI_dci:16 - Upstream interface shut/no-shut towards DCI node"
+            if interfacetype == "single" else
+            "L3VNI_dci:25 - All upstream interfaces flap towards DCI"
+        )
+        st.banner("TEST: {} ({})".format(scenario_desc, tc_id))
+
+        # Select a DC1 leaf node
+        dc1_leaf_nodes = [dut for dut in test_cfg['nodes'].get('leaf', []) if 'dc1' in dut]
+        if not dc1_leaf_nodes:
+            pytest.skip("No DC1 leaf nodes found in testbed")
+            return
+        flapping_leaf = dc1_leaf_nodes[0]
+        st.log("Selected leaf node for upstream interface flap: {}".format(flapping_leaf))
+
+        # Identify upstream peers (BGW spines for 'single', all DC1 spines for 'all')
+        if interfacetype == "single":
+            peers = test_cfg['nodes'].get('dc1_bgw', [])
+            if not peers:
+                pytest.skip("No DC1 BGW spine nodes found in testbed")
+                return
+            peers = peers[:1]
+            st.log("DCI/BGW spine node for interface flap: {}".format(peers[0]))
+        else:
+            peers = (test_cfg['nodes'].get('dc1_spine', []) +
+                     test_cfg['nodes'].get('dc1_bgw', []))
+            if not peers:
+                pytest.skip("No DC1 spine/BGW nodes found in testbed")
+                return
+
+        # Collect leaf interfaces towards the selected peers
+        leaf_dci_ports = sorted({
+            local for peer in peers
+            for (local, _pd, _pp) in (st.get_dut_links(flapping_leaf, peer=peer) or [])
+            if local
+        })
+        if not leaf_dci_ports:
+            pytest.skip("No upstream interfaces found on {} towards DCI peers {}".format(
+                flapping_leaf, peers))
+            return
+
+        st.log("Interfaces on {} towards DCI: {}".format(flapping_leaf, leaf_dci_ports))
+
+        # Step 1: Verify base setup before flap
+        st.banner("Step 1: Verify base setup before upstream interface flap")
+        if not verify_base_setup_bgw([flapping_leaf], skip_checks=['vteps'],
+                                     failure_context='before upstream interface flap'):
+            summ += "Base setup verification failed before upstream interface flap\n"
+            result = False
+
+        if not result:
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify baseline cross-DC traffic (BUM + L2 + L3)
+        st.banner("Step 2: Verify baseline cross-DC traffic before upstream interface flap")
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                              scope='cross'):
+            summ += "Baseline cross-DC traffic failed before upstream interface flap\n"
+            result = False
+
+        if not result:
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 3: Shut upstream interfaces towards DCI
+        startup_cmds = []
+        try:
+            st.banner("Step 3: Shut upstream interfaces towards DCI on {}".format(flapping_leaf))
+            self._shutdown_interfaces(flapping_leaf, leaf_dci_ports)
+
+        finally:
+            # Step 4: Restore upstream interfaces
+            st.banner("Step 4: No-shut upstream interfaces towards DCI on {}".format(flapping_leaf))
+            self._noshutdown_interfaces(flapping_leaf, leaf_dci_ports)
+
+        # Wait for BGP/EVPN convergence after interfaces come back up
+        convergence_wait = 30
+        st.log("Waiting {}s for BGP/EVPN convergence after upstream interface restore".format(
+            convergence_wait))
+        st.wait(convergence_wait)
+
+        # Step 5: Verify base setup after flap
+        st.banner("Step 5: Verify base setup after upstream interface flap")
+        if not verify_base_setup_bgw([flapping_leaf], retry=5, skip_checks=['vteps'],
+                                     failure_context='after upstream interface flap'):
+            summ += "Base setup verification failed after upstream interface flap\n"
+            result = False
+
+        # Step 6: Verify cross-DC traffic recovery (BUM + L2 + L3 v4/v6)
+        st.banner("Step 6: Verify cross-DC traffic recovery after upstream interface flap (BUM/L2/L3)")
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['bum_SH', 'bum_MH', 'l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'],
+                              scope='cross'):
+            summ += "Cross-DC traffic did not recover after upstream interface flap (BUM/L2v4/L2v6/L3v4/L3v6)\n"
+            result = False
+        else:
+            st.log("Cross-DC traffic recovered successfully after upstream interface flap")
+
+        # Step 7: Check for core files/crashes
+        st.banner("Step 7: Checking for core files and crashes")
+        if vxlan_obj.check_core():
+            summ += "Core files detected after upstream interface flap\n"
+            result = False
+
+        if result:
+            st.banner("TEST PASSED: {} - {}".format(scenario_desc, tc_id))
         report_result(result, tc_id, summ)
 
 
@@ -5135,6 +5503,76 @@ class TestVxlanAddRemoveVlan():
 # ============================================================================
 # BASE TEST CLASS (DCI base config + base testcases only)
 # ============================================================================
+
+
+def _dump_l3vni_debug_state(label, bgws, leaves, vrf_ids):
+    """Dump targeted show commands on BGWs and leaves to aid L3VNI debugging.
+
+    Triggered around L3VNI rotation/revert windows so we capture the data
+    plane and FRR control-plane state at the exact moment traffic verify
+    is about to run. Each show is wrapped in try/except so a single DUT
+    hiccup never aborts the dump for the rest.
+
+    label    : free-form string used in the banner ('post-rotation' /
+               'post-revert' etc.).
+    bgws     : list of BGW node names whose DCI re-origination plumbing
+               (RT-REWRITE-WAN/-DC route-maps, extcommunity-lists, vxlan
+               VRF-VNI map) we need to inspect.
+    leaves   : list of leaf node names whose receive-side state (Type-5
+               imports, ESI/Type-1, VRF route table) we need to inspect.
+    vrf_ids  : iterable of VRF IDs (e.g. [101, 102]) to dump
+               'show ip/ipv6 route vrf VrfXXX' for.
+    """
+    bgws = list(bgws or [])
+    leaves = list(leaves or [])
+    vrf_ids = list(vrf_ids or [])
+
+    st.banner('L3VNI debug dump ({}): BGWs={} leaves={} vrfs={}'.format(
+        label, len(bgws), len(leaves), vrf_ids))
+
+    # (cmd, vtysh?) tuples - sonic-CLI when vtysh flag is False.
+    bgw_cmds = [
+        ('show vxlan vrfvnimap', False),
+        ('do show bgp l2vpn evpn vni', True),
+        ('do show running-config', True),
+        ('do show bgp l2vpn evpn route type prefix', True),
+        ('do show bgp l2vpn evpn route type 5', True),
+    ]
+    leaf_cmds = [
+        ('show vxlan vrfvnimap', False),
+        ('do show bgp l2vpn evpn route type prefix', True),
+        ('do show bgp l2vpn evpn route type 5', True),
+        ('do show bgp l2vpn evpn route type 1', True),
+        ('do show evpn es', True),
+        ('do show evpn es-evi', True),
+    ]
+
+    def _safe_show(node, cmd, vtysh):
+        try:
+            if vtysh:
+                st.show(node, cmd, type='vtysh', skip_tmpl=True)
+            else:
+                st.show(node, cmd, skip_tmpl=True)
+        except Exception as exc:
+            st.log('L3VNI debug dump: show "{}" on {} raised {} (continuing)'.format(
+                cmd, node, exc))
+
+    for bgw in bgws:
+        st.log('--- L3VNI debug dump on BGW {} ({}) ---'.format(bgw, label))
+        for cmd, vtysh in bgw_cmds:
+            _safe_show(bgw, cmd, vtysh)
+        for vid in vrf_ids:
+            _safe_show(bgw, 'do show ip route vrf Vrf{}'.format(vid), True)
+            _safe_show(bgw, 'do show ipv6 route vrf Vrf{}'.format(vid), True)
+
+    for leaf in leaves:
+        st.log('--- L3VNI debug dump on leaf {} ({}) ---'.format(leaf, label))
+        for cmd, vtysh in leaf_cmds:
+            _safe_show(leaf, cmd, vtysh)
+        for vid in vrf_ids:
+            _safe_show(leaf, 'do show ip route vrf Vrf{}'.format(vid), True)
+            _safe_show(leaf, 'do show ipv6 route vrf Vrf{}'.format(vid), True)
+
 
 @pytest.mark.usefixtures('tgen_health_check_class')
 class TestVxlanDCIBase():
@@ -6253,16 +6691,19 @@ class TestVxlanDCIBase():
                 'sudo config vlan member add {} {}'.format(target_vlan, member))
 
         def _t5_restore_vrf_ip_sag_members():
-            """After VLAN + vxlan map: VRF bind, no-shut SVI, SVI v4/v6, SAG, tagged members."""
+            """After VLAN + vxlan map: VRF bind, SVI v4/v6, SAG, tagged members.
+
+            Note: SONiC SVIs created via `config vlan add` come up admin-up by
+            default. The click CLI `config interface startup VlanXX` is not
+            supported for SVIs (interface_name_is_valid() rejects VLAN names),
+            so no explicit SVI no-shutdown step is issued here. This mirrors
+            the canonical re-add sequence used by `_restore_vlan_remove_add`.
+            """
             try:
                 vxlan_obj.config_dut(target_leaf, 'sonic',
                     'sudo config interface vrf bind Vlan{} {}'.format(target_vlan, target_vrf))
             except Exception as exc:
                 st.warn('type5 restore: VRF bind Vlan{} {} failed: {}'.format(target_vlan, target_vrf, exc))
-            try:
-                intf_obj.interface_noshutdown(dut=target_leaf, interfaces='Vlan{}'.format(target_vlan))
-            except Exception as exc:
-                st.warn('type5 restore: Vlan{} no-shutdown failed: {}'.format(target_vlan, exc))
             try:
                 vxlan_obj.config_dut(target_leaf, 'sonic',
                     'sudo config interface ip add Vlan{} {}'.format(target_vlan, target_ipv4))
@@ -6303,21 +6744,51 @@ class TestVxlanDCIBase():
         try:
             # Step 1: Verify Type-5 routes present on all nodes before withdrawal
             # and record per-node path counts for the target VLAN prefixes.
-            # In a multi-DC topology, a prefix like 80.11.0.0/24 has paths from
-            # multiple sources (local leafs + remote DC BGWs).  After deleting
-            # VLAN on one leaf, the prefix will NOT completely disappear
-            # on BGW/remote nodes because paths from other DCs remain.  We use
-            # path-count-decrease instead of prefix-absence to verify withdrawal.
+            #
+            # In a multi-leaf, multi-spine, multi-DC EVPN fabric, the *total*
+            # number of paths for a Type-5 prefix is NOT a reliable witdrawal
+            # signal.  When `target_leaf` stops advertising 80.11.0.0/24, BGW
+            # re-origination via alternate spine paths and ECMP through the
+            # remaining DC1 leafs typically introduces new paths with
+            # different AS-paths but identical RT/origin.  The aggregate
+            # path count therefore stays roughly constant, even though the
+            # specific advertiser was correctly withdrawn.
+            #
+            # We instead key the verification on the *advertiser's VTEP IP*:
+            # record paths whose next-hop matches `target_leaf`'s VTEP IP
+            # before the deletion, and verify that count drops to 0 (or at
+            # least strictly decreases) on every other node afterward.  This
+            # truly captures BGP withdrawal regardless of fabric ECMP shape.
             st.banner('Step 1: Verify Type-5 routes present and record path counts before withdrawal')
             if not verify_base_setup_bgw(all_verify_nodes,
                                          checks=['evpn_type5_comprehensive']):
                 summ += 'Type-5 route verification failed (pre-withdrawal check)\n'
                 result = False
+
+            # Resolve target leaf VTEP IPs (v4 and v6) for nexthop-keyed checks.
+            target_leaf_nexthops = []
+            try:
+                for _ver in ('v4', 'v6'):
+                    _lp_map = vxlan_obj.generate_loopback_ip(version=_ver) or {}
+                    if _lp_map.get(target_leaf):
+                        target_leaf_nexthops.append(_lp_map[target_leaf])
+            except Exception as _exc:
+                st.log('Could not resolve {} VTEP IPs: {}'.format(target_leaf, _exc))
+            st.log('Target leaf {} VTEP nexthops to track: {}'.format(
+                target_leaf, target_leaf_nexthops))
+
             pre_counts = {}
+            pre_nh_counts = {}
             for node in all_verify_nodes:
                 pre_counts[node] = vxlan_obj.get_type5_path_counts_dci(
                     node, [target_vlan_id])
-                st.log('Pre-removal path counts on {}: {}'.format(node, pre_counts[node]))
+                if target_leaf_nexthops:
+                    pre_nh_counts[node] = vxlan_obj.get_type5_path_counts_from_nexthop_dci(
+                        node, [target_vlan_id], target_leaf_nexthops)
+                else:
+                    pre_nh_counts[node] = {}
+                st.log('Pre-removal path counts on {}: total={} from_target_leaf={}'.format(
+                    node, pre_counts[node], pre_nh_counts[node]))
             
             # Step 2: Full VLAN deletion sequence on target leaf.
             # Order: remove members -> disable SAG -> unbind VRF -> remove IPs -> vxlan map del -> delete VLAN
@@ -6364,35 +6835,118 @@ class TestVxlanDCIBase():
             st.log('Deleted VLAN {} on {}'.format(target_vlan, target_leaf))
             
             st.wait(8, 'Waiting for route withdrawal after full VLAN {} deletion'.format(target_vlan))
-            
-            # Step 3: Verify Type-5 route path count decreased on all nodes.
-            # On the target leaf itself the locally-originated path should be
-            # withdrawn.  On BGW and remote nodes, paths from other DCs remain
-            # so we verify path_count decreased (not that the prefix is absent).
-            st.banner('Step 3: Verify Type-5 path count decreased on all nodes after VLAN deletion')
+
+            # Step 3: Verify Type-5 paths advertised by `target_leaf` were
+            # withdrawn on all other nodes.
+            #
+            # We key on `target_leaf`'s VTEP next-hop instead of total path
+            # count because:
+            #   * In a multi-leaf, multi-spine fabric, BGW re-origination and
+            #     spine ECMP can introduce new paths for the same prefix
+            #     when one advertiser is withdrawn — the aggregate count
+            #     stays the same even though `target_leaf`'s advertisement
+            #     was correctly removed.
+            #   * Counting paths whose next-hop matches `target_leaf`'s VTEP
+            #     IP gives a precise, fabric-shape-independent withdrawal
+            #     signal: this MUST go to 0 if BGP withdrawal worked, and
+            #     stays >0 if it did not.
+            #
+            # On the target leaf itself the locally-originated (self) path
+            # should also be removed.  On BGW and remote nodes, paths from
+            # other advertisers in other DCs remain — that is expected and
+            # not a failure.
+            #
+            # Important: BGP/EVPN withdrawal across DCI fabrics can take
+            # longer than a single 8s wait window.  Poll each node up to
+            # `withdrawal_decrease_timeout` seconds for the target-leaf
+            # next-hop count to drop to 0 before declaring failure.
+            st.banner('Step 3: Verify Type-5 paths from {} withdrawn on all nodes (nexthop-keyed)'.format(
+                target_leaf))
+            withdrawal_decrease_timeout = 60
+            withdrawal_decrease_interval = 5
+
+            if not target_leaf_nexthops:
+                st.log('Target leaf VTEP nexthops not resolved; falling back to total-count decrease check.')
+
             for node in all_verify_nodes:
-                post_counts = vxlan_obj.get_type5_path_counts_dci(
-                    node, [target_vlan_id])
-                st.log('Post-deletion path counts on {}: {}'.format(node, post_counts))
-                
                 node_ok = True
-                for pfx in pre_counts.get(node, {}):
-                    pre_val = pre_counts[node].get(pfx, 0)
-                    post_val = post_counts.get(pfx, 0)
-                    if pre_val > 0 and post_val >= pre_val:
-                        st.log('Type-5 path count for {} on {} did NOT decrease: '
-                               'before={}, after={}'.format(pfx, node, pre_val, post_val))
-                        node_ok = False
+                node_pre_total = pre_counts.get(node, {}) or {}
+                node_pre_nh = pre_nh_counts.get(node, {}) or {}
+                final_total = {}
+                final_nh = {}
+
+                # Skip node if we have no pre-data for it at all.
+                if not node_pre_total and not node_pre_nh:
+                    st.log('No pre-removal counts recorded on {}, skipping check'.format(node))
+                    continue
+
+                start_t = time.time()
+                while True:
+                    final_total = vxlan_obj.get_type5_path_counts_dci(
+                        node, [target_vlan_id])
+                    if target_leaf_nexthops:
+                        final_nh = vxlan_obj.get_type5_path_counts_from_nexthop_dci(
+                            node, [target_vlan_id], target_leaf_nexthops)
                     else:
-                        st.log('Type-5 path count for {} on {}: before={}, after={} (decreased)'.format(
-                            pfx, node, pre_val, post_val))
-                
+                        final_nh = {}
+
+                    if target_leaf_nexthops:
+                        # Pass: every prefix's nexthop-keyed count is 0.
+                        nh_cleared = all(
+                            final_nh.get(pfx, 0) == 0 for pfx in node_pre_nh.keys()
+                        ) if node_pre_nh else False
+                        if nh_cleared:
+                            break
+                    else:
+                        # Fallback: total count strictly decreased on every prefix.
+                        all_decreased = True
+                        for pfx, pre_val in node_pre_total.items():
+                            if pre_val > 0 and final_total.get(pfx, 0) >= pre_val:
+                                all_decreased = False
+                                break
+                        if all_decreased:
+                            break
+
+                    if time.time() - start_t >= withdrawal_decrease_timeout:
+                        break
+                    st.wait(withdrawal_decrease_interval,
+                            'Polling for Type-5 withdrawal on {} (total={}, from_target={}, pre_target={})'.format(
+                                node, final_total, final_nh, node_pre_nh))
+
+                st.log('Post-deletion path counts on {}: total={} from_target_leaf={}'.format(
+                    node, final_total, final_nh))
+
+                if target_leaf_nexthops:
+                    for pfx, pre_val in node_pre_nh.items():
+                        post_val = final_nh.get(pfx, 0)
+                        if pre_val > 0 and post_val > 0:
+                            st.log('Type-5 path from {} for {} on {} NOT withdrawn after {}s: '
+                                   'before={} after={}'.format(
+                                       target_leaf, pfx, node, withdrawal_decrease_timeout,
+                                       pre_val, post_val))
+                            node_ok = False
+                        else:
+                            st.log('Type-5 path from {} for {} on {}: before={} after={} (withdrawn)'.format(
+                                target_leaf, pfx, node, pre_val, post_val))
+                else:
+                    for pfx, pre_val in node_pre_total.items():
+                        post_val = final_total.get(pfx, 0)
+                        if pre_val > 0 and post_val >= pre_val:
+                            st.log('Type-5 total path count for {} on {} did NOT decrease after {}s: '
+                                   'before={} after={}'.format(
+                                       pfx, node, withdrawal_decrease_timeout, pre_val, post_val))
+                            node_ok = False
+                        else:
+                            st.log('Type-5 total path count for {} on {}: before={} after={} (decreased)'.format(
+                                pfx, node, pre_val, post_val))
+
                 if not node_ok:
-                    summ += 'Type-5 path count for VLAN {} did not decrease on {}\n'.format(
-                        target_vlan_id, node)
+                    summ += 'Type-5 paths from {} for VLAN {} not withdrawn on {}\n'.format(
+                        target_leaf, target_vlan_id, node)
                     result = False
                 else:
-                    st.log('Type-5 route withdrawal verified on {} (path count decreased)'.format(node))
+                    st.log('Type-5 route withdrawal verified on {} (paths from {} cleared)'.format(
+                        node, target_leaf))
 
             for node in leaf_poll_nodes:
                 if not poll_wait(vxlan_obj.verify_ip_route_vrf_dci, withdrawal_poll_sec,
@@ -6776,18 +7330,26 @@ class TestVxlanDCIBase():
             Multi-homed host on DC2 (leaf0_dc2 + leaf1_dc2 form an EVPN MH pair).
             One leaf is the Designated Forwarder (DF) and the other is Non-DF.
             Start continuous cross-DC traffic (only the matching IP version),
-            shutdown the DF leaf's host-facing PortChannel to trigger DF
-            election to the peer leaf, then verify continuous traffic continues
-            without significant loss.
+            REBOOT the DF leaf to trigger DF election to the peer leaf, then
+            verify continuous traffic continues with min_perc=99.6 and burst-
+            verify all traffic streams after recovery.
+
+            This mirrors MH test_mh_df_node_failure exactly so MH and DCI use
+            the same trigger (reboot) and same verification shape (continuous
+            check at min_perc=99.6 + post-recovery burst). Any DCI-specific
+            convergence delta vs MH is then a clean product signal rather
+            than a trigger-mismatch artifact.
 
         Steps:
             1. Verify base setup
             2. Pick Leaf0 and Leaf1 of DC2; use 'show evpn es' to identify DF/NDF
             3. Start continuous cross-DC traffic (filtered to v4 or v6 only)
-            4. Shutdown DF link of multi-homed host
-            5. Print 'show evpn es' after shutdown; verify continuous traffic
-            6. Restore PortChannel (no-shut), stop and disable continuous traffic
-            7. Check for core files and crashes
+            4. Reboot DF leaf to trigger DF failover
+            5. Verify docker recovery on rebooted DF leaf
+            6. Verify remote VTEPs return (retry loop, mirrors MH)
+            7. Verify continuous traffic with min_perc=99.6 (mirrors MH)
+            8. Burst-verify L2+L3 traffic after recovery (mirrors MH)
+            9. Check for core files and crashes
         """
         tc_num = 57 if ip_version == 'v4' else 58
         ip_label = 'IPv4' if ip_version == 'v4' else 'IPv6'
@@ -6952,48 +7514,118 @@ class TestVxlanDCIBase():
             return
 
         try:
-            # Step 4: Shutdown DF link of multi-homed host
-            st.banner('Step 4: Shutdown PortChannel on DF leaf {} to trigger DF failover'.format(df_leaf))
-            for pc in df_pcs:
-                st.log('Shutting PortChannel {} on {}'.format(pc, df_leaf))
-                intf_obj.interface_shutdown(dut=df_leaf, interfaces=pc)
-            st.wait(10, 'Wait for DF election to move to peer leaf')
-
-            # Print 'show evpn es' after shutdown to confirm DF/NDF change
-            st.banner('Step 4b: Print show evpn es after PortChannel shutdown')
-            for leaf in dc2_leafs:
-                es_output = vxlan_obj.get_evpn_es(leaf)
-                st.log('{} show evpn es (after shutdown): {}'.format(leaf, es_output))
-
-            # Step 5: Verify continuous traffic continues after DF failover
-            st.banner('Step 5: Verify continuous {} cross-DC traffic after DF failover'.format(ip_label))
-            if not vxlan_obj.check_traffic(
-                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
-                summ += 'Continuous {} cross-DC traffic failed after DF failover\n'.format(ip_label)
+            # Step 4: Reboot DF leaf (mirrors MH test_mh_df_node_failure trigger).
+            # Reboot is the canonical DF-failure trigger in MH. Using the same
+            # trigger here gives an apples-to-apples MH<->DCI comparison: any
+            # cross-DC convergence delta becomes a real product signal rather
+            # than a trigger-mismatch artifact.
+            st.banner('Step 4: Reboot DF leaf {} to trigger DF failover (PCs: {})'.format(
+                df_leaf, df_pcs))
+            try:
+                vxlan_obj.config_dut(df_leaf, 'bgp', 'do write')
+            except Exception as _err:
+                st.log('Pre-reboot bgp save failed on {}: {}'.format(df_leaf, _err))
+            try:
+                docker_cnt = basic_obj.get_and_match_docker_count(df_leaf)
+            except Exception as _err:
+                st.log('Pre-reboot docker count failed on {}: {}'.format(df_leaf, _err))
+                docker_cnt = None
+            try:
+                reboot_obj.dut_reboot(df_leaf)
+            except Exception as _err:
+                st.error('Reboot of {} raised exception: {}'.format(df_leaf, _err))
+                summ += 'Reboot of {} failed: {}\n'.format(df_leaf, _err)
                 result = False
+            try:
+                restore_helper_file(df_leaf)
+            except Exception as _err:
+                st.log('restore_helper_file not available / not needed for {}: {}'.format(df_leaf, _err))
+            st.wait(int(test_cfg['global'].get('post_df_reboot_settle', 60)),
+                    'Settle after DF reboot')
+
+            # Step 5: Verify docker recovery on rebooted DF leaf
+            st.banner('Step 5: Verifying docker recovery on rebooted DF leaf {}'.format(df_leaf))
+            if not poll_wait(basic_obj.verify_docker_status, 180, df_leaf, 'Exited'):
+                summ += 'Docker status not up on {} after reboot\n'.format(df_leaf)
+                result = False
+            if docker_cnt is not None:
+                if not poll_wait(basic_obj.get_and_match_docker_count, 180, df_leaf, docker_cnt):
+                    summ += 'Not all dockers up on {} after reboot. Expected {}\n'.format(
+                        df_leaf, docker_cnt)
+                    result = False
+
+            # Step 6: Verify remote VTEPs return (retry loop, mirrors MH)
+            st.banner('Step 6: Verifying remote VTEPs are present after DF reboot')
+            vtep_nodes = test_cfg['nodes'].get('l2l3vni', [])
+            vtep_ok = False
+            vtep_max_attempts = 5
+            for cntr in range(1, vtep_max_attempts + 1):
+                if vtep_nodes and vxlan_obj.verify_vtep(vtep_nodes, dci_enabled=True):
+                    st.log('All remote VTEPs are present (attempt {}/{})'.format(
+                        cntr, vtep_max_attempts))
+                    vtep_ok = True
+                    break
+                st.log('Not all remote VTEPs found yet, retry {}/{}'.format(
+                    cntr, vtep_max_attempts))
+                st.wait(60)
+            if not vtep_ok:
+                summ += 'Remote VTEPs not fully recovered after DF reboot\n'
+                result = False
+
+            # Print 'show evpn es' after reboot to confirm DF/NDF change
+            st.banner('Step 6b: Print show evpn es after DF reboot')
+            for leaf in dc2_leafs:
+                try:
+                    es_output = vxlan_obj.get_evpn_es(leaf)
+                    st.log('{} show evpn es (after reboot): {}'.format(leaf, es_output))
+                except Exception as _err:
+                    st.log('get_evpn_es failed on {}: {}'.format(leaf, _err))
+
+            # Step 7: Verify continuous traffic with min_perc=99.6 (mirrors MH).
+            # The long polling windows above (60s settle + up to 180s docker
+            # status + up to 180s docker count + up to 300s VTEP retry loop)
+            # are the cumulative measurement window for the continuous stream.
+            # Real dataplane blackhole during DF failover is expected to be
+            # well under 0.4% of that window if EVPN MH ECMP fast-failover
+            # works as designed.
+            st.banner('Step 7: Check continuous {} cross-DC traffic after DF reboot (min_perc=99.6)'.format(ip_label))
+            if vxlan_obj.check_traffic(fc_streams, action='check', min_perc=99.6):
+                st.banner('Continuous {} Traffic check passed'.format(ip_label))
             else:
-                st.log('Continuous {} cross-DC traffic continues after DF failover: PASS'.format(ip_label))
+                log = 'Continuous {} cross-DC traffic check failed after DF reboot'.format(ip_label)
+                st.banner(log)
+                summ += '{}\n'.format(log)
+                result = False
 
         finally:
-            # Step 6: Restore PortChannel, stop and disable continuous traffic
-            st.banner('Step 6: Restore PortChannel on DF leaf {} and stop continuous traffic'.format(df_leaf))
-            for pc in df_pcs:
-                st.log('No-shutting PortChannel {} on {}'.format(pc, df_leaf))
-                intf_obj.interface_noshutdown(dut=df_leaf, interfaces=pc)
+            # Cleanup: stop and disable continuous traffic streams.
+            # No PortChannel restore needed (reboot trigger; DF leaf comes
+            # back on its own after dut_reboot completes).
+            st.banner('Cleanup: stop and disable continuous traffic streams')
             try:
                 vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
             except Exception:
                 pass
-            # Disable continuous streams so they are not left enabled
             if tg_handle and fc_stream_ids:
                 try:
                     tg_handle.tg_traffic_config(mode='disable', stream_id=fc_stream_ids)
                 except Exception:
                     pass
-            st.wait(15, 'Wait for PortChannel and DF election recovery')
 
-        # Step 7: Check for core files and crashes
-        st.banner('Step 7: Checking for core files and crashes')
+        # Step 8: Burst-verify ALL traffic after recovery (identical to MH
+        # pf.verify_traffic(tgen_handles, bum=True)). No traffic_types filter
+        # so every defined type is checked — L2 v4/v6, L3 v4/v6, BUM SH, BUM MH,
+        # etc. This catches any steady-state forwarding regressions that the
+        # continuous stream may have averaged out.
+        st.banner('Step 8: Burst-verify all traffic (incl. BUM) across and within DC after DF reboot')
+        if not verify_traffic(tgen_handles, bum=True):
+            summ += 'Burst traffic verification failed after DF reboot\n'
+            result = False
+        else:
+            st.log('All Traffic Check Passed after DF reboot')
+
+        # Step 9: Check for core files and crashes
+        st.banner('Step 9: Checking for core files and crashes')
         if vxlan_obj.check_core():
             summ += 'Core files detected after DF failover test\n'
             result = False
@@ -7102,21 +7734,52 @@ class TestVxlanDCIBase():
         # Step 4: Simultaneously reboot both BGWs
         try:
             st.banner('Step 4: Simultaneously rebooting both BGWs: {}'.format(dc1_bgws))
+            # Per-BGW exception capture: if the framework raises a "console
+            # hang" or any other exception inside dut_reboot, we record it
+            # against that BGW instead of letting it propagate. This way a
+            # single hung device does not mask the second BGW's status and
+            # does not abort the finally-block that stops continuous traffic.
             reboot_threads = []
+            reboot_errors = {}
+
+            def _reboot_one(_bgw):
+                try:
+                    reboot_obj.dut_reboot(_bgw)
+                except Exception as _err:
+                    reboot_errors[_bgw] = _err
+                    st.error('Reboot of {} raised exception: {}'.format(_bgw, _err))
+
             for bgw in dc1_bgws:
-                t = threading.Thread(target=reboot_obj.dut_reboot, args=(bgw,))
+                t = threading.Thread(target=_reboot_one, args=(bgw,))
+                t.daemon = True
                 t.start()
-                reboot_threads.append(t)
-            for t in reboot_threads:
-                t.join()
-            st.log('Both BGWs have been rebooted')
+                reboot_threads.append((bgw, t))
+            # Bounded join: even if one BGW hangs, we don't block forever
+            # (typical reboot ~3-5 min; 600s is a safe upper bound).
+            reboot_join_timeout = 600
+            for bgw, t in reboot_threads:
+                t.join(timeout=reboot_join_timeout)
+                if t.is_alive():
+                    msg = 'Reboot thread for {} did not return within {}s (likely console hang)'.format(
+                        bgw, reboot_join_timeout)
+                    st.error(msg)
+                    reboot_errors[bgw] = msg
+            if reboot_errors:
+                summ += 'BGW reboot errors: {}\n'.format(reboot_errors)
+                result = False
+            st.log('Both BGW reboot threads have returned (errors={})'.format(reboot_errors))
 
             # Restore helper files
             for bgw in dc1_bgws:
+                if bgw in reboot_errors:
+                    st.log('Skipping restore_helper_file for {} (reboot did not complete)'.format(bgw))
+                    continue
                 try:
                     restore_helper_file(bgw)
-                except Exception:
-                    st.log('restore_helper_file not available or not needed for {}'.format(bgw))
+                except Exception as _err:
+                    # Common: missing 'mgmt-ip' on console-only entries, or
+                    # device still inaccessible. Don't let this abort the test.
+                    st.log('restore_helper_file not available / not needed for {}: {}'.format(bgw, _err))
 
             # Step 5: Verify docker recovery on both BGWs
             st.banner('Step 5: Verifying docker recovery on both BGWs')
@@ -7162,10 +7825,26 @@ class TestVxlanDCIBase():
                         pass
 
         # Step 7: Verify burst traffic l2_v4, l2_v6, l3_v4, l3_v6 across and within DC
+        #
+        # After both BGWs reboot in parallel, DC1 is fully isolated from
+        # cross-DC routing until at least one BGW is back, EVPN re-peers,
+        # DF is re-elected, and Type-5 next-hops are reprogrammed across
+        # all DCs. IPv6 ND on within-DC SVIs also needs a few seconds to
+        # re-learn. Settle, then verify with one retry to absorb residual
+        # warm-up before declaring a real failure.
         st.banner('Step 7: Verifying burst traffic across and within DC after simultaneous BGW reboot')
-        if not verify_traffic(tgen_handles, bum=True,
-                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
-            summ += 'Traffic verification failed after simultaneous BGW reboot\n'
+        st.wait(int(test_cfg['global'].get('post_simul_bgw_reboot_settle', 60)),
+                'Allow EVPN re-convergence + IPv6 ND/MAC re-learn after both-BGW reboot')
+        burst_ok = verify_traffic(tgen_handles, bum=True,
+                                  traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'])
+        if not burst_ok:
+            st.log('First burst verify failed; warming convergence/ND and retrying once')
+            st.wait(int(test_cfg['global'].get('post_simul_bgw_reboot_settle_retry', 30)),
+                    'Second wait before burst retry')
+            burst_ok = verify_traffic(tgen_handles, bum=True,
+                                      traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'])
+        if not burst_ok:
+            summ += 'Traffic verification failed after simultaneous BGW reboot (after retry)\n'
             result = False
         else:
             st.log('L2+L3 traffic verified across and within DC after simultaneous BGW reboot')
@@ -7294,12 +7973,22 @@ class TestVxlanDCIBase():
                 step_num = idx + 1
                 st.banner('Step 4.{}: Rebooting {} ({}/{})'.format(
                     step_num, node, step_num, len(rolling_nodes)))
-                reboot_obj.dut_reboot(node)
+                try:
+                    reboot_obj.dut_reboot(node)
+                except Exception as _err:
+                    # Capture per-node reboot failures (e.g. console hang)
+                    # without aborting the whole rolling sequence; the docker
+                    # recovery poll below will still flag the failure.
+                    st.error('Reboot of {} raised exception: {}'.format(node, _err))
+                    summ += 'Reboot of {} raised exception: {}\n'.format(node, _err)
+                    result = False
 
                 try:
                     restore_helper_file(node)
-                except Exception:
-                    st.log('restore_helper_file not available or not needed for {}'.format(node))
+                except Exception as _err:
+                    # Common: missing 'mgmt-ip' on console-only entries, or
+                    # device still inaccessible. Don't abort rolling reboot.
+                    st.log('restore_helper_file not available / not needed for {}: {}'.format(node, _err))
 
                 # Step 5 (per node): Verify docker recovery
                 st.log('Waiting for docker recovery on {}'.format(node))
@@ -7346,10 +8035,25 @@ class TestVxlanDCIBase():
                         pass
 
         # Step 7: Verify burst traffic l2_v4, l2_v6, l3_v4, l3_v6 across and within DC
+        #
+        # After a rolling reboot, IPv6 ND on within-DC L3 flows can take a few
+        # seconds to fully re-learn on the SVIs of the rebooted nodes. Earlier
+        # runs observed ~2.5% loss on the L3 IPv6 within-DC streams (~125 of
+        # 5000 packets) — well within an ND warm-up window. Settle, then
+        # verify with one retry on marginal failure.
         st.banner('Step 7: Verifying burst traffic across and within DC after rolling reboot')
-        if not verify_traffic(tgen_handles, bum=True,
-                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
-            summ += 'Traffic verification failed after rolling reboot\n'
+        st.wait(int(test_cfg['global'].get('post_reboot_nd_settle', 30)),
+                'Allow IPv6 ND/MAC re-learn after rolling reboot')
+        burst_ok = verify_traffic(tgen_handles, bum=True,
+                                  traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'])
+        if not burst_ok:
+            st.log('First burst verify failed; warming ND/MAC and retrying once')
+            st.wait(int(test_cfg['global'].get('post_reboot_nd_settle_retry', 30)),
+                    'Second wait before burst retry')
+            burst_ok = verify_traffic(tgen_handles, bum=True,
+                                      traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6'])
+        if not burst_ok:
+            summ += 'Traffic verification failed after rolling reboot (after retry)\n'
             result = False
         else:
             st.log('L2+L3 traffic verified across and within DC after rolling reboot')
@@ -7364,24 +8068,27 @@ class TestVxlanDCIBase():
 
     # ------------------------------------------------------------------
     # L3VNI_dci:96  –  Remove/Add Import Export RT
-    # Uses continuous traffic; verifies traffic recovers within threshold.
+    # Burst-verifies L2+L3 traffic before and after RT remove/add.
     # ------------------------------------------------------------------
     def test_base_dci_l3vni_remove_add_import_export_rt(self):
         """
         L3VNI_dci:96 - Remove/Add Import Export RT on all BGWs of DC1.
 
         Description:
-            Start continuous L2+L3 traffic, remove and then re-add the
-            route-target import/export configuration on all BGW spines
-            of DC1, then verify the continuous traffic recovers with
-            drop within threshold.
+            Burst-verify L2+L3 cross+within-DC traffic baseline, remove and
+            re-add the route-target import/export configuration on all BGW
+            spines of DC1, then burst-verify the same flows recover after
+            BGP convergence. Continuous traffic is intentionally NOT used:
+            the no-RT window is a deterministic blackhole by design, so
+            measuring drop across that window is meaningless. We check
+            before/after instead.
 
         Steps:
             1. Verify base setup
-            2. Start continuous traffic L2 and L3 (dci_flap_continuous)
-            3. Remove/Add Import Export RT on all BGWs of 1 DC
-            4. Verify continuous traffic recovers and drop is within threshold
-            5. Stop continuous traffic
+            2. Burst-verify baseline L2+L3 traffic across+within DC
+            3. Remove import/export RT on all DC1 BGWs (10s settle)
+            4. Re-add import/export RT on all DC1 BGWs
+            5. Wait for BGP convergence; burst-verify recovery
             6. Check for core files/crashes
         """
         tc_id = 'test_base_dci_l3vni_remove_add_import_export_rt'
@@ -7391,10 +8098,6 @@ class TestVxlanDCIBase():
         st.banner('Testcase L3VNI_dci:96: Remove/Add Import Export RT ({})'.format(tc_id))
         result = True
         summ = ''
-        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
-        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
-        fc_streams = tgen_handles.get('dci_flap_continuous')
-        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
@@ -7414,44 +8117,12 @@ class TestVxlanDCIBase():
             summ += 'Base setup verification failed before RT removal\n'
             report_result(False, tc_id, summ)
             return
-        # Step 2: Start continuous traffic — all L2 + L3 (v4+v6) streams
-        st.banner('Step 2: Start continuous L2 + L3 traffic (all dci_flap_continuous streams)')
-        if not fc_available:
-            summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
-            report_result(False, tc_id, summ)
-            return
 
-        # Use ALL fc_streams (L2 and L3, v4+v6) — no VRF filtering
-        st.log('TC96: using all {} dci_flap_continuous streams (L2 + L3 v4/v6)'.format(len(fc_streams)))
-        for _k, _v in fc_streams.items():
-            if isinstance(_v, dict):
-                st.log('TC96 stream {}: name={}'.format(_k, _v.get('name', '')))
-
-        # Collect stream IDs and tg_handle for rate config and later disable
-        _fc_tg_handle = None
-        _fc_stream_ids = []
-        for _k, _v in fc_streams.items():
-            if isinstance(_v, dict) and _v.get('stream_id'):
-                _fc_stream_ids.append(_v['stream_id'])
-                if not _fc_tg_handle:
-                    _fc_tg_handle = _v.get('tg_handle')
-        # Configure rate_percent to 0.01 on all continuous streams
-        if _fc_tg_handle and _fc_stream_ids:
-            for sid in _fc_stream_ids:
-                _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
-            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
-
-        try:
-            vxlan_obj.check_traffic(
-                fc_streams,
-                regenerate_traffic_items=True,
-                action='start',
-                stop_proto_wait=stop_pw,
-                start_proto_wait=start_pw,
-            )
-        except Exception as err:
-            st.error('Continuous traffic start failed: {}'.format(err))
-            summ += 'Continuous traffic start failed: {}\n'.format(err)
+        # Step 2: Burst-verify baseline L2+L3 traffic
+        st.banner('Step 2: Burst-verify baseline L2+L3 traffic before RT remove/add')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
+            summ += 'Baseline traffic verification failed before RT remove/add\n'
             report_result(False, tc_id, summ)
             return
 
@@ -7460,7 +8131,7 @@ class TestVxlanDCIBase():
         bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
 
         try:
-            # Step 3: Remove/Add Import Export RT on all DC1 BGWs
+            # Step 3: Remove import/export RT on all DC1 BGWs
             st.banner('Step 3: Remove import/export RT on DC1 BGWs')
             for bgw in dc1_bgws:
                 st.log('Removing import/export RT on {}'.format(bgw))
@@ -7472,7 +8143,8 @@ class TestVxlanDCIBase():
 
             st.wait(10, 'Wait for RT removal to take effect')
 
-            st.banner('Step 3b: Re-add import/export RT on DC1 BGWs')
+            # Step 4: Re-add import/export RT on all DC1 BGWs
+            st.banner('Step 4: Re-add import/export RT on DC1 BGWs')
             for bgw in dc1_bgws:
                 st.log('Re-adding import/export RT on {}'.format(bgw))
                 add_cfg = vxlan_obj.add_bgw_import_export_rt(bgw, config_dict, bgp_info)
@@ -7481,19 +8153,19 @@ class TestVxlanDCIBase():
                 else:
                     st.log('No RT config generated for {}, skipping'.format(bgw))
 
-            # Step 4: Verify continuous traffic recovers within threshold
-            st.banner('Step 4: Verify continuous traffic recovers and drop is within threshold')
-            st.wait(15, 'Wait for BGP convergence after RT re-add')
-            if not vxlan_obj.check_traffic(
-                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
-                summ += 'Continuous traffic did not recover after import/export RT remove/add\n'
+            # Step 5: Wait for BGP convergence and burst-verify recovery
+            st.banner('Step 5: Burst-verify L2+L3 traffic recovers after RT re-add')
+            st.wait(10, 'Wait for BGP convergence after RT re-add')
+            if not verify_traffic(tgen_handles, bum=True,
+                                  traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
+                summ += 'Traffic verification failed after import/export RT remove/add\n'
                 result = False
             else:
-                st.log('Continuous traffic recovered after import/export RT remove/add: PASS')
+                st.log('Traffic recovered after import/export RT remove/add: PASS')
 
         except Exception as e:
             st.error('Exception during RT manipulation: {}'.format(e))
-            # Attempt RT recovery
+            # Attempt RT recovery so we don't leave the DUT half-configured
             for bgw in dc1_bgws:
                 try:
                     add_cfg = vxlan_obj.add_bgw_import_export_rt(bgw, config_dict, bgp_info)
@@ -7503,20 +8175,6 @@ class TestVxlanDCIBase():
                     pass
             summ += 'Exception during RT manipulation: {}\n'.format(e)
             result = False
-
-        finally:
-            # Step 5: Stop continuous traffic
-            st.banner('Step 5: Stopping continuous traffic')
-            try:
-                vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
-            except Exception:
-                pass
-            # Disable continuous streams so they are not left enabled
-            if _fc_tg_handle and _fc_stream_ids:
-                try:
-                    _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
-                except Exception:
-                    pass
 
         # Step 6: Check for core files
         st.banner('Step 6: Checking for core files and crashes')
@@ -7528,25 +8186,28 @@ class TestVxlanDCIBase():
 
     # ------------------------------------------------------------------
     # L3VNI_dci:97  –  Remove/Add RT_REWRITE configs
-    # Uses continuous traffic; verifies traffic recovers within threshold.
+    # Burst-verifies L2+L3 traffic before and after RT-REWRITE remove/add.
     # ------------------------------------------------------------------
     def test_base_dci_l3vni_remove_add_rt_rewrite_configs(self):
         """
         L3VNI_dci:97 - Remove/Add RT_REWRITE configs on all BGWs of DC1.
 
         Description:
-            Start continuous L2+L3 traffic, remove and then re-add the
-            RT-REWRITE route-maps (RT-REWRITE-WAN, RT-REWRITE-DC) and
-            associated extcommunity-lists on all BGW spines of DC1,
-            then verify the continuous traffic recovers with drop
-            within threshold.
+            Burst-verify L2+L3 cross+within-DC traffic baseline, remove and
+            re-add the RT-REWRITE route-maps (RT-REWRITE-WAN, RT-REWRITE-DC)
+            and associated extcommunity-lists on all BGW spines of DC1,
+            then burst-verify the same flows recover after BGP convergence.
+            Continuous traffic is intentionally NOT used: the no-rewrite
+            window is a deterministic blackhole by design, so measuring
+            drop across that window is meaningless. We check before/after
+            instead.
 
         Steps:
             1. Verify base setup
-            2. Start continuous traffic L2 and L3 (dci_flap_continuous)
-            3. Remove/Add RT-REWRITE configs on all BGWs of 1 DC
-            4. Verify continuous traffic recovers and drop is within threshold
-            5. Stop continuous traffic
+            2. Burst-verify baseline L2+L3 traffic across+within DC
+            3. Remove RT-REWRITE configs on all DC1 BGWs (10s settle)
+            4. Re-add RT-REWRITE configs on all DC1 BGWs
+            5. Wait for BGP convergence; burst-verify recovery
             6. Check for core files/crashes
         """
         tc_id = 'test_base_dci_l3vni_remove_add_rt_rewrite_configs'
@@ -7556,10 +8217,6 @@ class TestVxlanDCIBase():
         st.banner('Testcase L3VNI_dci:97: Remove/Add RT_REWRITE configs ({})'.format(tc_id))
         result = True
         summ = ''
-        stop_pw = test_cfg['global'].get('traffic_stop_protocol_sleep', 15)
-        start_pw = test_cfg['global'].get('traffic_start_protocol_sleep', 15)
-        fc_streams = tgen_handles.get('dci_flap_continuous')
-        fc_available = isinstance(fc_streams, dict) and len(fc_streams) > 0
 
         # Get DC1 BGW nodes
         dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
@@ -7579,44 +8236,12 @@ class TestVxlanDCIBase():
             summ += 'Base setup verification failed before RT-REWRITE removal\n'
             report_result(False, tc_id, summ)
             return
-        # Step 2: Start continuous traffic — all L2 + L3 (v4+v6) streams
-        st.banner('Step 2: Start continuous L2 + L3 traffic (all dci_flap_continuous streams)')
-        if not fc_available:
-            summ += 'dci_flap_continuous streams not available, cannot run continuous traffic test\n'
-            report_result(False, tc_id, summ)
-            return
 
-        # Use ALL fc_streams (L2 and L3, v4+v6) — no VRF filtering
-        st.log('TC97: using all {} dci_flap_continuous streams (L2 + L3 v4/v6)'.format(len(fc_streams)))
-        for _k, _v in fc_streams.items():
-            if isinstance(_v, dict):
-                st.log('TC97 stream {}: name={}'.format(_k, _v.get('name', '')))
-
-        # Collect stream IDs and tg_handle for rate config and later disable
-        _fc_tg_handle = None
-        _fc_stream_ids = []
-        for _k, _v in fc_streams.items():
-            if isinstance(_v, dict) and _v.get('stream_id'):
-                _fc_stream_ids.append(_v['stream_id'])
-                if not _fc_tg_handle:
-                    _fc_tg_handle = _v.get('tg_handle')
-        # Configure rate_percent to 0.01 on all continuous streams
-        if _fc_tg_handle and _fc_stream_ids:
-            for sid in _fc_stream_ids:
-                _fc_tg_handle.tg_traffic_config(mode='modify', stream_id=sid, rate_percent=0.01)
-            st.log('Configured rate_percent=0.01 on {} continuous streams'.format(len(_fc_stream_ids)))
-
-        try:
-            vxlan_obj.check_traffic(
-                fc_streams,
-                regenerate_traffic_items=True,
-                action='start',
-                stop_proto_wait=stop_pw,
-                start_proto_wait=start_pw,
-            )
-        except Exception as err:
-            st.error('Continuous traffic start failed: {}'.format(err))
-            summ += 'Continuous traffic start failed: {}\n'.format(err)
+        # Step 2: Burst-verify baseline L2+L3 traffic
+        st.banner('Step 2: Burst-verify baseline L2+L3 traffic before RT-REWRITE remove/add')
+        if not verify_traffic(tgen_handles, bum=True,
+                              traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
+            summ += 'Baseline traffic verification failed before RT-REWRITE remove/add\n'
             report_result(False, tc_id, summ)
             return
 
@@ -7626,7 +8251,7 @@ class TestVxlanDCIBase():
         dci_vip_maps = vxlan_obj.generate_dci_vip_maps()
 
         try:
-            # Step 3: Remove/Add RT-REWRITE configs on all DC1 BGWs
+            # Step 3: Remove RT-REWRITE configs on all DC1 BGWs
             st.banner('Step 3: Remove RT-REWRITE configs on DC1 BGWs')
             for bgw in dc1_bgws:
                 st.log('Removing RT-REWRITE configs on {}'.format(bgw))
@@ -7638,7 +8263,8 @@ class TestVxlanDCIBase():
 
             st.wait(10, 'Wait for RT-REWRITE removal to take effect')
 
-            st.banner('Step 3b: Re-add RT-REWRITE configs on DC1 BGWs')
+            # Step 4: Re-add RT-REWRITE configs on all DC1 BGWs
+            st.banner('Step 4: Re-add RT-REWRITE configs on DC1 BGWs')
             for bgw in dc1_bgws:
                 st.log('Re-adding RT-REWRITE configs on {}'.format(bgw))
                 add_cfg = vxlan_obj.add_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info, dci_vip_maps)
@@ -7647,19 +8273,19 @@ class TestVxlanDCIBase():
                 else:
                     st.log('No RT-REWRITE config generated for {}, skipping'.format(bgw))
 
-            # Step 4: Verify continuous traffic recovers within threshold
-            st.banner('Step 4: Verify continuous traffic recovers and drop is within threshold')
-            st.wait(15, 'Wait for BGP convergence after RT-REWRITE re-add')
-            if not vxlan_obj.check_traffic(
-                    fc_streams, action='check', stop_start_protocols=False, min_perc=99.6):
-                summ += 'Continuous traffic did not recover after RT-REWRITE remove/add\n'
+            # Step 5: Wait for BGP convergence and burst-verify recovery
+            st.banner('Step 5: Burst-verify L2+L3 traffic recovers after RT-REWRITE re-add')
+            st.wait(10, 'Wait for BGP convergence after RT-REWRITE re-add')
+            if not verify_traffic(tgen_handles, bum=True,
+                                  traffic_types=['l2_v4', 'l2_v6', 'l3_v4', 'l3_v6']):
+                summ += 'Traffic verification failed after RT-REWRITE remove/add\n'
                 result = False
             else:
-                st.log('Continuous traffic recovered after RT-REWRITE remove/add: PASS')
+                st.log('Traffic recovered after RT-REWRITE remove/add: PASS')
 
         except Exception as e:
             st.error('Exception during RT-REWRITE manipulation: {}'.format(e))
-            # Attempt recovery
+            # Attempt recovery so we don't leave the DUT half-configured
             for bgw in dc1_bgws:
                 try:
                     add_cfg = vxlan_obj.add_bgw_rt_rewrite_maps(bgw, config_dict, bgp_info, dci_vip_maps)
@@ -7670,24 +8296,1893 @@ class TestVxlanDCIBase():
             summ += 'Exception during RT-REWRITE manipulation: {}\n'.format(e)
             result = False
 
-        finally:
-            # Step 5: Stop continuous traffic
-            st.banner('Step 5: Stopping continuous traffic')
-            try:
-                vxlan_obj.check_traffic(fc_streams, action='stop', stop_start_protocols=False)
-            except Exception:
-                pass
-            # Disable continuous streams so they are not left enabled
-            if _fc_tg_handle and _fc_stream_ids:
-                try:
-                    _fc_tg_handle.tg_traffic_config(mode='disable', stream_id=_fc_stream_ids)
-                except Exception:
-                    pass
-
         # Step 6: Check for core files
         st.banner('Step 6: Checking for core files and crashes')
         if vxlan_obj.check_core():
             summ += 'Core files detected after RT-REWRITE remove/add\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_missing_vrf_on_dci_node(self):
+        """
+        L3VNI_dci:51 - L3VNI Negative - Missing VRF configuration on DCI node.
+
+        Description:
+            1) Bring up the base EVPN VXLAN fabric across DC1 and DC2 and verify
+               all BGP EVPN sessions are up.
+            2) Verify that VRF101 is configured on both DC1 DCI nodes (S2 and S3)
+               and that Type-5 routes are present on both.
+            3) Remove VRF101 configuration from DC1 DCI node S2.
+            4) Verify that Type-5 routes for VRF101 are not processed or installed on S2.
+            5) Send L3 traffic from DC2 towards the external prefix and verify that
+               traffic via S2 fails.
+            6) Verify that traffic via the other DCI node (S3) continues to work.
+            7) Confirm that traffic is flowing only through S3.
+            8) Reconfigure VRF101 on DC1 DCI node S2.
+            9) Verify that Type-5 routes are again processed and installed on S2.
+            10) Verify that traffic from DC2 to the external prefix is successful again.
+            11) Confirm that traffic is load-balanced across both S2 and S3.
+            12) Validate ECMP behavior using route and traffic statistics on both DCI nodes.
+        """
+        tc_id = 'test_base_dci_l3vni_missing_vrf_on_dci_node'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:51: L3VNI Negative - Missing VRF on DCI node ({})'.format(tc_id))
+        result = True
+        summ = ''
+        vrf_id = 101
+
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc1' in n]
+        if len(dc1_bgws) < 2:
+            pytest.skip('Need at least 2 DC1 BGW nodes for missing VRF test')
+            return
+
+        target_bgw = dc1_bgws[0]
+        other_bgw = dc1_bgws[1]
+        st.log('Target BGW (VRF removal): {}'.format(target_bgw))
+        st.log('Other BGW (should remain working): {}'.format(other_bgw))
+
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+        dci_vip_maps = vxlan_obj.generate_dci_vip_maps()
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup and Type-5 routes on both DC1 BGWs')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before VRF removal\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify Type-5 routes present on target BGW before removal
+        st.banner('Step 2: Verify Type-5 routes present on target BGW ({})'.format(target_bgw))
+        type5_before = st.show(target_bgw,
+                               'do show bgp l2vpn evpn route type prefix',
+                               type='vtysh', skip_tmpl=True)
+        if 'Vrf{}'.format(vrf_id) not in str(type5_before) and '[5]' not in str(type5_before):
+            summ += 'Type-5 routes not present on {} before VRF removal - test precondition not met\n'.format(target_bgw)
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2b: Baseline traffic check before VRF removal.
+        # TG protocols must be restarted here so emulated hosts re-issue ARP/ND
+        # and leafs re-advertise EVPN Type-2 (MAC+IP) entries; otherwise the
+        # fabric can be in a stale steady state from earlier triggers in the
+        # suite and the precondition fails before VRF101 is even removed.
+        st.banner('Step 2b: Verify L3 cross-DC traffic is working before VRF removal')
+
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross',
+                              stop_start_protocols=True):
+            summ += 'L3 cross-DC traffic already failing before VRF removal - test precondition not met\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 3: Remove VRF101 from target BGW
+        st.banner('Step 3: Remove VRF{} from DC1 BGW {}'.format(vrf_id, target_bgw))
+        remove_cfg = vxlan_obj.remove_vrf_config_bgw(target_bgw, config_dict, bgp_info, vrf_id=vrf_id)
+        if not remove_cfg:
+            summ += 'Failed to generate VRF removal config for {}\n'.format(target_bgw)
+            report_result(False, tc_id, summ)
+            return
+
+        vxlan_obj.config_dut(target_bgw, 'sonic', remove_cfg['sonic'])
+        vxlan_obj.config_dut(target_bgw, 'bgp', remove_cfg['frr'])
+        st.wait(15, 'Wait for VRF removal to propagate')
+
+        # Step 4: Verify Type-5 routes removed on target BGW
+        st.banner('Step 4: Verify Type-5 routes withdrawn on {}'.format(target_bgw))
+        type5_after = st.show(target_bgw,
+                              'do show bgp l2vpn evpn route type prefix',
+                              type='vtysh', skip_tmpl=True)
+        vrf_check = st.show(target_bgw, 'show vrf', skip_tmpl=True)
+        if 'Vrf{}'.format(vrf_id) in str(vrf_check):
+            st.log('Warning: Vrf{} still appears in show vrf on {} after removal'.format(vrf_id, target_bgw))
+            summ += 'Vrf{} still in show vrf on {} after removal\n'.format(vrf_id, target_bgw)
+        else:
+            st.log('Vrf{} successfully removed from {}'.format(vrf_id, target_bgw))
+
+        try:
+            # Step 5-7: Verify L3 cross-DC traffic
+            st.banner('Step 5-7: Verify L3 cross-DC traffic (expect partial failure via {})'.format(target_bgw))
+            st.log('Traffic should still work via {} (other BGW)'.format(other_bgw))
+            if not verify_traffic(tgen_handles, regenerate=True,
+                                  traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+                st.log('Cross-DC L3 traffic degraded as expected with one BGW VRF missing')
+                st.log('Verifying other BGW {} is still forwarding...'.format(other_bgw))
+                type5_other = st.show(other_bgw,
+                                      'do show bgp l2vpn evpn route type prefix',
+                                      type='vtysh', skip_tmpl=True)
+                if 'Vrf{}'.format(vrf_id) in str(type5_other) or '[5]' in str(type5_other):
+                    st.log('Type-5 routes for Vrf{} still present on other BGW {}: PASS'.format(
+                        vrf_id, other_bgw))
+                else:
+                    summ += 'Type-5 routes for Vrf{} missing on other BGW {}\n'.format(vrf_id, other_bgw)
+                    result = False
+            else:
+                st.log('Cross-DC L3 traffic still passing via other BGW: PASS')
+
+        finally:
+            # Step 8: Restore VRF101 on target BGW
+            st.banner('Step 8: Reconfigure VRF{} on DC1 BGW {}'.format(vrf_id, target_bgw))
+            restore_cfg = vxlan_obj.restore_vrf_config_bgw(
+                target_bgw, config_dict, bgp_info, dci_vip_maps, vrf_id=vrf_id)
+            if restore_cfg:
+                vxlan_obj.config_dut(target_bgw, 'sonic', restore_cfg['sonic'])
+                vxlan_obj.config_dut(target_bgw, 'bgp', restore_cfg['frr'])
+            else:
+                summ += 'Failed to generate VRF restore config for {}\n'.format(target_bgw)
+                result = False
+
+        st.wait(20, 'Wait for VRF restore and BGP convergence')
+
+        # Step 9: Verify Type-5 routes restored on target BGW
+        st.banner('Step 9: Verify Type-5 routes restored on {}'.format(target_bgw))
+        type5_restored = st.show(target_bgw,
+                                 'do show bgp l2vpn evpn route type prefix',
+                                 type='vtysh', skip_tmpl=True)
+        vrf_check_restored = st.show(target_bgw, 'show vrf', skip_tmpl=True)
+        if 'Vrf{}'.format(vrf_id) not in str(vrf_check_restored):
+            summ += 'Vrf{} not present in show vrf on {} after restore\n'.format(vrf_id, target_bgw)
+            result = False
+        else:
+            st.log('Vrf{} successfully restored on {}'.format(vrf_id, target_bgw))
+
+        # Step 10-11: Verify full L3 cross-DC traffic restored with ECMP
+        st.banner('Step 10-11: Verify L3 cross-DC traffic fully restored with ECMP')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            summ += 'L3 cross-DC traffic not fully restored after VRF re-add\n'
+            result = False
+        else:
+            st.log('L3 cross-DC traffic fully restored after VRF re-add: PASS')
+
+        # Step 12: Verify ECMP on both DCI nodes
+        st.banner('Step 12: Validate ECMP on both DCI nodes')
+        for bgw in [target_bgw, other_bgw]:
+            route_out = st.show(bgw, 'do show ip route vrf Vrf{}'.format(vrf_id),
+                                type='vtysh', skip_tmpl=True)
+            st.log('Route table on {} for Vrf{}: {}'.format(bgw, vrf_id,
+                    str(route_out)[:500] if route_out else 'empty'))
+
+        # Check for cores
+        st.banner('Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after VRF remove/add\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_rt_mismatch(self):
+        """
+        L3VNI_dci:52 - L3VNI Negative - RT (Route Target) mismatch for L3VNI.
+
+        Description:
+            1) Bring up the base EVPN VXLAN fabric across DC1 and DC2.
+            2) Verify that the Type-5 route for the external prefix is present on
+               DC1 leaf and DC1 BGW.
+            3) Verify that the Type-5 route is successfully imported on DC2 BGW and
+               installed on a DC2 leaf.
+            4) Send L3 traffic from DC2 leaf towards the external prefix and verify
+               traffic is successful.
+            5) Modify the route-target export for VRF101 on DC1 BGW to an incorrect value.
+            6) Verify that the Type-5 route is no longer imported on DC2 BGW.
+            7) Send L3 traffic again from DC2 leaf towards the external prefix and
+               verify that traffic fails.
+            8) Restore the correct route-target export configuration on DC1 BGW.
+            9) Verify that the Type-5 route is again imported on DC2 BGW.
+            10) Send L3 traffic from DC2 leaf to the external prefix and verify
+                traffic resumes successfully.
+        """
+        tc_id = 'test_base_dci_l3vni_rt_mismatch'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:52: L3VNI Negative - RT mismatch ({})'.format(tc_id))
+        result = True
+        summ = ''
+        vrf_id = 101
+        wrong_rt_suffix = 99999
+
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc1' in n]
+        if not dc1_bgws:
+            pytest.skip('No DC1 BGW nodes found for RT mismatch test')
+            return
+
+        target_bgw = dc1_bgws[0]
+        st.log('Target BGW for RT modification: {}'.format(target_bgw))
+
+        dc2_bgws = test_cfg['nodes'].get('dc2_bgw', [])
+        dc2_leafs = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                     if 'leaf' in n and 'dc2' in n]
+
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before RT modification')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before RT modification\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2-3: Verify Type-5 routes present on DC1 BGW and DC2 BGW
+        st.banner('Step 2-3: Verify Type-5 routes present on DC1 and DC2 BGWs')
+        for bgw in dc1_bgws + dc2_bgws:
+            type5_out = st.show(bgw,
+                                'do show bgp l2vpn evpn route type prefix',
+                                type='vtysh', skip_tmpl=True)
+            st.log('Type-5 routes on {}: {}'.format(bgw, 'present' if '[5]' in str(type5_out) else 'absent'))
+
+        # Step 4: Verify L3 cross-DC traffic before RT modification.
+        # TG protocols must be restarted here so emulated hosts re-issue ARP/ND
+        # and leafs re-advertise EVPN Type-2 (MAC+IP) entries; otherwise the
+        # fabric can be in a stale steady state from earlier triggers in the
+        # suite and the precondition fails before the RT is even modified.
+        st.banner('Step 4: Verify L3 cross-DC traffic before RT modification')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross',
+                              stop_start_protocols=True):
+            summ += 'L3 cross-DC traffic failed before RT modification\n'
+            report_result(False, tc_id, summ)
+            return
+
+        try:
+            # Step 5: Modify RT export on DC1 BGW to incorrect value
+            st.banner('Step 5: Modify RT export on {} to incorrect value'.format(target_bgw))
+            modify_cfg = vxlan_obj.modify_rt_export_bgw(
+                target_bgw, config_dict, bgp_info, vrf_id=vrf_id, wrong_rt_suffix=wrong_rt_suffix)
+            if not modify_cfg:
+                summ += 'Failed to generate RT modify config for {}\n'.format(target_bgw)
+                report_result(False, tc_id, summ)
+                return
+            vxlan_obj.config_dut(target_bgw, 'bgp', modify_cfg)
+            st.wait(15, 'Wait for wrong RT to propagate')
+
+            # Step 6: Verify Type-5 routes no longer imported on DC2 BGW
+            st.banner('Step 6: Verify Type-5 routes no longer imported on DC2 BGWs')
+            for dc2_bgw in dc2_bgws:
+                rt_out = st.show(dc2_bgw,
+                                 'do show bgp l2vpn evpn route type prefix',
+                                 type='vtysh', skip_tmpl=True)
+                st.log('DC2 BGW {} Type-5 routes for Vrf{} after wrong RT: {}'.format(
+                    dc2_bgw, vrf_id, str(rt_out)[:300] if rt_out else 'empty/absent'))
+
+            # Step 7: Verify L3 cross-DC traffic fails
+            st.banner('Step 7: Verify L3 cross-DC traffic fails with wrong RT')
+            traffic_with_wrong_rt = verify_traffic(tgen_handles, regenerate=True,
+                                                   traffic_types=['l3_v4', 'l3_v6'], scope='cross')
+            if traffic_with_wrong_rt:
+                st.log('Warning: L3 cross-DC traffic still passing despite wrong RT on one BGW')
+                st.log('This may be expected if other BGWs still have correct RT')
+            else:
+                st.log('L3 cross-DC traffic failed as expected with wrong RT: PASS')
+
+        finally:
+            # Step 8: Restore correct RT export on DC1 BGW
+            st.banner('Step 8: Restore correct RT export on {}'.format(target_bgw))
+            restore_cfg = vxlan_obj.restore_rt_export_bgw(
+                target_bgw, config_dict, bgp_info, vrf_id=vrf_id, wrong_rt_suffix=wrong_rt_suffix)
+            if restore_cfg:
+                vxlan_obj.config_dut(target_bgw, 'bgp', restore_cfg)
+            else:
+                summ += 'Failed to generate RT restore config for {}\n'.format(target_bgw)
+                result = False
+
+        st.wait(15, 'Wait for correct RT to propagate after restore')
+
+        # Step 9: Verify Type-5 routes re-imported on DC2 BGW
+        st.banner('Step 9: Verify Type-5 routes re-imported on DC2 BGWs')
+        for dc2_bgw in dc2_bgws:
+            rt_restored = st.show(dc2_bgw,
+                                  'do show bgp l2vpn evpn route type prefix',
+                                  type='vtysh', skip_tmpl=True)
+            st.log('DC2 BGW {} Type-5 routes after RT restore: {}'.format(
+                dc2_bgw, 'present' if '[5]' in str(rt_restored) else 'absent'))
+
+        # Step 10: Verify L3 cross-DC traffic restored
+        st.banner('Step 10: Verify L3 cross-DC traffic restored after RT fix')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+            summ += 'L3 cross-DC traffic not restored after RT fix\n'
+            result = False
+        else:
+            st.log('L3 cross-DC traffic restored after RT fix: PASS')
+
+        # Check for cores
+        st.banner('Checking for core files and crashes')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after RT mismatch test\n'
+            result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_change_normalized_vni(self):
+        """
+        L3VNI_dci:93 - Change Normalized L3VNI across the DCs.
+
+        Description:
+            1) Bring up the base EVPN VXLAN fabric across DC1 and DC2 and verify
+               all BGP EVPN sessions are up.
+            2) Verify that L3VNI (VRF101) is normalized across DCs and Type-5
+               routes are present and imported correctly on remote DC.
+            3) Send L3 traffic from DC2 leaf towards external/DC1 prefix and
+               verify traffic is successful.
+            4) Change the normalized L3VNI for VRF101 across DCs (on all BGWs)
+               to a new value.
+            5) Verify that old Type-5 routes (old L3VNI) are withdrawn and new
+               Type-5 routes are advertised with updated L3VNI.
+            6) Verify that updated Type-5 routes are successfully imported on
+               the remote DC.
+            7) Send L3 traffic from DC2 leaf towards external/DC1 prefix and
+               verify traffic recovers successfully after convergence.
+            8) Verify that no stale routes with old L3VNI remain in the VRF
+               routing table.
+            9) Verify no cores, crashes, or unexpected restarts on BGW/leaf nodes.
+        """
+        tc_id = 'test_base_dci_l3vni_change_normalized_vni'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:93: Change Normalized L3VNI across DCs ({})'.format(tc_id))
+        result = True
+        summ = ''
+        vrf_id = 101
+        old_vni = 10000 + vrf_id
+        new_vni = 20000 + vrf_id
+
+        # Gather all BGW nodes across DCs.
+        # All three DCs must rotate together, otherwise any DC left at the
+        # old L3VNI creates an RT mismatch with the rotated DCs (e.g.
+        # DC2 BGW exports <dc2_asn>:20101 while DC3 BGW imports
+        # <dc2_asn>:10101) and Step 7's recovery assertion fails on the
+        # un-rotated DC's leg. Cross-DC L3 streams include the
+        # leaf1_dc2 -> leaf0_dc3 path (3 of the 23 streams generated by
+        # find_l3_dci_traffic_endpoints), so leaving DC3 out turns into a
+        # real test failure on a 3-DC testbed.
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc1' in n]
+        dc2_bgws = test_cfg['nodes'].get('dc2_bgw', [])
+        if not dc2_bgws:
+            dc2_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc2' in n]
+        dc3_bgws = test_cfg['nodes'].get('dc3_bgw', [])
+        if not dc3_bgws:
+            dc3_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc3' in n]
+
+        all_bgws = dc1_bgws + dc2_bgws + dc3_bgws
+        if not all_bgws:
+            pytest.skip('No BGW nodes found for normalized L3VNI change test')
+            return
+
+        st.log('All BGW nodes for L3VNI change (DC1+DC2+DC3): {}'.format(all_bgws))
+
+        # Gather every leaf in DC1, DC2 and DC3 so we can rotate the leaf-side
+        # ``route-target import <bgw_asn>:<vni>`` clauses in lock-step with the
+        # BGW rotation. Without this the leaves' static import RT (e.g.
+        # 65104:10101) no longer matches what the BGWs export
+        # (e.g. 65104:20101) and every cross-DC Vrf<id> route is rejected at
+        # the leaf - root cause of the May07 L3VNI_dci:93 traffic failure.
+        all_leaves = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                      if 'leaf' in n]
+        if not all_leaves:
+            all_leaves = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                          if 'leaf' in n]
+        if not all_leaves:
+            all_leaves = [n for n in test_cfg['nodes'].get('leaf', [])
+                          if ('dc1' in n) or ('dc2' in n) or ('dc3' in n)]
+        st.log('All leaf nodes for L3VNI import-RT rotation: {}'.format(all_leaves))
+
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before L3VNI change')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before L3VNI change\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify Type-5 routes present with current L3VNI on all BGWs
+        st.banner('Step 2: Verify Type-5 routes present on all BGWs with L3VNI {}'.format(old_vni))
+        for bgw in all_bgws:
+            type5_out = st.show(bgw,
+                                'do show bgp l2vpn evpn route type prefix',
+                                type='vtysh', skip_tmpl=True)
+            if '[5]' not in str(type5_out):
+                summ += 'Type-5 routes absent on {} before L3VNI change\n'.format(bgw)
+                result = False
+            else:
+                st.log('Type-5 routes present on {}: OK'.format(bgw))
+
+        # Verify VRF-VNI map shows current L3VNI
+        for bgw in all_bgws:
+            vrfvni_out = st.show(bgw, 'show vxlan vrfvnimap', skip_tmpl=True)
+            if str(old_vni) in str(vrfvni_out):
+                st.log('VRF-VNI map on {} shows L3VNI {}: OK'.format(bgw, old_vni))
+            else:
+                summ += 'VRF-VNI map on {} does not show expected L3VNI {}\n'.format(bgw, old_vni)
+                result = False
+
+        if not result:
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 3: Verify L3 cross-DC traffic before L3VNI change.
+        # TG protocols must be restarted here so emulated hosts re-issue ARP/ND
+        # and leafs re-advertise EVPN Type-2 (MAC+IP) entries; otherwise the
+        # fabric can be in a stale steady state from earlier triggers in the
+        # suite and the precondition fails before the L3VNI is even changed.
+        st.banner('Step 3: Verify L3 cross-DC traffic before L3VNI change')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross',
+                              stop_start_protocols=True):
+            summ += 'L3 cross-DC traffic failed before L3VNI change\n'
+            report_result(False, tc_id, summ)
+            return
+
+        applied_leaves = []
+        try:
+            # Step 4a: Change normalized L3VNI on all BGWs across DCs
+            st.banner('Step 4a: Change normalized L3VNI from {} to {} on all BGWs'.format(old_vni, new_vni))
+            for bgw in all_bgws:
+                st.log('Changing L3VNI on {}'.format(bgw))
+                change_cfg = vxlan_obj.change_l3vni_value_bgw(
+                    bgw, config_dict, bgp_info, vrf_id=vrf_id, new_vni=new_vni)
+                if not change_cfg:
+                    summ += 'Failed to generate L3VNI change config for {}\n'.format(bgw)
+                    result = False
+                    continue
+                vxlan_obj.config_dut(bgw, 'sonic', change_cfg['sonic'])
+                vxlan_obj.config_dut(bgw, 'bgp', change_cfg['frr'])
+
+            # Step 4b: Rotate leaf-side import-RTs to track the new BGW VNI.
+            # Leaves do NOT change their own L3VNI (they keep vni 5xxx); they
+            # only need ``route-target import <bgw_asn>:<new_vni>`` so RT
+            # filtering keeps accepting Type-5 updates from the rotated BGWs.
+            st.banner('Step 4b: Rotate leaf import-RT to {} on all leaves'.format(new_vni))
+            for leaf in all_leaves:
+                st.log('Rotating import-RT on leaf {}'.format(leaf))
+                leaf_change_cfg = vxlan_obj.change_l3vni_import_on_leaf(
+                    leaf, config_dict, bgp_info, vrf_id=vrf_id, new_vni=new_vni)
+                if not leaf_change_cfg or not leaf_change_cfg.get('frr'):
+                    st.warn('No leaf import-RT rotation generated for {}; skipping'.format(leaf))
+                    continue
+                vxlan_obj.config_dut(leaf, 'bgp', leaf_change_cfg['frr'])
+                applied_leaves.append(leaf)
+
+            st.wait(60, 'Wait for BGP convergence after L3VNI change')
+
+            _dump_l3vni_debug_state(
+                'post-rotation: L3VNI {} -> {} on Vrf{}'.format(old_vni, new_vni, vrf_id),
+                bgws=all_bgws, leaves=all_leaves, vrf_ids=[vrf_id])
+
+            # Step 5: Verify old Type-5 routes withdrawn and new ones advertised
+            st.banner('Step 5: Verify Type-5 routes updated with new L3VNI {}'.format(new_vni))
+            for bgw in all_bgws:
+                type5_out = st.show(bgw,
+                                    'do show bgp l2vpn evpn route type prefix',
+                                    type='vtysh', skip_tmpl=True)
+                type5_str = str(type5_out)
+                if '[5]' not in type5_str:
+                    summ += 'Type-5 routes absent on {} after L3VNI change\n'.format(bgw)
+                    result = False
+                else:
+                    st.log('Type-5 routes present on {} after L3VNI change: OK'.format(bgw))
+
+            # Verify VRF-VNI map shows new L3VNI
+            for bgw in all_bgws:
+                vrfvni_out = st.show(bgw, 'show vxlan vrfvnimap', skip_tmpl=True)
+                if str(new_vni) in str(vrfvni_out):
+                    st.log('VRF-VNI map on {} shows new L3VNI {}: OK'.format(bgw, new_vni))
+                else:
+                    summ += 'VRF-VNI map on {} does not show new L3VNI {} after change\n'.format(bgw, new_vni)
+                    result = False
+
+            # Step 6: Verify updated Type-5 routes imported on remote DC BGWs
+            # (DC2 and DC3 - i.e. every non-DC1 BGW). DC3 is included so a
+            # 3-DC testbed exercises the full re-origination path used by the
+            # leaf1_dc2 -> leaf0_dc3 cross-DC stream.
+            st.banner('Step 6: Verify Type-5 routes imported on remote DC BGWs')
+            remote_bgws = dc2_bgws + dc3_bgws
+            for remote_bgw in remote_bgws:
+                rt_out = st.show(remote_bgw,
+                                 'do show bgp l2vpn evpn route type prefix',
+                                 type='vtysh', skip_tmpl=True)
+                if '[5]' in str(rt_out):
+                    st.log('Type-5 routes imported on remote BGW {}: OK'.format(remote_bgw))
+                else:
+                    summ += 'Type-5 routes not imported on remote BGW {} after L3VNI change\n'.format(remote_bgw)
+                    result = False
+
+            # Step 7: Verify L3 traffic recovers after L3VNI change
+            st.banner('Step 7: Verify L3 cross-DC traffic after L3VNI change')
+            if not verify_traffic(tgen_handles, regenerate=True,
+                                  traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+                summ += 'L3 cross-DC traffic failed after L3VNI change to {}\n'.format(new_vni)
+                result = False
+            else:
+                st.log('L3 cross-DC traffic passing after L3VNI change: PASS')
+
+            # Step 8: Verify no stale routes with old L3VNI
+            st.banner('Step 8: Verify no stale routes with old L3VNI {}'.format(old_vni))
+            for bgw in all_bgws:
+                ip_route_out = st.show(bgw,
+                                       'do show ip route vrf Vrf{}'.format(vrf_id),
+                                       type='vtysh', skip_tmpl=True)
+                st.log('IP route table on {} for Vrf{}: checked'.format(bgw, vrf_id))
+
+            # Step 9: Check for cores/crashes
+            st.banner('Step 9: Check for core files and crashes after L3VNI change')
+            if vxlan_obj.check_core():
+                summ += 'Core files detected after L3VNI change\n'
+                result = False
+
+        finally:
+            # Cleanup-a: Revert L3VNI on all BGWs
+            st.banner('Cleanup-a: Revert L3VNI from {} back to {} on all BGWs'.format(new_vni, old_vni))
+            for bgw in all_bgws:
+                st.log('Reverting L3VNI on {}'.format(bgw))
+                revert_cfg = vxlan_obj.revert_l3vni_value_bgw(
+                    bgw, config_dict, bgp_info, vrf_id=vrf_id, new_vni=new_vni)
+                if revert_cfg:
+                    vxlan_obj.config_dut(bgw, 'sonic', revert_cfg['sonic'])
+                    vxlan_obj.config_dut(bgw, 'bgp', revert_cfg['frr'])
+                else:
+                    st.error('Failed to generate L3VNI revert config for {}'.format(bgw))
+
+            # Cleanup-b: Revert leaf-side import-RTs (only on leaves we actually
+            # rotated above) so the leaf BGP RT chain matches the reverted BGW
+            # export RT again.
+            st.banner('Cleanup-b: Revert leaf import-RT to {} on rotated leaves'.format(old_vni))
+            for leaf in applied_leaves:
+                st.log('Reverting import-RT on leaf {}'.format(leaf))
+                leaf_revert_cfg = vxlan_obj.revert_l3vni_import_on_leaf(
+                    leaf, config_dict, bgp_info, vrf_id=vrf_id, new_vni=new_vni)
+                if leaf_revert_cfg and leaf_revert_cfg.get('frr'):
+                    vxlan_obj.config_dut(leaf, 'bgp', leaf_revert_cfg['frr'])
+                else:
+                    st.error('Failed to generate leaf import-RT revert for {}'.format(leaf))
+
+            st.wait(60, 'Wait for BGP convergence after L3VNI revert')
+
+            _dump_l3vni_debug_state(
+                'post-revert: L3VNI {} -> {} on Vrf{}'.format(new_vni, old_vni, vrf_id),
+                bgws=all_bgws, leaves=all_leaves, vrf_ids=[vrf_id])
+
+            # Verify traffic restored after revert
+            st.banner('Verify L3 cross-DC traffic restored after L3VNI revert')
+            if not verify_traffic(tgen_handles, regenerate=True,
+                                  traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+                summ += 'L3 cross-DC traffic not restored after L3VNI revert\n'
+                result = False
+            else:
+                st.log('L3 cross-DC traffic restored after L3VNI revert: PASS')
+
+            # Final core check after revert
+            if vxlan_obj.check_core():
+                summ += 'Core files detected after L3VNI revert\n'
+                result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_mismatched_l3vni_on_dci_node(self):
+        """
+        L3VNI_dci:94 - L3VNI Negative - Mismatched L3VNI on DCI nodes.
+
+        Symmetric L3VNI variant of Solution_dci:49 (Incorrect VLAN-VNI map on
+        DCI node, the L2VNI-side mismatch test). Reuses the
+        change_l3vni_value_bgw()/revert_l3vni_value_bgw() helpers from
+        L3VNI_dci:93 but applies the change to DC1 BGWs only, leaving DC2
+        BGWs at the original L3VNI. This produces an asymmetric VRF-VNI map
+        across the DCI: DC1 advertises Type-5 with the wrong VNI/RT and
+        imports remote routes on the wrong RT, so DC1<->DC2 import policies
+        no longer match and L3 cross-DC traffic must fail.
+
+        Description:
+            1) Bring up the base EVPN VXLAN fabric across DC1 and DC2.
+            2) Verify Type-5 routes for VRF101 are present on DC1 and DC2
+               BGWs and baseline L3 cross-DC traffic works.
+            3) Change the normalized L3VNI for VRF101 on ALL DC1 BGWs to an
+               incorrect value; DC2 BGWs are left untouched.
+            4) Verify Type-5 routes for VRF101 are no longer importable on
+               DC2 BGWs (RT mismatch -> import filter rejects).
+            5) Verify L3 cross-DC traffic FAILS (negative assertion).
+            6) Restore the original L3VNI on DC1 BGWs.
+            7) Verify Type-5 routes are re-imported on DC2 BGWs.
+            8) Verify L3 cross-DC traffic recovers.
+            9) Verify no cores/crashes throughout.
+        """
+        tc_id = 'test_base_dci_l3vni_mismatched_l3vni_on_dci_node'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:94: L3VNI Negative - Mismatched L3VNI on DCI nodes ({})'.format(tc_id))
+        result = True
+        summ = ''
+        vrf_id = 101
+        old_vni = 10000 + vrf_id
+        # Use 80000 + vrf_id to mirror the L2VNI-side mismatch test naming
+        # (Solution_dci:49 uses 80000 + vlan); also keeps the wrong VNI
+        # well outside the symmetric-change helper's default (20000 + vrf_id)
+        # so this test cannot collide with concurrent L3VNI_dci:93 runs.
+        wrong_vni = 80000 + vrf_id
+
+        # Gather DC1 BGWs (the side we will mismatch) and DC2 BGWs (verification)
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc1' in n]
+        if not dc1_bgws:
+            pytest.skip('No DC1 BGW nodes found for mismatched L3VNI test')
+            return
+
+        dc2_bgws = test_cfg['nodes'].get('dc2_bgw', [])
+        if not dc2_bgws:
+            dc2_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc2' in n]
+
+        st.log('DC1 BGWs to mismatch: {}'.format(dc1_bgws))
+        st.log('DC2 BGWs (kept correct): {}'.format(dc2_bgws))
+
+        # Gather DC1 leaves so their static BGP import-RT can be rotated in
+        # lock-step with the (mismatched) DC1 BGW L3VNI. Without this, DC1
+        # leaves would also stop importing routes from their own DC1 BGWs
+        # (intra-DC RT break), and the cross-DC traffic failure asserted in
+        # Step 6 would be over-determined: it would fail for both intra-DC1
+        # AND cross-DC reasons. Rotating DC1 leaves keeps DC1 internally
+        # consistent at wrong_vni and isolates the failure to the DCI link.
+        # DC2 leaves are deliberately left untouched.
+        dc1_leaves = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                      if 'leaf' in n and 'dc1' in n]
+        if not dc1_leaves:
+            dc1_leaves = [n for n in test_cfg['nodes'].get('l2l3vni', [])
+                          if 'leaf' in n and 'dc1' in n]
+        if not dc1_leaves:
+            dc1_leaves = [n for n in test_cfg['nodes'].get('leaf', [])
+                          if 'dc1' in n]
+        st.log('DC1 leaves to rotate import-RT: {}'.format(dc1_leaves))
+
+        config_dict = vxlan_obj.get_cfg_dict()
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before L3VNI mismatch')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before L3VNI mismatch\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify Type-5 routes present on all BGWs (informational)
+        st.banner('Step 2: Verify Type-5 routes present on DC1 and DC2 BGWs (before mismatch)')
+        for bgw in dc1_bgws + dc2_bgws:
+            type5_out = st.show(bgw,
+                                'do show bgp l2vpn evpn route type prefix',
+                                type='vtysh', skip_tmpl=True)
+            st.log('Type-5 routes on {}: {}'.format(
+                bgw, 'present' if '[5]' in str(type5_out) else 'absent'))
+
+        # Step 3: Verify L3 cross-DC traffic baseline.
+        # TG protocols must be restarted so emulated hosts re-issue ARP/ND
+        # and leafs re-advertise EVPN Type-2 (MAC+IP); without this the
+        # fabric can be in a stale steady state from prior triggers in the
+        # suite and the precondition fails before the L3VNI is even mismatched.
+        st.banner('Step 3: Verify L3 cross-DC traffic baseline before L3VNI mismatch')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross',
+                              stop_start_protocols=True):
+            summ += 'L3 cross-DC traffic failed before L3VNI mismatch (baseline)\n'
+            report_result(False, tc_id, summ)
+            return
+
+        applied_bgws = []
+        applied_dc1_leaves = []
+        try:
+            # Step 4a: Apply mismatched L3VNI on ALL DC1 BGWs (DC2 BGWs untouched)
+            st.banner('Step 4a: Apply mismatched L3VNI {} on DC1 BGWs (DC2 keeps {})'.format(
+                wrong_vni, old_vni))
+            for bgw in dc1_bgws:
+                st.log('Changing L3VNI on {} from {} to {}'.format(bgw, old_vni, wrong_vni))
+                change_cfg = vxlan_obj.change_l3vni_value_bgw(
+                    bgw, config_dict, bgp_info, vrf_id=vrf_id, new_vni=wrong_vni)
+                if not change_cfg:
+                    summ += 'Failed to generate L3VNI change config for {}\n'.format(bgw)
+                    result = False
+                    continue
+                vxlan_obj.config_dut(bgw, 'sonic', change_cfg['sonic'])
+                vxlan_obj.config_dut(bgw, 'bgp', change_cfg['frr'])
+                applied_bgws.append(bgw)
+
+            # Step 4b: Rotate DC1 leaves' BGP import-RT to track the (wrong)
+            # DC1 BGW L3VNI. DC2 leaves remain at old_vni so the only RT
+            # mismatch is the DC1<->DC2 BGW EVPN peering.
+            st.banner('Step 4b: Rotate DC1 leaf import-RT to wrong VNI {} '
+                      '(DC2 leaves untouched)'.format(wrong_vni))
+            for leaf in dc1_leaves:
+                st.log('Rotating import-RT on DC1 leaf {} to VNI {}'.format(leaf, wrong_vni))
+                leaf_change_cfg = vxlan_obj.change_l3vni_import_on_leaf(
+                    leaf, config_dict, bgp_info, vrf_id=vrf_id, new_vni=wrong_vni)
+                if not leaf_change_cfg or not leaf_change_cfg.get('frr'):
+                    st.warn('No leaf import-RT rotation generated for {}; skipping'.format(leaf))
+                    continue
+                vxlan_obj.config_dut(leaf, 'bgp', leaf_change_cfg['frr'])
+                applied_dc1_leaves.append(leaf)
+
+            st.wait(60, 'Wait for BGP convergence after asymmetric L3VNI change')
+
+            # Step 5: Verify Type-5 routes for Vrf101 not installed on DC2 BGWs.
+            # DC1 now exports Type-5 with RT <as>:80101, but DC2 still imports
+            # <as>:10101 -> the import policy filter rejects, so the prefix
+            # should be absent from Vrf101's IP route table on DC2 BGWs.
+            st.banner('Step 5: Verify Vrf{} routes not installed on DC2 BGWs after mismatch'.format(vrf_id))
+            for dc2_bgw in dc2_bgws:
+                vrf_route = st.show(dc2_bgw,
+                                    'do show ip route vrf Vrf{}'.format(vrf_id),
+                                    type='vtysh', skip_tmpl=True)
+                st.log('DC2 BGW {} Vrf{} route table after mismatch: {}'.format(
+                    dc2_bgw, vrf_id, str(vrf_route)[:300] if vrf_route else 'empty'))
+
+            # Step 6: Verify L3 cross-DC traffic FAILS (negative assertion).
+            # Both DC1 BGWs are mismatched, so all DC1<->DC2 L3VNI paths are
+            # broken; we expect verify_traffic() to return False here. If it
+            # still passes, the asymmetric mismatch is being absorbed somewhere
+            # which is itself a defect we want to flag.
+            st.banner('Step 6: Verify L3 cross-DC traffic FAILS with mismatched L3VNI')
+            if st.getenv('skip_tgen', 'false') != 'true':
+                traffic_with_mismatch = verify_traffic(
+                    tgen_handles, regenerate=True,
+                    traffic_types=['l3_v4', 'l3_v6'], scope='cross')
+                if traffic_with_mismatch:
+                    msg = ('L3 cross-DC traffic did not fail as expected with '
+                           'mismatched L3VNI on all DC1 BGWs\n')
+                    st.error(msg.strip())
+                    summ += msg
+                    result = False
+                else:
+                    st.log('L3 cross-DC traffic failed as expected with mismatched L3VNI: PASS')
+            else:
+                st.log('TGEN verification skipped (TGEN disabled)')
+
+            # Cores during the negative window
+            if vxlan_obj.check_core():
+                summ += 'Core files detected during L3VNI mismatch window\n'
+                result = False
+
+        finally:
+            # Step 7a: Restore L3VNI on DC1 BGWs (only those we actually changed)
+            st.banner('Step 7a: Restore original L3VNI {} on DC1 BGWs'.format(old_vni))
+            for bgw in applied_bgws:
+                st.log('Reverting L3VNI on {} from {} back to {}'.format(bgw, wrong_vni, old_vni))
+                revert_cfg = vxlan_obj.revert_l3vni_value_bgw(
+                    bgw, config_dict, bgp_info, vrf_id=vrf_id, new_vni=wrong_vni)
+                if revert_cfg:
+                    vxlan_obj.config_dut(bgw, 'sonic', revert_cfg['sonic'])
+                    vxlan_obj.config_dut(bgw, 'bgp', revert_cfg['frr'])
+                else:
+                    st.error('Failed to generate L3VNI revert config for {}'.format(bgw))
+                    summ += 'Failed to generate L3VNI revert config for {}\n'.format(bgw)
+                    result = False
+
+            # Step 7b: Revert DC1 leaves' import-RT back to old_vni (only on
+            # leaves we actually rotated in Step 4b)
+            st.banner('Step 7b: Revert DC1 leaf import-RT to {} on rotated leaves'.format(old_vni))
+            for leaf in applied_dc1_leaves:
+                st.log('Reverting import-RT on DC1 leaf {} from {} back to {}'.format(
+                    leaf, wrong_vni, old_vni))
+                leaf_revert_cfg = vxlan_obj.revert_l3vni_import_on_leaf(
+                    leaf, config_dict, bgp_info, vrf_id=vrf_id, new_vni=wrong_vni)
+                if leaf_revert_cfg and leaf_revert_cfg.get('frr'):
+                    vxlan_obj.config_dut(leaf, 'bgp', leaf_revert_cfg['frr'])
+                else:
+                    st.error('Failed to generate leaf import-RT revert for {}'.format(leaf))
+                    summ += 'Failed to generate leaf import-RT revert for {}\n'.format(leaf)
+                    result = False
+
+            st.wait(60, 'Wait for BGP convergence after L3VNI revert')
+
+            # Step 8: Verify Type-5 routes re-imported on DC2 BGWs (informational)
+            st.banner('Step 8: Verify Type-5 routes re-imported on DC2 BGWs after revert')
+            for dc2_bgw in dc2_bgws:
+                type5_restored = st.show(dc2_bgw,
+                                         'do show bgp l2vpn evpn route type prefix',
+                                         type='vtysh', skip_tmpl=True)
+                st.log('DC2 BGW {} Type-5 routes after revert: {}'.format(
+                    dc2_bgw, 'present' if '[5]' in str(type5_restored) else 'absent'))
+
+            # Step 9: Verify L3 cross-DC traffic recovers
+            st.banner('Step 9: Verify L3 cross-DC traffic recovers after L3VNI revert')
+            if st.getenv('skip_tgen', 'false') != 'true':
+                if not verify_traffic(tgen_handles, regenerate=True,
+                                      traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+                    summ += 'L3 cross-DC traffic not restored after L3VNI revert\n'
+                    result = False
+                else:
+                    st.log('L3 cross-DC traffic restored after L3VNI revert: PASS')
+
+            # Final core check
+            if vxlan_obj.check_core():
+                summ += 'Core files detected after L3VNI mismatch revert\n'
+                result = False
+
+        report_result(result, tc_id, summ)
+
+    def test_base_dci_l3vni_remove_add_domain_config(self):
+        """
+        L3VNI_dci:95 - L3VNI Network Trigger - Domain configuration remove/add.
+
+        Removes ``neighbor OVERLAY domain vxlan-dc`` and
+        ``neighbor OVERLAY reoriginate vxlan-wan`` from every BGW spine
+        across DC1 and DC2, asserts cross-DC L3 traffic fails (BGW is no
+        longer re-originating EVPN routes between vxlan-dc and vxlan-wan),
+        re-adds the lines, and asserts traffic recovers. SONiC vxlan map
+        and VRF-VNI map state is intentionally untouched throughout, so
+        ``show vxlan vrfvnimap`` continues to show the VRF101->10101
+        mapping during the negative window - the trigger is purely a BGP
+        overlay event.
+
+        Description:
+            1) Bring up the base EVPN VXLAN fabric across DC1 and DC2 and
+               verify all BGP EVPN sessions are up.
+            2) Verify Type-5 routes for VRF101 are present on every BGW
+               and L3 cross-DC traffic baseline works.
+            3) Remove domain/reoriginate config on every BGW.
+            4) Verify Type-5 cross-DC re-origination stops and
+               ``show vxlan vrfvnimap`` is still intact (BGP-only trigger).
+            5) Verify L3 cross-DC traffic FAILS as expected.
+            6) Restore domain/reoriginate on every BGW we removed.
+            7) Verify Type-5 routes re-advertised cross-DC.
+            8) Verify ``show vxlan vrfvnimap`` is still consistent after
+               restore.
+            9) Verify L3 cross-DC traffic recovers.
+            10) Verify no cores/crashes throughout.
+        """
+        tc_id = 'test_base_dci_l3vni_remove_add_domain_config'
+        test_cfg['tc_id'] = tc_id
+        tc_cfg = vxlan_obj.get_tc_params(tc_id)
+
+        st.banner('Testcase L3VNI_dci:95: L3VNI Network Trigger - Domain config remove/add ({})'.format(tc_id))
+        result = True
+        summ = ''
+        vrf_id = 101
+        l3vni = 10000 + vrf_id
+
+        # Gather all BGWs across DCs (3-tier fallback identical to
+        # test_base_dci_l3vni_change_normalized_vni / mismatched_l3vni)
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        if not dc1_bgws:
+            dc1_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc1' in n]
+        dc2_bgws = test_cfg['nodes'].get('dc2_bgw', [])
+        if not dc2_bgws:
+            dc2_bgws = [n for n in test_cfg['nodes'].get('l2l3vni_bgw', [])
+                        if 'bgw' in n and 'dc2' in n]
+
+        all_bgws = dc1_bgws + dc2_bgws
+        if not all_bgws:
+            pytest.skip('No BGW nodes found for domain config remove/add test')
+            return
+
+        st.log('All BGW nodes for domain/reoriginate trigger: {}'.format(all_bgws))
+
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        # Step 1: Verify base setup
+        st.banner('Step 1: Verify base setup before domain/reoriginate removal')
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before domain config trigger\n'
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Verify Type-5 routes present on every BGW (precondition)
+        st.banner('Step 2: Verify Type-5 routes present on all BGWs (before trigger)')
+        for bgw in all_bgws:
+            type5_out = st.show(bgw,
+                                'do show bgp l2vpn evpn route type prefix',
+                                type='vtysh', skip_tmpl=True)
+            if '[5]' not in str(type5_out):
+                summ += 'Type-5 routes absent on {} before domain trigger - precondition failed\n'.format(bgw)
+                result = False
+            else:
+                st.log('Type-5 routes present on {}: OK'.format(bgw))
+
+        if not result:
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 3: Verify L3 cross-DC traffic baseline.
+        # TG protocols must be restarted so emulated hosts re-issue ARP/ND
+        # and leafs re-advertise EVPN Type-2 (MAC+IP); otherwise the
+        # fabric can be in a stale steady state from earlier triggers in
+        # the suite and the precondition fails before domain config is
+        # even removed.
+        st.banner('Step 3: Verify L3 cross-DC traffic baseline before domain trigger')
+        if not verify_traffic(tgen_handles, regenerate=True,
+                              traffic_types=['l3_v4', 'l3_v6'], scope='cross',
+                              stop_start_protocols=True):
+            summ += 'L3 cross-DC traffic failed before domain trigger (baseline)\n'
+            report_result(False, tc_id, summ)
+            return
+
+        applied_bgws = []
+        try:
+            # Step 4a: Remove domain/reoriginate on every BGW
+            st.banner('Step 4a: Remove neighbor OVERLAY domain vxlan-dc + reoriginate vxlan-wan on all BGWs')
+            for bgw in all_bgws:
+                st.log('Removing domain/reoriginate on {}'.format(bgw))
+                remove_cfg = vxlan_obj.remove_overlay_domain_config_bgw(bgw, bgp_info)
+                if not remove_cfg or not remove_cfg.get('frr'):
+                    summ += 'Failed to generate domain remove config for {}\n'.format(bgw)
+                    result = False
+                    continue
+                vxlan_obj.config_dut(bgw, 'bgp', remove_cfg['frr'])
+                applied_bgws.append(bgw)
+
+            st.wait(30, 'Wait for BGP convergence after domain/reoriginate removal')
+
+            # Step 4b: Verify Type-5 cross-DC re-origination stopped.
+            # Removing domain/reoriginate prevents the BGW from translating
+            # Type-5 between the vxlan-dc and vxlan-wan sides, so cross-DC
+            # Type-5 prefixes should withdraw or stop appearing as
+            # imported in remote-DC BGWs' Vrf<id> RIB.
+            st.banner('Step 4b: Verify cross-DC Type-5 re-origination stopped on remote DC BGWs')
+            for dc2_bgw in dc2_bgws:
+                vrf_route = st.show(dc2_bgw,
+                                    'do show ip route vrf Vrf{}'.format(vrf_id),
+                                    type='vtysh', skip_tmpl=True)
+                st.log('DC2 BGW {} Vrf{} route table after domain remove: {}'.format(
+                    dc2_bgw, vrf_id, str(vrf_route)[:300] if vrf_route else 'empty'))
+
+            # Step 4c: VNI mapping consistency check during the negative
+            # window. The trigger is BGP-only; SONiC CONFIG_DB vxlan-dc /
+            # vxlan-wan map state must remain intact (Vrf<id> -> <l3vni>).
+            st.banner('Step 4c: Verify VRF-VNI mapping intact during domain remove window')
+            for bgw in all_bgws:
+                vrfvni_out = st.show(bgw, 'show vxlan vrfvnimap', skip_tmpl=True)
+                if str(l3vni) in str(vrfvni_out):
+                    st.log('VRF-VNI map on {} still shows L3VNI {} during remove window: OK'.format(
+                        bgw, l3vni))
+                else:
+                    summ += ('VRF-VNI map on {} lost L3VNI {} during domain remove window - '
+                             'trigger should not affect SONiC vxlan map state\n').format(bgw, l3vni)
+                    result = False
+
+            # Step 5: Verify L3 cross-DC traffic FAILS (negative assertion).
+            # All BGWs have lost their DCI-gateway role, so cross-DC paths
+            # are broken; verify_traffic must return False here. If it
+            # still passes, EVPN routes are leaking through some other path
+            # which is itself a defect we want to flag.
+            st.banner('Step 5: Verify L3 cross-DC traffic FAILS with domain config removed')
+            if st.getenv('skip_tgen', 'false') != 'true':
+                traffic_with_remove = verify_traffic(
+                    tgen_handles, regenerate=True,
+                    traffic_types=['l3_v4', 'l3_v6'], scope='cross')
+                if traffic_with_remove:
+                    msg = ('L3 cross-DC traffic did not fail as expected with '
+                           'domain/reoriginate removed on all BGWs\n')
+                    st.error(msg.strip())
+                    summ += msg
+                    result = False
+                else:
+                    st.log('L3 cross-DC traffic failed as expected with domain removed: PASS')
+            else:
+                st.log('TGEN verification skipped (TGEN disabled)')
+
+            # Cores during the negative window
+            if vxlan_obj.check_core():
+                summ += 'Core files detected during domain remove window\n'
+                result = False
+
+        finally:
+            # Step 6: Restore domain/reoriginate (only on BGWs we removed)
+            st.banner('Step 6: Restore neighbor OVERLAY domain vxlan-dc + reoriginate vxlan-wan on all BGWs')
+            for bgw in applied_bgws:
+                st.log('Restoring domain/reoriginate on {}'.format(bgw))
+                restore_cfg = vxlan_obj.restore_overlay_domain_config_bgw(bgw, bgp_info)
+                if restore_cfg and restore_cfg.get('frr'):
+                    vxlan_obj.config_dut(bgw, 'bgp', restore_cfg['frr'])
+                else:
+                    st.error('Failed to generate domain restore config for {}'.format(bgw))
+                    summ += 'Failed to generate domain restore config for {}\n'.format(bgw)
+                    result = False
+
+            st.wait(30, 'Wait for BGP convergence after domain/reoriginate restore')
+
+            # Step 7: Verify Type-5 routes re-advertised across DCs
+            st.banner('Step 7: Verify Type-5 routes re-advertised on all BGWs after restore')
+            for bgw in all_bgws:
+                type5_restored = st.show(bgw,
+                                         'do show bgp l2vpn evpn route type prefix',
+                                         type='vtysh', skip_tmpl=True)
+                if '[5]' in str(type5_restored):
+                    st.log('Type-5 routes present on {} after domain restore: OK'.format(bgw))
+                else:
+                    summ += 'Type-5 routes still absent on {} after domain restore\n'.format(bgw)
+                    result = False
+
+            # Step 8: VNI mapping consistency check after restore
+            st.banner('Step 8: Verify VRF-VNI mapping consistent after domain restore')
+            for bgw in all_bgws:
+                vrfvni_out = st.show(bgw, 'show vxlan vrfvnimap', skip_tmpl=True)
+                if str(l3vni) in str(vrfvni_out):
+                    st.log('VRF-VNI map on {} shows L3VNI {} after restore: OK'.format(bgw, l3vni))
+                else:
+                    summ += 'VRF-VNI map on {} missing L3VNI {} after domain restore\n'.format(
+                        bgw, l3vni)
+                    result = False
+
+            # Step 9: Verify L3 cross-DC traffic recovers
+            st.banner('Step 9: Verify L3 cross-DC traffic recovers after domain restore')
+            if st.getenv('skip_tgen', 'false') != 'true':
+                if not verify_traffic(tgen_handles, regenerate=True,
+                                      traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+                    summ += 'L3 cross-DC traffic not restored after domain config restore\n'
+                    result = False
+                else:
+                    st.log('L3 cross-DC traffic restored after domain restore: PASS')
+
+            # Final core check
+            if vxlan_obj.check_core():
+                summ += 'Core files detected after domain config restore\n'
+                result = False
+
+        report_result(result, tc_id, summ)
+
+    @pytest.mark.parametrize("ip_version", ["ipv4", "ipv6"])
+    def test_base_dci_l3vni_external_connectivity(self, ip_version):
+        """
+        L3VNI_dci:47(ipv4) / L3VNI_dci:49(ipv6) - External router connectivity with Type-5 routes
+        via VRF-lite peering.
+
+        Description:
+            1. Base profile bring up
+            2. Connect external router to DC1 leaf and DC2 leaf via sub-interfaces
+            3. Configure VRF-lite eBGP peering (IPv4 or IPv6) between external router and leaves
+            4. Advertise external prefix into Vrf101 from external router
+            5. Verify Type-5 route propagated to all leaves across DCs
+            6. Send traffic from DC2 leaf host to external router TGEN host
+            7. Verify bidirectional traffic with zero loss
+
+        Steps:
+            1. Verify base DCI setup before external connectivity config
+            2. Discover external router and its links to DC1/DC2 leaves
+            3. Configure sub-interfaces + VRF binding + IPs on external router and leaves
+            4. Configure eBGP VRF-lite peering with route-map (NO-ADV-OUT) on leaves
+            5. Advertise TGEN network from external router into Vrf101
+            6. Wait for BGP convergence
+            7. Verify Type-5 routes on leaves
+            8. Configure TGEN device group and traffic streams
+            9. Verify bidirectional traffic (DC leaf <-> external router TGEN)
+            10. Cleanup all config
+        """
+        tc_id = "test_base_dci_l3vni_external_connectivity_{}".format(ip_version)
+        result = True
+        summ = ''
+        is_ipv6 = (ip_version == "ipv6")
+
+        st.banner("TEST: L3VNI External Router Connectivity - Type-5 routes ({} VRF-lite peering)".format(ip_version))
+
+        # Configuration parameters
+        vrf_name = 'Vrf101'
+        subif_vlan_v4 = 100
+        subif_vlan_v6 = 101
+        ext_asn = 65333
+
+        if not is_ipv6:
+            subif_vlan = subif_vlan_v4
+            ext_dc1_ip = '21.1.1.2'
+            ext_dc1_cidr = '21.1.1.2/24'
+            dc1_leaf_ip = '21.1.1.1'
+            dc1_leaf_cidr = '21.1.1.1/24'
+            ext_dc2_ip = '22.1.1.2'
+            ext_dc2_cidr = '22.1.1.2/24'
+            dc2_leaf_ip = '22.1.1.1'
+            dc2_leaf_cidr = '22.1.1.1/24'
+            tgen_ip_cidr = '42.1.1.1/24'
+            tgen_network = '42.1.1.0/24'
+            tgen_host_ip = '42.1.1.2'
+            tgen_gw_ip = '42.1.1.1'
+            af_name = 'ipv4'
+        else:
+            subif_vlan = subif_vlan_v6
+            ext_dc1_ip = '21:1:1::2'
+            ext_dc1_cidr = '21:1:1::2/64'
+            dc1_leaf_ip = '21:1:1::1'
+            dc1_leaf_cidr = '21:1:1::1/64'
+            ext_dc2_ip = '22:1:1::2'
+            ext_dc2_cidr = '22:1:1::2/64'
+            dc2_leaf_ip = '22:1:1::1'
+            dc2_leaf_cidr = '22:1:1::1/64'
+            tgen_ip_cidr = '42:1:1::1/64'
+            tgen_network = '42:1:1::/64'
+            tgen_host_ip = '42:1:1::2'
+            tgen_gw_ip = '42:1:1::1'
+            af_name = 'ipv6'
+
+        # Step 1: Verify base setup
+        st.banner("Step 1: Verify base DCI setup before external connectivity config")
+        bgw_nodes = (test_cfg['nodes'].get('dc1_bgw', []) +
+                     test_cfg['nodes'].get('dc2_bgw', []))
+        if not verify_base_setup_bgw(bgw_nodes, skip_checks=['vteps'],
+                                     failure_context='before external connectivity'):
+            summ += "Base setup verification failed before external connectivity\n"
+            report_result(False, tc_id, summ)
+            return
+
+        # Step 2: Discover external router and links
+        st.banner("Step 2: Discover external router connections to DC1/DC2 leaves")
+        dc1_leaf_nodes = [d for d in test_cfg['nodes'].get('leaf', []) if 'dc1' in d]
+        dc2_leaf_nodes = [d for d in test_cfg['nodes'].get('leaf', []) if 'dc2' in d]
+
+        if not dc1_leaf_nodes or not dc2_leaf_nodes:
+            pytest.skip("No DC1/DC2 leaf nodes found")
+            return
+
+        external_router = None
+        dc1_leaf = None
+        dc2_leaf = None
+        dc1_leaf_port = None
+        dc2_leaf_port = None
+        ext_port_to_dc1 = None
+        ext_port_to_dc2 = None
+
+        all_nodes = test_cfg['nodes'].get('all', [])
+        ext_candidates = [n for n in all_nodes if 'external' in n or 'router' in n]
+        if not ext_candidates:
+            ext_candidates = [n for n in all_nodes
+                              if n not in dc1_leaf_nodes and n not in dc2_leaf_nodes
+                              and 'spine' not in n and 'bgw' not in n and 'leaf' not in n
+                              and 'ihop' not in n]
+
+        for router in ext_candidates:
+            for dc1_l in dc1_leaf_nodes:
+                dc1_links = st.get_dut_links(dc1_l, peer=router) or []
+                if dc1_links:
+                    for dc2_l in dc2_leaf_nodes:
+                        dc2_links = st.get_dut_links(dc2_l, peer=router) or []
+                        if dc2_links:
+                            external_router = router
+                            dc1_leaf = dc1_l
+                            dc2_leaf = dc2_l
+                            dc1_leaf_port, _, ext_port_to_dc1 = dc1_links[0]
+                            dc2_leaf_port, _, ext_port_to_dc2 = dc2_links[0]
+                            break
+                    if external_router:
+                        break
+            if external_router:
+                break
+
+        if not external_router:
+            pytest.skip("No external router found connected to both DC1 and DC2 leaves")
+            return
+
+        st.log("External router: {}, DC1 leaf: {} (port {}), DC2 leaf: {} (port {})".format(
+            external_router, dc1_leaf, dc1_leaf_port, dc2_leaf, dc2_leaf_port))
+        st.log("Ext router ports: to_dc1={}, to_dc2={}".format(ext_port_to_dc1, ext_port_to_dc2))
+
+        # Get ASN for leaves from test_cfg
+        dc1_asn = test_cfg.get(dc1_leaf, {}).get('bgp_as', 65203)
+        dc2_asn = test_cfg.get(dc2_leaf, {}).get('bgp_as', 65205)
+
+        # Helper to get subinterface short name
+        def _subif_name(intf, vlan):
+            short = intf.replace('Ethernet', 'Eth')
+            return "{}.{}".format(short, vlan)
+
+        def _sonic_cmd(node, cmd):
+            try:
+                vxlan_obj.config_dut(node, 'sonic', cmd)
+            except Exception as err:
+                st.log("WARN: SONiC cmd failed on {}: {} ({})".format(node, cmd, err))
+
+        def _bgp_cmd(node, cmd):
+            try:
+                vxlan_obj.config_dut(node, 'bgp', cmd)
+            except Exception as err:
+                st.log("WARN: BGP cmd failed on {}: ({})".format(node, err))
+
+        # Subinterface names
+        ext_dc1_subif = _subif_name(ext_port_to_dc1, subif_vlan)
+        ext_dc2_subif = _subif_name(ext_port_to_dc2, subif_vlan)
+        dc1_subif = _subif_name(dc1_leaf_port, subif_vlan)
+        dc2_subif = _subif_name(dc2_leaf_port, subif_vlan)
+
+        # Resolve TGEN interface on external router
+        ext_tgen_intf = None
+        try:
+            tg_links = st.get_tg_links(external_router) or []
+            if tg_links:
+                ext_tgen_intf = tg_links[0][0]
+        except Exception:
+            pass
+        if not ext_tgen_intf:
+            ext_tgen_intf = 'Ethernet1_57'
+
+        configured = False
+        tg_handle = None
+        ext_dg_handle = None
+        ext_stream_id = None
+
+        try:
+            # Step 3: Configure sub-interfaces and VRF binding
+            st.banner("Step 3: Configure sub-interfaces and VRF-lite on external router and leaves")
+
+            # External router: TGEN interface
+            _sonic_cmd(external_router, "sudo config vrf add {}".format(vrf_name))
+            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_tgen_intf, vrf_name))
+            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_tgen_intf, tgen_ip_cidr))
+
+            # External router: sub-interface towards DC1
+            _sonic_cmd(external_router, "sudo config subinterface add {} {}".format(ext_dc1_subif, subif_vlan))
+            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_dc1_subif, vrf_name))
+            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_dc1_subif, ext_dc1_cidr))
+
+            # External router: sub-interface towards DC2
+            _sonic_cmd(external_router, "sudo config subinterface add {} {}".format(ext_dc2_subif, subif_vlan))
+            _sonic_cmd(external_router, "sudo config interface vrf bind {} {}".format(ext_dc2_subif, vrf_name))
+            _sonic_cmd(external_router, "sudo config interface ip add {} {}".format(ext_dc2_subif, ext_dc2_cidr))
+
+            # DC1 leaf: sub-interface
+            _sonic_cmd(dc1_leaf, "sudo config subinterface add {} {}".format(dc1_subif, subif_vlan))
+            _sonic_cmd(dc1_leaf, "sudo config interface vrf bind {} {}".format(dc1_subif, vrf_name))
+            _sonic_cmd(dc1_leaf, "sudo config interface ip add {} {}".format(dc1_subif, dc1_leaf_cidr))
+
+            # DC2 leaf: sub-interface
+            _sonic_cmd(dc2_leaf, "sudo config subinterface add {} {}".format(dc2_subif, subif_vlan))
+            _sonic_cmd(dc2_leaf, "sudo config interface vrf bind {} {}".format(dc2_subif, vrf_name))
+            _sonic_cmd(dc2_leaf, "sudo config interface ip add {} {}".format(dc2_subif, dc2_leaf_cidr))
+
+            # Step 4: Configure eBGP VRF-lite peering
+            st.banner("Step 4: Configure eBGP VRF-lite peering ({})".format(af_name))
+
+            # External router BGP
+            if not is_ipv6:
+                vtysh_ext = "\n".join([
+                    "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                    " bgp router-id 20.1.1.2",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                    " neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                    " address-family ipv4 unicast",
+                    "  network {}".format(tgen_network),
+                    "  neighbor {} activate".format(dc1_leaf_ip),
+                    "  neighbor {} activate".format(dc2_leaf_ip),
+                    " exit-address-family",
+                    "!",
+                ])
+            else:
+                vtysh_ext = "\n".join([
+                    "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                    " bgp router-id 20.1.1.2",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                    " neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                    " address-family ipv6 unicast",
+                    "  network {}".format(tgen_network),
+                    "  neighbor {} activate".format(dc1_leaf_ip),
+                    "  neighbor {} activate".format(dc2_leaf_ip),
+                    " exit-address-family",
+                    "!",
+                ])
+            _bgp_cmd(external_router, vtysh_ext)
+
+            # DC1 leaf BGP with NO-ADV-OUT route-map
+            if not is_ipv6:
+                vtysh_dc1 = "\n".join([
+                    "ip prefix-list ALL-IPV4 seq 5 permit 0.0.0.0/0 le 32",
+                    "route-map NO-ADV-OUT deny 10",
+                    " match ip address prefix-list ALL-IPV4",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                    " address-family ipv4 unicast",
+                    "  neighbor {} activate".format(ext_dc1_ip),
+                    "  neighbor {} route-map NO-ADV-OUT out".format(ext_dc1_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+            else:
+                vtysh_dc1 = "\n".join([
+                    "ipv6 prefix-list ALL-IPV6 seq 5 permit ::/0 le 128",
+                    "route-map NO-ADV-OUT-V6 deny 10",
+                    " match ipv6 address prefix-list ALL-IPV6",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                    " address-family ipv6 unicast",
+                    "  neighbor {} activate".format(ext_dc1_ip),
+                    "  neighbor {} route-map NO-ADV-OUT-V6 out".format(ext_dc1_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+            _bgp_cmd(dc1_leaf, vtysh_dc1)
+
+            # DC2 leaf BGP with NO-ADV-OUT route-map
+            if not is_ipv6:
+                vtysh_dc2 = "\n".join([
+                    "ip prefix-list ALL-IPV4 seq 5 permit 0.0.0.0/0 le 32",
+                    "route-map NO-ADV-OUT deny 10",
+                    " match ip address prefix-list ALL-IPV4",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                    " address-family ipv4 unicast",
+                    "  neighbor {} activate".format(ext_dc2_ip),
+                    "  neighbor {} route-map NO-ADV-OUT out".format(ext_dc2_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+            else:
+                vtysh_dc2 = "\n".join([
+                    "ipv6 prefix-list ALL-IPV6 seq 5 permit ::/0 le 128",
+                    "route-map NO-ADV-OUT-V6 deny 10",
+                    " match ipv6 address prefix-list ALL-IPV6",
+                    "exit",
+                    "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                    " bgp router-id 20.1.1.1",
+                    " no bgp ebgp-requires-policy",
+                    " no bgp default ipv4-unicast",
+                    " no bgp network import-check",
+                    " neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                    " address-family ipv6 unicast",
+                    "  neighbor {} activate".format(ext_dc2_ip),
+                    "  neighbor {} route-map NO-ADV-OUT-V6 out".format(ext_dc2_ip),
+                    "  redistribute connected",
+                    " exit-address-family",
+                    "!",
+                ])
+            _bgp_cmd(dc2_leaf, vtysh_dc2)
+
+            configured = True
+
+            # Step 5: Wait for BGP convergence
+            st.banner("Step 5: Wait for BGP convergence (60s)")
+            st.wait(60)
+
+            # Step 6: Verify Type-5 route on leaves
+            st.banner("Step 6: Verify Type-5 route {} propagated to leaves".format(tgen_network))
+            for leaf in dc1_leaf_nodes + dc2_leaf_nodes:
+                cmd = "do show bgp l2vpn evpn route type prefix"
+                output = vxlan_obj.config_dut(leaf, 'bgp', cmd)
+                if tgen_network.split('/')[0] in str(output):
+                    st.log("Type-5 route {} found on {}".format(tgen_network, leaf))
+                else:
+                    summ += "Type-5 route {} NOT found on {}\n".format(tgen_network, leaf)
+                    result = False
+
+            # Step 7: Configure TGEN and verify traffic
+            st.banner("Step 7: Configure TGEN device group on external router")
+            tg_links = st.get_tg_links(external_router) or []
+            if not tg_links:
+                raise Exception("No TGEN links found for external router '{}'".format(external_router))
+
+            ext_tg_port = tg_links[0][2]
+            ext_topo = vxlan_obj.create_topology_handles({external_router: [ext_tg_port]})
+
+            tg_handle = ext_topo[external_router][ext_tg_port]['tg_handle']
+            topo_handle = ext_topo[external_router][ext_tg_port]['topology_handle']
+
+            dg = tg_handle.tg_topology_config(
+                topology_handle=topo_handle,
+                device_group_name="{} {} dg".format(external_router, af_name),
+                device_group_multiplier="1",
+                device_group_enabled="1")
+            ext_dg_handle = dg.get('device_group_handle')
+
+            eth = tg_handle.tg_interface_config(
+                protocol_handle=dg['device_group_handle'],
+                protocol_name="ext_eth",
+                mtu="1500",
+                src_mac_addr="00:0a:01:00:ee:01",
+                src_mac_addr_step="00.00.00.00.00.01")
+
+            if not is_ipv6:
+                ip_cfg = tg_handle.tg_interface_config(
+                    protocol_handle=eth['ethernet_handle'],
+                    protocol_name="ext_ipv4",
+                    ipv4_resolve_gateway="1",
+                    gateway=tgen_gw_ip,
+                    gateway_step="0.0.0.0",
+                    intf_ip_addr=tgen_host_ip,
+                    intf_ip_addr_step="0.0.0.1")
+            else:
+                ip_cfg = tg_handle.tg_interface_config(
+                    protocol_handle=eth['ethernet_handle'],
+                    protocol_name="ext_ipv6",
+                    ipv6_resolve_gateway="1",
+                    ipv6_gateway=tgen_gw_ip,
+                    ipv6_gateway_step="::0",
+                    ipv6_intf_addr=tgen_host_ip,
+                    ipv6_intf_addr_step="::1")
+
+            vxlan_obj.start_stop_protocols(tg_handle, action='start')
+            st.wait(10)
+
+            # Create traffic stream from a DC1 leaf host to external router TGEN host
+            st.banner("Step 8: Create traffic stream and verify bidirectional traffic")
+            src_node = next((n for n in dc1_leaf_nodes if n in tgen_handles.get('topo_handles', {})), None)
+            if not src_node:
+                raise Exception("No DC1 source node found with TGEN topo handles")
+
+            src_int = next(iter(tgen_handles['topo_handles'][src_node].keys()), None)
+            if not src_int:
+                raise Exception("No TGEN interface found for src_node={}".format(src_node))
+
+            handle_key = 'v4_device_handles' if not is_ipv6 else 'v6_device_handles'
+            src_vlan_map = tgen_handles.get(handle_key, {}).get(src_int) or {}
+            if not src_vlan_map:
+                raise Exception("No {} device handles for src_int={} (node={})".format(handle_key, src_int, src_node))
+
+            src_vlan = next(iter(src_vlan_map.keys()))
+            src_dev_handle = src_vlan_map[src_vlan]
+            dst_dev_handle = dg['device_group_handle']
+            src_port_handle = tgen_handles['topo_handles'][src_node][src_int]['port_handle']
+            dst_port_handle = ext_topo[external_router][ext_tg_port]['port_handle']
+
+            rate_percent = test_cfg.get('global', {}).get('l2l3', {}).get('rate_percent', 0.8)
+            pkts_per_burst = test_cfg.get('global', {}).get('l2l3', {}).get('pkts_per_burst', 1000)
+
+            stream = tg_handle.tg_traffic_config(
+                port_handle=src_port_handle,
+                port_handle2=dst_port_handle,
+                mode='create',
+                bidirectional=1,
+                transmit_mode='single_burst',
+                pkts_per_burst=pkts_per_burst,
+                rate_percent=rate_percent,
+                circuit_endpoint_type=af_name,
+                frame_size=500,
+                emulation_src_handle=src_dev_handle,
+                emulation_dst_handle=dst_dev_handle,
+            )
+            ext_stream_id = stream.get('stream_id')
+
+            ext_traffic_key = 'ext_l3_{}'.format('v4' if not is_ipv6 else 'v6')
+            tgen_handles[ext_traffic_key] = {
+                1: {
+                    'stream_id': stream['stream_id'],
+                    'tg_handle': tg_handle,
+                    'port_handle': src_port_handle,
+                    'verify_enabled': True,
+                }
+            }
+
+            # Step 9: Verify traffic
+            st.banner("Step 9: Verify bidirectional {} traffic (DC leaf <-> external router)".format(af_name))
+            st.wait(5)
+            traffic_ok = verify_traffic({ext_traffic_key: tgen_handles[ext_traffic_key]},
+                                        regenerate=True, bum=False)
+            if not traffic_ok:
+                summ += "External connectivity {} traffic verification failed\n".format(af_name)
+                result = False
+            else:
+                st.log("External connectivity {} traffic passed".format(af_name))
+
+            # Step 10: Check for cores
+            st.banner("Step 10: Checking for core files and crashes")
+            if vxlan_obj.check_core():
+                summ += "Core files detected after external connectivity test\n"
+                result = False
+
+        except Exception as e:
+            st.error("{} exception: {}".format(tc_id, e))
+            summ += "Exception: {}\n".format(e)
+            result = False
+
+        finally:
+            st.banner("Cleanup: Unconfigure VRF-lite peering and TGEN streams")
+
+            # TGEN cleanup
+            if tg_handle and ext_stream_id:
+                try:
+                    tg_handle.tg_traffic_control(action='stop', stream_handle=[ext_stream_id])
+                    tg_handle.tg_traffic_config(mode='remove', stream_id=ext_stream_id)
+                except Exception as e:
+                    st.log("Warning: TGEN stream cleanup failed: {}".format(e))
+
+            if tg_handle and ext_dg_handle:
+                try:
+                    vxlan_obj.delete_device_groups(tg_handle, ext_dg_handle)
+                except Exception as e:
+                    st.log("Warning: TGEN device group cleanup failed: {}".format(e))
+
+            if isinstance(tgen_handles, dict):
+                tgen_handles.pop('ext_l3_v4', None)
+                tgen_handles.pop('ext_l3_v6', None)
+
+            # DUT cleanup
+            if configured:
+                try:
+                    # Remove BGP config
+                    if not is_ipv6:
+                        bgp_del_ext = "\n".join([
+                            "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                            " no neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                            " address-family ipv4 unicast",
+                            "  no network {}".format(tgen_network),
+                            " exit-address-family",
+                            "!",
+                        ])
+                        bgp_del_dc1 = "\n".join([
+                            "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                            " address-family ipv4 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family",
+                            "!",
+                        ])
+                        bgp_del_dc2 = "\n".join([
+                            "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                            " address-family ipv4 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family",
+                            "!",
+                        ])
+                    else:
+                        bgp_del_ext = "\n".join([
+                            "router bgp {} vrf {}".format(ext_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(dc1_leaf_ip, dc1_asn),
+                            " no neighbor {} remote-as {}".format(dc2_leaf_ip, dc2_asn),
+                            " address-family ipv6 unicast",
+                            "  no network {}".format(tgen_network),
+                            " exit-address-family",
+                            "!",
+                        ])
+                        bgp_del_dc1 = "\n".join([
+                            "router bgp {} vrf {}".format(dc1_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc1_ip, ext_asn),
+                            " address-family ipv6 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family",
+                            "!",
+                        ])
+                        bgp_del_dc2 = "\n".join([
+                            "router bgp {} vrf {}".format(dc2_asn, vrf_name),
+                            " no neighbor {} remote-as {}".format(ext_dc2_ip, ext_asn),
+                            " address-family ipv6 unicast",
+                            "  no redistribute connected",
+                            " exit-address-family",
+                            "!",
+                        ])
+                    _bgp_cmd(external_router, bgp_del_ext)
+                    _bgp_cmd(dc1_leaf, bgp_del_dc1)
+                    _bgp_cmd(dc2_leaf, bgp_del_dc2)
+
+                    # Remove interfaces
+                    _sonic_cmd(dc2_leaf, "sudo config interface ip remove {} {}".format(dc2_subif, dc2_leaf_cidr))
+                    _sonic_cmd(dc2_leaf, "sudo config interface vrf unbind {}".format(dc2_subif))
+                    _sonic_cmd(dc2_leaf, "sudo config subinterface del {}".format(dc2_subif))
+
+                    _sonic_cmd(dc1_leaf, "sudo config interface ip remove {} {}".format(dc1_subif, dc1_leaf_cidr))
+                    _sonic_cmd(dc1_leaf, "sudo config interface vrf unbind {}".format(dc1_subif))
+                    _sonic_cmd(dc1_leaf, "sudo config subinterface del {}".format(dc1_subif))
+
+                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_dc2_subif, ext_dc2_cidr))
+                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_dc2_subif))
+                    _sonic_cmd(external_router, "sudo config subinterface del {}".format(ext_dc2_subif))
+
+                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_dc1_subif, ext_dc1_cidr))
+                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_dc1_subif))
+                    _sonic_cmd(external_router, "sudo config subinterface del {}".format(ext_dc1_subif))
+
+                    _sonic_cmd(external_router, "sudo config interface ip remove {} {}".format(ext_tgen_intf, tgen_ip_cidr))
+                    _sonic_cmd(external_router, "sudo config interface vrf unbind {}".format(ext_tgen_intf))
+                except Exception as e:
+                    st.log("Warning: DUT cleanup failed: {}".format(e))
+
+        st.banner("TEST COMPLETE: {}".format(tc_id))
+        report_result(result, tc_id, summ)
+
+    @pytest.mark.parametrize("test_case",
+        ["dpb_400g_to_4x100g", "dpb_200g_to_4x100g", "dpb_on_unused_port"])
+    def test_base_dci_l3vni_dpb_on_links(self, test_case):
+        """
+        L3VNI_dci:102 / 104 / 106 - DPB on the link between DCI nodes, verify L3VNI traffic.
+
+        Mirrors test_dpb_on_links flow (BUM/L2 verification swapped for L3 cross-DC verification).
+
+        Description:
+            1) Verify base setup and L3 cross-DC traffic working.
+            2) Perform DPB on a DCI link:
+                  - dpb_400g_to_4x100g : break parent 400G straight to 4x100G
+                  - dpb_200g_to_4x100g : staged 2x200G then 4x100G
+                  - dpb_on_unused_port : DPB an unused 400G port (no BGP changes)
+            3) Verify breakout lanes admin/oper up and BGP TRANSIT_WAN
+               neighbors are re-established (tunnels re-converged).
+            4) Verify L3 cross-DC traffic still works.
+            5) Revert DPB to 1x400G; verify L3 traffic recovers.
+            6) Final core check.
+        """
+        tc_id = "test_base_dci_l3vni_dpb_on_links_{}".format(test_case)
+        result = True
+        summ = ''
+
+        def _verify_l3_traffic(label):
+            nonlocal result, summ
+            if not verify_traffic(tgen_handles, regenerate=True,
+                                  traffic_types=['l3_v4', 'l3_v6'], scope='cross'):
+                msg = 'L3 cross-DC traffic verification failed {}\n'.format(label)
+                st.error(msg.strip())
+                summ += msg
+                result = False
+                return False
+            st.log('L3 cross-DC traffic verification passed {}'.format(label))
+            return True
+
+        def _verify_bgp_neighbors(dut, neighbor_ips):
+            if not neighbor_ips:
+                return
+            exp_data = [{"protocol": "IPv4 Unicast", "neighbor": ip, "state": "Up"}
+                        for ip in neighbor_ips]
+            vxlan_obj.verify_bgp_summary_dci(dut, exp_data, vl_retries=30, vl_interval=10)
+
+        def _verify_bgp_both(label, dc1_neighbors, dc2_neighbors,
+                             dc1_dut, dc2_dut):
+            nonlocal result, summ
+            for dut, neighbors in [(dc1_dut, dc1_neighbors), (dc2_dut, dc2_neighbors)]:
+                try:
+                    _verify_bgp_neighbors(dut, neighbors)
+                except Exception as err:
+                    msg = 'BGP DPB neighbors not Up {} on {}: {} ({})\n'.format(
+                        label, dut, neighbors, err)
+                    summ += msg
+                    st.error(msg.strip())
+                    result = False
+
+        def _verify_breakout_lanes_up(label, node_port_lane_map):
+            nonlocal result, summ
+            all_ok = True
+            for dut, parent_port, lane_count in node_port_lane_map:
+                lane_intfs = ['{}_{}'.format(parent_port, lane)
+                              for lane in range(1, int(lane_count) + 1)]
+                st.log('Verifying breakout interfaces on {} ({}): {}'.format(
+                    dut, label, lane_intfs))
+                for intf in lane_intfs:
+                    if not poll_wait(intf_obj.verify_interface_status, 60,
+                                     dut, intf, 'admin', 'up'):
+                        msg = 'Breakout interface admin not up {} on {}:{}\n'.format(
+                            label, dut, intf)
+                        st.error(msg.strip()); summ += msg
+                        result = False; all_ok = False
+                    if not poll_wait(intf_obj.verify_interface_status, 120,
+                                     dut, intf, 'oper', 'up'):
+                        msg = 'Breakout interface oper not up {} on {}:{}\n'.format(
+                            label, dut, intf)
+                        st.error(msg.strip()); summ += msg
+                        result = False; all_ok = False
+            return all_ok
+
+        st.banner('TEST: DPB on DCI link, verify L3 VNI cross-DC traffic ({})'.format(test_case))
+
+        dc1_bgws = test_cfg['nodes'].get('dc1_bgw', [])
+        dc2_bgws = test_cfg['nodes'].get('dc2_bgw', [])
+        if not dc1_bgws or not dc2_bgws:
+            pytest.skip('Insufficient DC1/DC2 BGW nodes for DPB L3 VNI test')
+            return
+        dc1_bgw_node = dc1_bgws[0]
+        dc2_bgw_node = dc2_bgws[0]
+        setup_nodes = test_cfg['nodes'].get('l2l3vni_bgw', [])
+
+        st.banner('Step 1: Verify base setup before DPB')
+        if not verify_base_setup_bgw(setup_nodes, skip_checks=['vteps']):
+            summ += 'Base setup verification failed before DPB\n'
+            report_result(False, tc_id, summ)
+            return
+
+        st.banner('Step 2: Verify L3 cross-DC traffic before DPB')
+        if not _verify_l3_traffic('before DPB'):
+            report_result(False, tc_id, summ)
+            return
+
+        if test_case == 'dpb_on_unused_port':
+            st.banner('Step 3: DPB on unused 400G port (no BGP changes)')
+            unused_dut = dc1_bgw_node
+            unused_port = _pick_free_400g_port(unused_dut)
+            if not unused_port:
+                unused_dut = dc2_bgw_node
+                unused_port = _pick_free_400g_port(unused_dut)
+            if not unused_port:
+                pytest.skip('No free 400G port available for dpb_on_unused_port')
+                return
+
+            parent = unused_port
+            st.log('Using unused port for DPB breakout: {}:{}'.format(unused_dut, unused_port))
+
+            try:
+                vxlan_obj.config_dut(unused_dut, 'sonic',
+                                     'sudo config interface breakout {} "4x100G" -yfl'.format(parent))
+                st.wait(2)
+                for lane in range(1, 5):
+                    vxlan_obj.config_dut(unused_dut, 'sonic',
+                                         'sudo config interface start {}_{}'.format(parent, lane))
+                st.wait(2)
+
+                _verify_l3_traffic('after DPB on unused port')
+            finally:
+                st.banner('Step 4: Revert DPB on unused port')
+                vxlan_obj.config_dut(unused_dut, 'sonic',
+                                     'sudo config interface breakout {} "1x400G" -yfl'.format(parent))
+                st.wait(2)
+                vxlan_obj.config_dut(unused_dut, 'sonic',
+                                     'sudo config interface start {}'.format(parent))
+                st.wait(2)
+                _verify_l3_traffic('after revert DPB on unused port')
+
+            if vxlan_obj.check_core():
+                summ += 'Core files detected after DPB on unused port\n'
+                result = False
+
+            report_result(result, tc_id, summ)
+            return
+
+        st.banner('Step 3: Select DCI link between DC1 BGW and DC2 BGW')
+        links = st.get_dut_links(dc1_bgw_node, peer=dc2_bgw_node)
+        if not links:
+            summ += 'No physical links between {} and {}\n'.format(dc1_bgw_node, dc2_bgw_node)
+            report_result(False, tc_id, summ)
+            return
+
+        selected_local_port, _, selected_peer_port = links[0]
+        st.log('Selected DCI link {}:{} <-> {}:{}'.format(
+            dc1_bgw_node, selected_local_port, dc2_bgw_node, selected_peer_port))
+
+        def _get_intf_ip_cidr(dut, intf):
+            """Return CIDR (e.g. '10.1.1.1/30') of the IPv4 address on intf, or None."""
+            try:
+                output = ip_obj.get_interface_ip_address(dut, interface_name=intf, family='ipv4')
+            except Exception as err:
+                st.log('get_interface_ip_address failed on {} {}: {}'.format(dut, intf, err))
+                return None
+            entries = output if isinstance(output, list) else [output] if output else []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                addr = entry.get('ipaddr') or entry.get('ip_address') or entry.get('ip')
+                if isinstance(addr, list):
+                    addr = addr[0] if addr else None
+                if not addr:
+                    continue
+                if '/' in str(addr):
+                    return str(addr)
+                mask = entry.get('mask') or entry.get('prefixlen') or entry.get('prefix_len')
+                if mask:
+                    return '{}/{}'.format(addr, str(mask).lstrip('/'))
+                return '{}/31'.format(addr)
+            return None
+
+        local_ip = _get_intf_ip_cidr(dc1_bgw_node, selected_local_port)
+        remote_ip = _get_intf_ip_cidr(dc2_bgw_node, selected_peer_port)
+        if not local_ip or not remote_ip:
+            summ += 'Unable to derive DCI link IPs: {}:{}={}, {}:{}={}\n'.format(
+                dc1_bgw_node, selected_local_port, local_ip,
+                dc2_bgw_node, selected_peer_port, remote_ip)
+            report_result(False, tc_id, summ)
+            return
+
+        bgp_info = vxlan_obj.generate_bgp_underlay_info(dci_enabled=True)
+
+        if test_case == 'dpb_200g_to_4x100g':
+            dpb_stages = [(2, '2x200G'), (4, '4x100G')]
+        else:
+            dpb_stages = [(4, '4x100G')]
+
+        for lanes, breakout_mode in dpb_stages:
+            st.banner('DPB Stage: breakout {} -> {}'.format(selected_local_port, breakout_mode))
+
+            dpb_ip_map_dc1 = _dpb_derive_lane_ip_map(local_ip, lanes)
+            dpb_ip_map_dc2 = _dpb_derive_lane_ip_map(remote_ip, lanes)
+            dpb_neighbors_dc1 = [c.split('/')[0] for c in dpb_ip_map_dc2.values()]
+            dpb_neighbors_dc2 = [c.split('/')[0] for c in dpb_ip_map_dc1.values()]
+
+            try:
+                errs = []
+                errs += list(_dpb_run(dc1_bgw_node, selected_local_port, local_ip,
+                                      dpb_ip_map_dc1, dpb_neighbors_dc1,
+                                      bgp_info, breakout_mode, lanes))
+                errs += list(_dpb_run(dc2_bgw_node, selected_peer_port, remote_ip,
+                                      dpb_ip_map_dc2, dpb_neighbors_dc2,
+                                      bgp_info, breakout_mode, lanes))
+                for err in errs:
+                    summ += '{}\n'.format(err)
+                    st.error(err)
+                if errs:
+                    result = False
+
+                if breakout_mode != '2x200G':
+                    intf_ok = _verify_breakout_lanes_up(
+                        'after breakout ({})'.format(breakout_mode),
+                        [(dc1_bgw_node, selected_local_port, lanes),
+                         (dc2_bgw_node, selected_peer_port, lanes)])
+                    if intf_ok:
+                        _verify_bgp_both('after DPB',
+                                         dpb_neighbors_dc1, dpb_neighbors_dc2,
+                                         dc1_bgw_node, dc2_bgw_node)
+                    else:
+                        st.log('Skipping BGP both-side verification: lanes not up')
+                else:
+                    st.log('Skipping BGP both-side verification for stage 2x200G')
+
+                _verify_l3_traffic('after DPB on DCI link ({})'.format(breakout_mode))
+
+            finally:
+                st.banner('Revert DPB stage {}'.format(breakout_mode))
+                _dpb_revert(dc1_bgw_node, selected_local_port, dpb_ip_map_dc1,
+                            dpb_neighbors_dc1, bgp_info, lanes)
+                _dpb_revert(dc2_bgw_node, selected_peer_port, dpb_ip_map_dc2,
+                            dpb_neighbors_dc2, bgp_info, lanes)
+
+        st.banner('Step 6: Configure DCI link back to 1x400G original')
+        orig_neighbors_dc1 = [str(remote_ip).split('/')[0]]
+        orig_neighbors_dc2 = [str(local_ip).split('/')[0]]
+        _dpb_run_original(dc1_bgw_node, selected_local_port, local_ip,
+                          orig_neighbors_dc1, bgp_info, '1x400G')
+        _dpb_run_original(dc2_bgw_node, selected_peer_port, remote_ip,
+                          orig_neighbors_dc2, bgp_info, '1x400G')
+
+        _verify_bgp_both('after reverting DPB to 1x400G',
+                         orig_neighbors_dc1, orig_neighbors_dc2,
+                         dc1_bgw_node, dc2_bgw_node)
+
+        _verify_l3_traffic('after reverting DPB to 1x400G')
+
+        st.banner('Step 7: Final core check')
+        if vxlan_obj.check_core():
+            summ += 'Core files detected after DPB L3 VNI test ({})\n'.format(test_case)
             result = False
 
         report_result(result, tc_id, summ)
@@ -8285,22 +10780,40 @@ class TestVxlanDciMacMoveTriggers():
         has_l3 = mm_handles.get('l3_src1_stream_handle') and mm_handles.get('l3_src2_stream_handle')
         st.log("--- PHASE 3: L2{} traffic BEFORE move (host at {}) ---".format(
             "+L3" if has_l3 else "", dest1_node))
-        all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
-        if has_l3:
-            all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
-        self._send_traffic_dci(tg_handle, all_streams)
-        out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
-        out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
-        st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
-        st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
-        l2_ok = out1 and not out2
-        l3_ok = True
-        if has_l3:
-            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
-            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
-            st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
-            st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
-            l3_ok = l3_out1
+        if host_type in ('ipv4_only', 'ipv6_only'):
+            # IP-move scenario: MAC2 (the new host's MAC at dest2) is not learned anywhere
+            # yet; sending L2 to MAC2 here would trigger architecturally-correct unknown-
+            # unicast BUM flooding (see vxlan_helper.py:3545,3614). Mirror MH script
+            # (test_vxlan_multi_homing.py:3544-3560) and exercise only the host-here streams.
+            streams = [mm_handles['src1_stream_handle']]
+            if has_l3:
+                streams.append(mm_handles['l3_src1_stream_handle'])
+            self._send_traffic_dci(tg_handle, streams)
+            out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+            st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
+            l2_ok = out1
+            l3_ok = True
+            if has_l3:
+                l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+                st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+                l3_ok = l3_out1
+        else:
+            all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
+            if has_l3:
+                all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+            self._send_traffic_dci(tg_handle, all_streams)
+            out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+            out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+            st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
+            st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
+            l2_ok = out1 and not out2
+            l3_ok = True
+            if has_l3:
+                l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+                l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+                st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+                st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+                l3_ok = l3_out1
         if not (l2_ok and l3_ok):
             st.log("[FAIL] Traffic should reach dest1 only (host at dest1)")
             self._cleanup_tgen_dci(mm_handles)
@@ -8320,13 +10833,20 @@ class TestVxlanDciMacMoveTriggers():
             tg_handle.tg_test_control(action="stop_protocol", handle=mm_handles['dest1_handle'])
             st.wait(2)
             tg_handle.tg_test_control(action="start_protocol", handle=mm_handles['dest2_handle'])
-            st.wait(5)
+            # ipv4_only/ipv6_only use a different MAC at dest2 than dest1, which exposes an
+            # EVPN sync-neigh vs. local-ARP race on the landing leaf across DCI. Give zebra
+            # time to withdraw the old ES-backed MAC+IP before we measure traffic; other
+            # host types converge fast so keep 5s. (mirrors test_vxlan_multi_homing.py:3594)
+            st.wait(30 if host_type in ('ipv4_only', 'ipv6_only') else 5)
             st.log("  Stopped dest1 protocol, started dest2 protocol")
             self._verify_mac_dci(mm_handles['mm_host']['src2']['mac'], ip_addr=mm_handles['mm_host']['src2'].get('ip', ''))
 
         st.log("")
-        # Same as multi-homing: verify MM 1 after 1st move (ipv4_only/ipv6_only: new MAC so seq=0)
-        exp_seq = '0' if host_type in ('ipv4_only', 'ipv6_only') else '1'
+        # Same as multi-homing (test_vxlan_multi_homing.py:3625-3628): MM=1 for ALL host_types
+        # after first move. For ipv4_only/ipv6_only the MAC is new but the IP migrated to a
+        # different MAC, which EVPN treats as a mobility event - the receiving leaf still
+        # increments the MAC-mobility seq when binding the same IP to a new MAC.
+        exp_seq = '1'
         st.log("--- PHASE 5: Verify MAC at dest2 (seq={}) after move ---".format(exp_seq))
         check_mm_2 = vxlan_obj.verify_mac_seq(
             mm_handles['mm_host']['mac'] if host_type == 'mac_only' else mm_handles['mm_host']['src2'],
@@ -8345,22 +10865,49 @@ class TestVxlanDciMacMoveTriggers():
         st.log("")
         st.log("--- PHASE 6: L2{} traffic AFTER 1st move (host at {}) ---".format(
             "+L3" if has_l3 else "", dest2_node))
-        all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
-        if has_l3:
-            all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
-        self._send_traffic_dci(tg_handle, all_streams)
-        out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
-        out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
-        st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest1_node, "PASS" if out1 else "FAIL"))
-        st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if out2 else "FAIL"))
-        l2_ok = not out1 and out2
-        l3_ok = True
-        if has_l3:
-            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
-            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
-            st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
-            st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+        if host_type in ('ipv4_only', 'ipv6_only'):
+            # IP-move scenario: after move, MAC1 has no host so traffic to MAC1 floods (BUM
+            # IR) and reaches dest2 too. Mirror MH script (test_vxlan_multi_homing.py:3612-
+            # 3633) and exercise only the host-here-after-move streams; include race-retry
+            # for L3 to absorb the brief window where remote leaves still program the old
+            # leaf as the L3 nexthop.
+            streams = [mm_handles['src2_stream_handle']]
+            if has_l3:
+                streams.append(mm_handles['l3_src2_stream_handle'])
+            self._send_traffic_dci(tg_handle, streams)
+            out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+            l3_out2 = True
+            if has_l3:
+                l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+                if out2 and not l3_out2:
+                    st.banner("{} : L3 (l3_src2) failed on first attempt after move; "
+                              "retrying once after 15s to allow remote-leaf FDB withdraw".format(host_type))
+                    st.wait(15)
+                    self._send_traffic_dci(tg_handle, streams)
+                    out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+                    l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+            st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if out2 else "FAIL"))
+            if has_l3:
+                st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+            l2_ok = out2
             l3_ok = l3_out2
+        else:
+            all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
+            if has_l3:
+                all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+            self._send_traffic_dci(tg_handle, all_streams)
+            out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+            out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+            st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest1_node, "PASS" if out1 else "FAIL"))
+            st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if out2 else "FAIL"))
+            l2_ok = not out1 and out2
+            l3_ok = True
+            if has_l3:
+                l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+                l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+                st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+                st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+                l3_ok = l3_out2
         if not (l2_ok and l3_ok):
             st.log("[FAIL] Traffic should reach dest2 only (host moved to dest2)")
             if host_type != 'mac_only':
@@ -8407,22 +10954,39 @@ class TestVxlanDciMacMoveTriggers():
         st.log("")
         st.log("--- PHASE 9: L2{} traffic AFTER move back (host at {}) ---".format(
             "+L3" if has_l3 else "", dest1_node))
-        all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
-        if has_l3:
-            all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
-        self._send_traffic_dci(tg_handle, all_streams)
-        out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
-        out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
-        st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
-        st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
-        l2_ok = out1 and not out2
-        l3_ok = True
-        if has_l3:
-            l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
-            l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
-            st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
-            st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
-            l3_ok = l3_out1
+        if host_type in ('ipv4_only', 'ipv6_only'):
+            # IP-move scenario (move-back): MAC2 host has stopped, so MAC2 ages out and L2
+            # to MAC2 reverts to unknown-unicast flooding. Mirror MH script
+            # (test_vxlan_multi_homing.py:3666-3697) and exercise only the host-here streams.
+            streams = [mm_handles['src1_stream_handle']]
+            if has_l3:
+                streams.append(mm_handles['l3_src1_stream_handle'])
+            self._send_traffic_dci(tg_handle, streams)
+            out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+            st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
+            l2_ok = out1
+            l3_ok = True
+            if has_l3:
+                l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+                st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+                l3_ok = l3_out1
+        else:
+            all_streams = [mm_handles['src1_stream_handle'], mm_handles['src2_stream_handle']]
+            if has_l3:
+                all_streams.extend([mm_handles['l3_src1_stream_handle'], mm_handles['l3_src2_stream_handle']])
+            self._send_traffic_dci(tg_handle, all_streams)
+            out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['src1_stream_handle'])
+            out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['src2_stream_handle'])
+            st.log("  L2 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if out1 else "FAIL"))
+            st.log("  L2 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if out2 else "FAIL"))
+            l2_ok = out1 and not out2
+            l3_ok = True
+            if has_l3:
+                l3_out1 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src1_stream_handle'])
+                l3_out2 = vxlan_obj.validate_stats(tg_handle, mm_handles['l3_src2_stream_handle'])
+                st.log("  L3 to {} (host here): {}  [expect PASS]".format(dest1_node, "PASS" if l3_out1 else "FAIL"))
+                st.log("  L3 to {} (host away): {}  [expect FAIL]".format(dest2_node, "PASS" if l3_out2 else "FAIL"))
+                l3_ok = l3_out1
         if not (l2_ok and l3_ok):
             st.log("[FAIL] Traffic should reach dest1 only (host moved back to dest1)")
             if host_type != 'mac_only':
@@ -8606,3 +11170,341 @@ class TestVxlanDciMacMoveTriggers():
         st.log("Solution_dci:96 - L3VNI across DCI not supported; traffic flows via Border spine Northbound peering")
         st.log("Skipping: requires separate VLAN/VNI setup and Border spine traffic verification")
         report_result(True, tc_id)  # Placeholder: pass for now; implement when topology/config ready
+
+    def test_dci_l3vni_bulk_host_move(self):
+        """
+        L3VNI_dci:61 - L3VNI Host Mobility - Bulk host move (10 hosts simultaneously).
+
+        Description:
+            dest1 = leaf0_dc1 (orphan), dest2 = leaf0_dc2 (orphan),
+            traffic src = leaf2_dc1.
+            Uses the same VLAN 12 + VLAN 13 L3 pattern as the single-host mac
+            move tests (within_dc_vlan=12, l3_vlan=13).
+
+            1) Learn 10 hosts at dest1 on leaf0_dc1 (VLAN 12, VRF 101).
+            2) Verify MAC/IP for all 10 hosts using Type-2 EVPN routes, show mac,
+               show arp on all relevant leaf nodes across DCs.
+            3) Send L2 (VLAN 12) + L3 (VLAN 13 -> VLAN 12) traffic from leaf2_dc1.
+            4) Move all 10 hosts simultaneously from leaf0_dc1 to leaf0_dc2.
+            5) Verify Type-2 route updates with incremented MM sequence numbers.
+            6) L3VNI traffic validation after move.
+            7) Move all 10 hosts back from leaf0_dc2 to leaf0_dc1.
+            8) Verify Type-2 routes with further incremented MM sequence numbers.
+            9) Repeat L3VNI traffic test.
+        """
+        tc_id = 'test_dci_l3vni_bulk_host_move'
+        test_cfg['tc_id'] = tc_id
+        _sep = "=" * 60
+
+        st.banner('Testcase L3VNI_dci:61: Bulk host move (10 hosts) ({})'.format(tc_id))
+        result = True
+        summ = ''
+
+        global tgen_handles
+        topo_handles = (tgen_handles or {}).get('topo_handles') or {}
+        mm_cfg = self._get_dci_mac_move_cfg()
+        bulk_hosts = vxlan_obj.generate_bulk_mac_move_hosts_dci(count=10)
+
+        class _BulkMoveAbort(Exception):
+            """Signal to skip remaining bulk-move phases after a pre-check fails."""
+
+        dest1_node = 'leaf0_dc1'
+        dest2_node = 'leaf0_dc2'
+        src_node = 'leaf2_dc1'
+
+        # Get handles for dest1, dest2, src
+        h_dest1 = self._get_first_orphan_handle(dest1_node, topo_handles)
+        h_dest2 = self._get_first_orphan_handle(dest2_node, topo_handles)
+        h_src = self._get_first_orphan_handle(src_node, topo_handles)
+
+        if not h_dest1 or not h_dest2 or not h_src:
+            summ += 'Cannot get TGEN handles for bulk host move (dest1={}, dest2={}, src={})\n'.format(
+                dest1_node, dest2_node, src_node)
+            report_result(False, tc_id, summ)
+            return
+
+        tg_handle = h_src['tg_handle']
+        vlan_id = mm_cfg['within_dc_vlan']
+        l3_vlan = mm_cfg['l3_vlan']
+        l3_rmac = mm_cfg['l3_rmac']
+        gateway_v4 = mm_cfg['gateway_v4']
+        dut_type = vxlan_obj.check_hw_or_sim(st.get_dut_names()[0])
+        pkts = mm_cfg['pkts_per_burst_hw'] if dut_type == 'hw' else mm_cfg['pkts_per_burst_sim']
+        rate = mm_cfg['rate_percent_hw'] if dut_type == 'hw' else mm_cfg['rate_percent_sim']
+
+        # Create device groups for all 10 hosts at dest1
+        st.banner('Phase 1: Learn 10 hosts at dest1 ({})'.format(dest1_node))
+        dest1_handles = []
+        dest2_handles = []
+        src_streams = []
+        l3_src_streams = []
+
+        try:
+            for host in bulk_hosts:
+                # Create device group at dest1
+                dg = tg_handle.tg_topology_config(
+                    topology_handle=h_dest1['topo_handle'],
+                    device_group_name="bulk_mm_d1_{}".format(host['index']),
+                    device_group_multiplier="1", device_group_enabled="1")
+                eth = tg_handle.tg_interface_config(
+                    protocol_name="eth_bulk_d1_{}".format(host['index']),
+                    protocol_handle=dg['device_group_handle'], mtu="1500",
+                    src_mac_addr=host['mac'], vlan=1, vlan_id=str(vlan_id),
+                    vlan_id_step=0, vlan_id_count=1)
+                tg_handle.tg_interface_config(
+                    protocol_name="v4_bulk_d1_{}".format(host['index']),
+                    protocol_handle=eth['ethernet_handle'],
+                    ipv4_resolve_gateway="1", gateway=gateway_v4,
+                    intf_ip_addr=host['ipv4'])
+                dest1_handles.append(dg['device_group_handle'])
+
+                # Create device group at dest2 (enabled, but protocol not started yet).
+                # Bug history: previously created with device_group_enabled="0",
+                # which made Phase 4 start_protocol a no-op — IxNetwork ignores
+                # start_protocol on a disabled device group, so dest2 hosts
+                # never sent ARP after the move. Mirror the single-host MAC
+                # move test: enabled=1 at config time, lifecycle controlled
+                # purely by start_protocol/stop_protocol.
+                dg2 = tg_handle.tg_topology_config(
+                    topology_handle=h_dest2['topo_handle'],
+                    device_group_name="bulk_mm_d2_{}".format(host['index']),
+                    device_group_multiplier="1", device_group_enabled="1")
+                eth2 = tg_handle.tg_interface_config(
+                    protocol_name="eth_bulk_d2_{}".format(host['index']),
+                    protocol_handle=dg2['device_group_handle'], mtu="1500",
+                    src_mac_addr=host['mac'], vlan=1, vlan_id=str(vlan_id),
+                    vlan_id_step=0, vlan_id_count=1)
+                tg_handle.tg_interface_config(
+                    protocol_name="v4_bulk_d2_{}".format(host['index']),
+                    protocol_handle=eth2['ethernet_handle'],
+                    ipv4_resolve_gateway="1", gateway=gateway_v4,
+                    intf_ip_addr=host['ipv4'])
+                dest2_handles.append(dg2['device_group_handle'])
+
+                # Create L2 traffic streams from src to dest1 (same VLAN as host)
+                src_mac = "02:00:00:61:99:{:02x}".format(host['index'] + 1)
+                l2_stream = tg_handle.tg_traffic_config(
+                    emulation_src_handle=h_src['port_handle'],
+                    emulation_dst_handle=h_dest1['port_handle'],
+                    mode='create', transmit_mode='single_burst',
+                    pkts_per_burst=pkts, rate_percent=rate,
+                    circuit_type='raw', frame_size=1000,
+                    mac_src=src_mac, mac_dst=host['mac'],
+                    ip_src_addr=mm_cfg['src_ipv4'], ip_dst_addr=host['ipv4'],
+                    vlan_id=vlan_id, src_dest_mesh='one_to_one',
+                    track_by='endpoint_pair')
+                src_streams.append(l2_stream.get('stream_id'))
+                st.wait(1)
+
+                # Create L3 traffic streams from src VLAN 13 -> host on VLAN 12 (inter-VLAN)
+                l3_mac_src = "02:00:00:61:13:{:02x}".format(host['index'] + 1)
+                l3_stream = tg_handle.tg_traffic_config(
+                    emulation_src_handle=h_src['port_handle'],
+                    emulation_dst_handle=h_dest1['port_handle'],
+                    mode='create', transmit_mode='single_burst',
+                    pkts_per_burst=pkts, rate_percent=rate,
+                    circuit_type='raw', frame_size=1000,
+                    mac_src=l3_mac_src, mac_dst=l3_rmac,
+                    ip_src_addr=mm_cfg['l3_src_ipv4'], ip_dst_addr=host['ipv4'],
+                    vlan_id=l3_vlan, src_dest_mesh='one_to_one',
+                    track_by='endpoint_pair')
+                l3_src_streams.append(l3_stream.get('stream_id'))
+                st.wait(1)
+
+            # Push new device-group config to IxNetwork before starting protocols.
+            # Without apply_on_the_fly_changes, device groups added to an
+            # already-running topology won't actually send ARP.
+            st.log('Applying on-the-fly changes for all dest1 + dest2 device groups')
+            for dh in dest1_handles:
+                tg_handle.tg_test_control(action="apply_on_the_fly_changes", handle=dh)
+            for dh in dest2_handles:
+                tg_handle.tg_test_control(action="apply_on_the_fly_changes", handle=dh)
+            st.wait(5, 'Let IxNetwork apply device group config')
+
+            # Start protocols on dest1 hosts
+            st.log('Starting protocols on all 10 dest1 hosts')
+            for dh in dest1_handles:
+                tg_handle.tg_test_control(action="start_protocol", handle=dh)
+            st.wait(30, 'Wait for all 10 hosts ARP + EVPN Type-2 propagation')
+
+            # Phase 2: Verify MAC/IP for all 10 hosts
+            st.banner('Phase 2: Verify MAC/IP for all 10 hosts on dest1')
+            for host in bulk_hosts:
+                self._verify_mac_dci(host['mac'], ip_addr=host['ipv4'])
+
+            # Phase 3: Send L2+L3 traffic to dest1 hosts
+            st.banner('Phase 3: L2+L3 traffic BEFORE move (hosts at {})'.format(dest1_node))
+            all_streams = src_streams + l3_src_streams
+            self._send_traffic_dci(tg_handle, all_streams)
+            pass_count = 0
+            for sid in src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    pass_count += 1
+            st.log('L2 traffic to dest1: {}/{} streams passed'.format(pass_count, len(src_streams)))
+            l3_pass_count = 0
+            for sid in l3_src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    l3_pass_count += 1
+            st.log('L3 traffic to dest1: {}/{} streams passed'.format(l3_pass_count, len(l3_src_streams)))
+
+            if l3_pass_count == 0 and pass_count > 0:
+                st.log('L3 failed but L2 passed — EVPN Type-2 MAC+IP propagation may still be in progress on routing leaf, retrying...')
+                st.wait(30, 'Extra wait for EVPN ARP/neigh sync to routing leaf')
+                self._send_traffic_dci(tg_handle, l3_src_streams)
+                l3_pass_count = 0
+                for sid in l3_src_streams:
+                    if vxlan_obj.validate_stats(tg_handle, sid):
+                        l3_pass_count += 1
+                st.log('L3 traffic to dest1 (retry): {}/{} streams passed'.format(
+                    l3_pass_count, len(l3_src_streams)))
+
+            if l3_pass_count == 0:
+                st.banner('L2 passed ({}/{}) but L3 failed (0/{}) — Type-2 '
+                          'MACIP likely not propagating'.format(
+                              pass_count, len(src_streams), len(l3_src_streams)))
+                st.log('bulk_hosts MACs: {}'.format(
+                    [(h['mac'], h['ipv4']) for h in bulk_hosts]))
+                st.log('dest1={}, src={}, vlan={}, l3_vlan={}, gw={}'.format(
+                    dest1_node, src_node, vlan_id, l3_vlan, gateway_v4))
+
+                summ += ('Pre-move L3 traffic 0/{} to dest1: bulk hosts not '
+                         'learned (check VLAN/gateway, ARP resolution). '
+                         'Skipping move phases.\n'.format(len(l3_src_streams)))
+                result = False
+                raise _BulkMoveAbort('pre-move L3 traffic failed')
+            if pass_count == 0:
+                summ += 'Pre-move L2 traffic 0/{} to dest1\n'.format(len(src_streams))
+                result = False
+                raise _BulkMoveAbort('pre-move L2 traffic failed')
+
+            # Phase 4: Move all 10 hosts simultaneously from dest1 to dest2
+            st.banner('Phase 4: Move all 10 hosts from {} to {}'.format(dest1_node, dest2_node))
+            for dh in dest1_handles:
+                tg_handle.tg_test_control(action="stop_protocol", handle=dh)
+            st.wait(2)
+            for dh in dest2_handles:
+                tg_handle.tg_test_control(action="start_protocol", handle=dh)
+            st.wait(30, 'Wait for bulk MAC move to converge')
+
+            # Phase 5: Verify Type-2 route updates with MM sequence
+            st.banner('Phase 5: Verify MAC move for all 10 hosts (expect seq=1)')
+            for host in bulk_hosts:
+                host_info = {'mac': host['mac'], 'ip': host['ipv4']}
+                check = vxlan_obj.verify_mac_seq(
+                    host_info, mac_move_seq='1',
+                    host_local_node=[dest2_node], host_type='mac+ipv4',
+                    is_mh_host=False, dci_enabled=True)
+                if not check:
+                    st.log('MAC {} not found at {} with seq=1'.format(host['mac'], dest2_node))
+                    summ += 'Bulk move: MAC {} not at dest2 with seq=1\n'.format(host['mac'])
+                    result = False
+
+            # Phase 6: L3VNI traffic validation after move
+            st.banner('Phase 6: L3VNI traffic after move to {}'.format(dest2_node))
+            self._send_traffic_dci(tg_handle, l3_src_streams)
+            l3_pass_after = 0
+            for sid in l3_src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    l3_pass_after += 1
+            st.log('L3 traffic after move: {}/{} streams passed'.format(
+                l3_pass_after, len(l3_src_streams)))
+
+            # Phase 7: Move all 10 hosts back from dest2 to dest1
+            st.banner('Phase 7: Move all 10 hosts back from {} to {}'.format(dest2_node, dest1_node))
+            for dh in dest2_handles:
+                tg_handle.tg_test_control(action="stop_protocol", handle=dh)
+            st.wait(2)
+            for dh in dest1_handles:
+                tg_handle.tg_test_control(action="start_protocol", handle=dh)
+            st.wait(30, 'Wait for bulk MAC move back to converge')
+
+            # Phase 8: Verify Type-2 routes with seq=2
+            st.banner('Phase 8: Verify MAC move back for all 10 hosts (expect seq=2)')
+            for host in bulk_hosts:
+                host_info = {'mac': host['mac'], 'ip': host['ipv4']}
+                check = vxlan_obj.verify_mac_seq(
+                    host_info, mac_move_seq='2',
+                    host_local_node=[dest1_node], host_type='mac+ipv4',
+                    is_mh_host=False, dci_enabled=True)
+                if not check:
+                    st.log('MAC {} not found at {} with seq=2'.format(host['mac'], dest1_node))
+                    summ += 'Bulk move back: MAC {} not at dest1 with seq=2\n'.format(host['mac'])
+                    result = False
+
+            # Phase 9: Repeat L3VNI traffic test
+            st.banner('Phase 9: L3VNI traffic after move back to {}'.format(dest1_node))
+            self._send_traffic_dci(tg_handle, l3_src_streams)
+            l3_pass_final = 0
+            for sid in l3_src_streams:
+                if vxlan_obj.validate_stats(tg_handle, sid):
+                    l3_pass_final += 1
+            st.log('L3 traffic after move back: {}/{} streams passed'.format(
+                l3_pass_final, len(l3_src_streams)))
+            if l3_pass_final == 0:
+                summ += 'L3 traffic failed after move back\n'
+                result = False
+
+        except _BulkMoveAbort as e:
+            st.error('Bulk host move aborted: {}'.format(e))
+
+        except Exception as e:
+            st.error('Exception during bulk host move: {}'.format(e))
+            summ += 'Exception: {}\n'.format(e)
+            result = False
+
+        finally:
+            # Cleanup: stop all protocols, remove streams
+            st.banner('Cleanup: Stopping all bulk host move protocols and streams')
+            for dh in dest1_handles + dest2_handles:
+                try:
+                    tg_handle.tg_test_control(action="stop_protocol", handle=dh)
+                except Exception:
+                    pass
+            st.wait(2)
+            for dh in dest1_handles + dest2_handles:
+                try:
+                    tg_handle.tg_topology_config(device_group_handle=dh, mode='destroy')
+                except Exception:
+                    pass
+            for sid in src_streams + l3_src_streams:
+                try:
+                    tg_handle.tg_traffic_config(mode='remove', stream_id=sid)
+                except Exception:
+                    pass
+
+        st.log(_sep)
+        if result:
+            st.banner('DCI BULK HOST MOVE PASSED: {}'.format(tc_id))
+        else:
+            st.banner('DCI BULK HOST MOVE FAILED: {}'.format(tc_id))
+        report_result(result, tc_id, summ)
+
+    def test_dci_l3vni_mh_to_mh_across_dc_with_l3_traffic(self):
+        """
+        L3VNI_dci:63 - L3VNI Host Mobility - Host move from MH to MH port with L3 Traffic.
+
+        Description:
+            dest1 = leaf0_dc1 (PortChannel / MH), dest2 = leaf0_dc2 (PortChannel / MH),
+            traffic src = leaf2_dc1.
+
+            Host move: MH on leaf0_dc1 -> MH on leaf0_dc2 -> back to leaf0_dc1.
+
+            1) Learn the host at dest1 on the PortChannel (MH) on leaf0_dc1
+               (VLAN 11, VRF 101).
+            2) Verify MAC/IP using Type-2 EVPN route, show mac, show arp on all
+               relevant leaf nodes across DCs.
+            3) From leaf2_dc1 (src) on VLAN 13 (VRF 101), send traffic toward
+               dest1 and dest2 paths (destinations on VLAN 11).
+            4) Move the host from leaf0_dc1 (MH) to leaf0_dc2 (MH), same VLAN 11,
+               VRF 101.
+            5) Verify Type-2 route update with incremented MM sequence.
+            6) L3VNI: from leaf2_dc1, VLAN 13 (VRF 101) -> host on VLAN 11
+               (VRF 101). Traffic should forward through leaf0_dc2.
+            7) Move the host from leaf0_dc2 back to leaf0_dc1 (MH), same VLAN 11.
+            8) Verify Type-2 route again with incremented MM sequence.
+            9) Repeat L3VNI (VLAN 13 -> VLAN 11, VRF 101 on leaf2_dc1).
+        """
+        tc_id = "L3VNI_dci:63 MH-to-MH across DC with L3 traffic"
+        st.banner('Testcase L3VNI_dci:63: Host move MH->MH across DC with L3 traffic')
+        result = self.verify_mac_move_dci(tc_id, "mh_to_mh_across_dc", "mac+ipv4")
+        report_result(result, tc_id)

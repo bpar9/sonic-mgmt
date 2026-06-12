@@ -41,7 +41,7 @@ def setup_env(duthost):
 
     # Restore default dns
     config_reload_minigraph_with_rendered_golden_config_override(
-        duthost, safe_reload=True, check_intf_up_ports=True
+        duthost, safe_reload=True, check_intf_up_ports=True, wait_for_bgp=True
     )
 
     yield

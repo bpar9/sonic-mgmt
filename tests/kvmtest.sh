@@ -148,6 +148,7 @@ test_t0() {
       tacacs/test_ro_disk.py \
       tacacs/test_ro_user.py \
       tacacs/test_rw_user.py \
+      klish_aaa/test_klish_aaa.py \
       telemetry/test_telemetry.py \
       test_features.py \
       test_interfaces.py \
